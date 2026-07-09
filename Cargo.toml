@@ -1,0 +1,28 @@
+[package]
+name = "rust-crate-template"
+version = "0.1.0"
+description = "A template for creating new Rust crates"
+authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
+repository = "https://github.com/nyurik/rust-crate-template"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+keywords = ["template"]
+categories = ["development-tools"]
+rust-version = "1.71"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[lints.clippy]
+# Restrictions
+panic_in_result_fn = "warn"
+todo = "warn"
+unwrap_used = "warn"
+# Pedantics without being too noisy
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
