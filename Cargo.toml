@@ -1,9 +1,9 @@
 [package]
-name = "rust-crate-template"
+name = "map-tile-toolkit"
 version = "0.1.0"
 description = "A template for creating new Rust crates"
 authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
-repository = "https://github.com/nyurik/rust-crate-template"
+repository = "https://github.com/nyurik/map-tile-toolkit"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["template"]

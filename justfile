@@ -1,6 +1,6 @@
 #!/usr/bin/env just --justfile
 
-main_crate := 'rust-crate-template'
+main_crate := 'map-tile-toolkit'
 # How to call the current just executable. Note that just_executable() may have `\` in Windows paths, so we need to quote it.
 just := quote(just_executable())
 # cargo-binstall needs a workaround due to caching when used in CI
