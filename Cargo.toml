@@ -26,6 +26,10 @@ wkt = "0.14"
 name = "clipping"
 harness = false
 
+# Keep debug symbols in benchmark builds so `just flamegraph` produces readable stacks.
+[profile.bench]
+debug = true
+
 [lints.rust]
 unsafe_code = "forbid"
 unused_qualifications = "warn"

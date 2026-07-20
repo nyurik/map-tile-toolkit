@@ -86,6 +86,23 @@ env-info:
     @echo "CARGO_BUILD_WARNINGS='$CARGO_BUILD_WARNINGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
 
+# Flamegraph clipping benchmarks matching `filter` (needs Linux perf + cargo-flamegraph)
+flamegraph filter secs='10':  (cargo-install 'cargo-flamegraph' 'flamegraph')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
+    # Example: `just flamegraph slice_all_tiles/polyline/stripe`
+    mkdir -p target/flamegraphs
+    out="target/flamegraphs/$(echo '{{filter}}' | tr '/ :' '___').svg"
+    cargo flamegraph --bench clipping --output "$out" -- --profile-time {{secs}} '{{filter}}'
+    echo "Wrote $out"
+
+# Generate one flamegraph per geometry type for the "slice into all tiles" path.
+flamegraph-all secs='10':
+    {{just}} flamegraph 'slice_all_tiles/polygon/stripe' {{secs}}
+    {{just}} flamegraph 'slice_all_tiles/polygon_with_holes/stripe' {{secs}}
+    {{just}} flamegraph 'slice_all_tiles/polyline/stripe' {{secs}}
+
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
     #!/usr/bin/env bash
