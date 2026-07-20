@@ -19,7 +19,6 @@ thiserror = "2"
 approx = "0.5"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
 insta = "1"
-test_each_file = "0.3"
 wkt = "0.14"
 
 [lints.rust]

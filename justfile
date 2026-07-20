@@ -18,6 +18,10 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
+# Run integration tests and save its output as the new expected output
+bless *args:  (cargo-install 'cargo-insta')
+    cargo insta test --accept --include-ignored --unreferenced=delete --all-features {{args}}
+
 # Build the project
 build:
     cargo build --workspace --all-features --all-targets

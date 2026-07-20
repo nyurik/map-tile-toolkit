@@ -13,6 +13,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::fs::read_to_string;
 use std::path::Path;
 
 use geo::{AffineOps, AffineTransform, MapCoords, Relate};
@@ -34,7 +35,9 @@ pub const SIZE: f64 = 256.0;
 
 /// Turn a flat `[x0, y0, x1, y1, …]` list into a coordinate vector.
 pub fn coords(flat: &[f64]) -> Vec<Coord<f64>> {
-    flat.chunks_exact(2).map(|c| Coord { x: c[0], y: c[1] }).collect()
+    flat.chunks_exact(2)
+        .map(|c| Coord { x: c[0], y: c[1] })
+        .collect()
 }
 
 pub fn line_string(flat: &[f64]) -> LineString<f64> {
@@ -54,7 +57,9 @@ pub fn new_point(x: f64, y: f64) -> Geometry<f64> {
 }
 
 pub fn new_multi_point(points: &[(f64, f64)]) -> Geometry<f64> {
-    Geometry::MultiPoint(MultiPoint(points.iter().map(|&(x, y)| Point::new(x, y)).collect()))
+    Geometry::MultiPoint(MultiPoint(
+        points.iter().map(|&(x, y)| Point::new(x, y)).collect(),
+    ))
 }
 
 /// CCW ring for a rectangle, matching planetiler's `rectangleCoordList`:
@@ -70,7 +75,10 @@ pub fn rectangle_coord_list_sq(min: f64, max: f64) -> LineString<f64> {
 }
 
 pub fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Geometry<f64> {
-    Geometry::Polygon(Polygon::new(rectangle_coord_list(min_x, min_y, max_x, max_y), vec![]))
+    Geometry::Polygon(Polygon::new(
+        rectangle_coord_list(min_x, min_y, max_x, max_y),
+        vec![],
+    ))
 }
 
 pub fn rectangle_sq(min: f64, max: f64) -> Geometry<f64> {
@@ -185,9 +193,10 @@ pub fn rotate_tile(geom: &Geometry<f64>, degrees: i32) -> Geometry<f64> {
 
 /// Round every ordinate to `1/delta` precision (planetiler `round`, default `delta = 1e5`).
 pub fn round(geom: &Geometry<f64>, delta: f64) -> Geometry<f64> {
+    // `+ 0.0` normalizes `-0.0` to `0.0` so rounded output matches planetiler's WKT.
     geom.map_coords(|c| Coord {
-        x: (c.x * delta).round() / delta,
-        y: (c.y * delta).round() / delta,
+        x: (c.x * delta).round() / delta + 0.0,
+        y: (c.y * delta).round() / delta + 0.0,
     })
 }
 
@@ -252,8 +261,11 @@ pub fn assert_tiles(
                 .iter()
                 .position(|g| round_default(g).relate(&wr).is_equal_topo())
                 .unwrap_or_else(|| {
-                    panic!("no match for {} at {tile:?} among {:?}", wr.wkt_string(),
-                        remaining.iter().map(|g| g.wkt_string()).collect::<Vec<_>>())
+                    panic!(
+                        "no match for {} at {tile:?} among {:?}",
+                        wr.wkt_string(),
+                        remaining.iter().map(|g| g.wkt_string()).collect::<Vec<_>>()
+                    )
                 });
             remaining.swap_remove(pos);
         }
@@ -297,7 +309,7 @@ fn validate_polygon(p: &Polygon<f64>) {
 
 /// Parse a `.wkt` fixture into a geometry.
 pub fn load_wkt(path: impl AsRef<Path>) -> Geometry<f64> {
-    let text = std::fs::read_to_string(path).expect("read wkt fixture");
+    let text = read_to_string(path).expect("read wkt fixture");
     Geometry::try_from_wkt_str(text.trim()).expect("parse wkt fixture")
 }
 
@@ -339,16 +351,24 @@ pub fn render_with<F: Fn(u8) -> ForZoom>(
     let mut out: BTreeMap<TileId, Vec<Geometry<f64>>> = BTreeMap::new();
     for z in min_zoom..=max_zoom {
         let scale = f64::from(1u32 << z);
-        let scaled = world.map_coords(|c| Coord { x: c.x * scale, y: c.y * scale });
+        let scaled = world.map_coords(|c| Coord {
+            x: c.x * scale,
+            y: c.y * scale,
+        });
         let extents = extents_for(z);
         let tiled = slice_scaled(&scaled, buffer, z, &extents);
         for (tile, groups) in tiled.tile_data() {
-            out.entry(*tile).or_default().push(reassemble(groups, geom_kind(&scaled)));
+            out.entry(*tile)
+                .or_default()
+                .push(reassemble(groups, geom_kind(&scaled)));
         }
         for tile in tiled.filled_tiles() {
             out.entry(tile)
                 .or_default()
-                .push(Geometry::Polygon(Polygon::new(tile_fill(buffer * SIZE), vec![])));
+                .push(Geometry::Polygon(Polygon::new(
+                    tile_fill(buffer * SIZE),
+                    vec![],
+                )));
         }
     }
     out
@@ -374,9 +394,8 @@ fn geom_kind(g: &Geometry<f64>) -> Kind {
 /// Dispatch a scaled geometry to the appropriate stub slicer.
 fn slice_scaled(scaled: &Geometry<f64>, buffer: f64, z: u8, extents: &ForZoom) -> TiledGeometry {
     match scaled {
-        Geometry::Point(p) => {
-            TiledGeometry::slice_points_into_tiles(&[p.0], buffer, z, extents).expect("slice points")
-        }
+        Geometry::Point(p) => TiledGeometry::slice_points_into_tiles(&[p.0], buffer, z, extents)
+            .expect("slice points"),
         Geometry::MultiPoint(mp) => {
             let cs: Vec<Coord<f64>> = mp.0.iter().map(|p| p.0).collect();
             TiledGeometry::slice_points_into_tiles(&cs, buffer, z, extents).expect("slice points")
@@ -406,15 +425,15 @@ fn extract_groups(geom: &Geometry<f64>) -> CoordSeqGroups {
             group.extend(p.interiors().iter().cloned().map(ccw));
             vec![group]
         }
-        Geometry::MultiPolygon(mp) => mp
-            .0
-            .iter()
-            .map(|p| {
-                let mut group = vec![ccw(p.exterior().clone())];
-                group.extend(p.interiors().iter().cloned().map(ccw));
-                group
-            })
-            .collect(),
+        Geometry::MultiPolygon(mp) => {
+            mp.0.iter()
+                .map(|p| {
+                    let mut group = vec![ccw(p.exterior().clone())];
+                    group.extend(p.interiors().iter().cloned().map(ccw));
+                    group
+                })
+                .collect()
+        }
         Geometry::GeometryCollection(gc) => gc.0.iter().flat_map(extract_groups).collect(),
         other => panic!("cannot extract groups from {other:?}"),
     }
@@ -424,8 +443,11 @@ fn extract_groups(geom: &Geometry<f64>) -> CoordSeqGroups {
 fn reassemble(groups: &CoordSeqGroups, kind: Kind) -> Geometry<f64> {
     match kind {
         Kind::Point => {
-            let pts: Vec<Point<f64>> =
-                groups.iter().flatten().flat_map(|ls| ls.0.iter().map(|c| Point(*c))).collect();
+            let pts: Vec<Point<f64>> = groups
+                .iter()
+                .flatten()
+                .flat_map(|ls| ls.0.iter().map(|c| Point(*c)))
+                .collect();
             if pts.len() == 1 {
                 Geometry::Point(pts[0])
             } else {
@@ -445,14 +467,28 @@ fn reassemble(groups: &CoordSeqGroups, kind: Kind) -> Geometry<f64> {
                 .iter()
                 .map(|g| {
                     let exterior = g.first().cloned().unwrap_or_else(|| LineString(vec![]));
-                    let holes = g.iter().skip(1).cloned().collect();
+                    // Reverse inner rings so holes wind opposite the exterior (planetiler
+                    // reassemblePolygon), which the overlay union requires to keep them holes.
+                    let holes = g
+                        .iter()
+                        .skip(1)
+                        .map(|h| {
+                            let mut r = h.clone();
+                            r.0.reverse();
+                            r
+                        })
+                        .collect();
                     Polygon::new(exterior, holes)
                 })
                 .collect();
-            if polys.len() == 1 {
-                Geometry::Polygon(polys.into_iter().next().expect("one polygon"))
+            // Planetiler runs snapAndFixPolygon (buffer(0)) on every rendered polygon, which
+            // repairs self-touches and merges the overlapping antimeridian world-copies. geo's
+            // overlay union gives the topologically-equivalent result.
+            let unioned = geo::unary_union([&MultiPolygon(polys)]);
+            if unioned.0.len() == 1 {
+                Geometry::Polygon(unioned.0.into_iter().next().expect("one polygon"))
             } else {
-                Geometry::MultiPolygon(MultiPolygon(polys))
+                Geometry::MultiPolygon(unioned)
             }
         }
     }

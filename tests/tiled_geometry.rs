@@ -87,19 +87,28 @@ fn point_zoom14() {
 #[test]
 fn multi_point() {
     let g = new_multi_point(&[(0.5, 0.5), (2.5, 1.5)]);
-    assert_eq!(covered(&g, 14, &z14_extents()), tiles(&[(0, 0, 14), (2, 1, 14)]));
+    assert_eq!(
+        covered(&g, 14, &z14_extents()),
+        tiles(&[(0, 0, 14), (2, 1, 14)])
+    );
 }
 
 #[test]
 fn line() {
     let g = new_line_string(&[0.5, 0.5, 1.5, 0.5]);
-    assert_eq!(covered(&g, 14, &z14_extents()), tiles(&[(0, 0, 14), (1, 0, 14)]));
+    assert_eq!(
+        covered(&g, 14, &z14_extents()),
+        tiles(&[(0, 0, 14), (1, 0, 14)])
+    );
 }
 
 #[test]
 fn line_zoom16() {
     let g = new_line_string(&[0.5, 0.5, 1.5, 0.5]);
-    assert_eq!(covered(&g, 16, &z16_extents()), tiles(&[(0, 0, 16), (1, 0, 16)]));
+    assert_eq!(
+        covered(&g, 16, &z16_extents()),
+        tiles(&[(0, 0, 16), (1, 0, 16)])
+    );
 }
 
 #[test]
@@ -124,9 +133,14 @@ fn polygon_with_hole_skips_interior_tile() {
     assert_eq!(
         covered(&g, 14, &z14_extents()),
         tiles(&[
-            (25, 25, 14), (26, 25, 14), (27, 25, 14),
-            (25, 26, 14), /* (26,26) skipped */ (27, 26, 14),
-            (25, 27, 14), (26, 27, 14), (27, 27, 14),
+            (25, 25, 14),
+            (26, 25, 14),
+            (27, 25, 14),
+            (25, 26, 14),
+            /* (26,26) skipped */ (27, 26, 14),
+            (25, 27, 14),
+            (26, 27, 14),
+            (27, 27, 14),
         ])
     );
 }
@@ -154,7 +168,13 @@ fn multi_polygon() {
     ]);
     assert_eq!(
         covered(&g, 14, &z14_extents()),
-        tiles(&[(25, 25, 14), (25, 26, 14), (26, 25, 14), (26, 26, 14), (30, 30, 14)])
+        tiles(&[
+            (25, 25, 14),
+            (25, 26, 14),
+            (26, 25, 14),
+            (26, 26, 14),
+            (30, 30, 14)
+        ])
     );
 }
 
@@ -204,9 +224,20 @@ fn geometry_collection() {
 #[test]
 fn encode_decode() {
     let cases: &[(u8, u32, u32)] = &[
-        (0, 0, 0), (2, 0, 0), (2, 3, 3), (3, 7, 6), (3, 7, 7),
-        (15, 0, 0), (15, 32767, 0), (15, 0, 32767), (15, 32767, 32767),
-        (16, 0, 0), (16, 1, 2), (16, 65535, 0), (16, 65535, 65535), (16, 0, 65535),
+        (0, 0, 0),
+        (2, 0, 0),
+        (2, 3, 3),
+        (3, 7, 6),
+        (3, 7, 7),
+        (15, 0, 0),
+        (15, 32767, 0),
+        (15, 0, 32767),
+        (15, 32767, 32767),
+        (16, 0, 0),
+        (16, 1, 2),
+        (16, 65535, 0),
+        (16, 65535, 65535),
+        (16, 0, 65535),
     ];
     for &(z, x, y) in cases {
         let max = 1u64 << z;
@@ -221,15 +252,30 @@ fn encode_decode() {
 // --- slice-into-tiles (clipping core) -------------------------------------
 
 fn test_render(groups: &CoordSeqGroups) -> TiledGeometry {
-    TiledGeometry::slice_into_tiles(groups, 0.0, true, 14, &ForZoom::new(14, -10, -10, Z14_TILES, Z14_TILES, None))
-        .expect("slice")
+    TiledGeometry::slice_into_tiles(
+        groups,
+        0.0,
+        true,
+        14,
+        &ForZoom::new(14, -10, -10, Z14_TILES, Z14_TILES, None),
+    )
+    .expect("slice")
 }
 
-const ROT_ONLY: &[(i32, bool, bool)] =
-    &[(0, false, false), (90, false, false), (180, false, false), (270, false, false)];
+const ROT_ONLY: &[(i32, bool, bool)] = &[
+    (0, false, false),
+    (90, false, false),
+    (180, false, false),
+    (270, false, false),
+];
 const ROT_FLIP: &[(i32, bool, bool)] = &[
-    (0, false, false), (90, false, false), (180, false, false), (270, false, false),
-    (0, true, false), (0, false, true), (0, true, true),
+    (0, false, false),
+    (90, false, false),
+    (180, false, false),
+    (270, false, false),
+    (0, true, false),
+    (0, false, true),
+    (0, true, true),
 ];
 
 #[test]
@@ -242,7 +288,11 @@ fn only_hole_touches_other_cell_bottom_errors() {
         support::rotate(&mut inner, 1.5, 1.5, degrees);
         let groups: CoordSeqGroups = vec![vec![outer, inner]];
         let result = TiledGeometry::slice_into_tiles(
-            &groups, 0.1, true, 11, &ForZoom::new(11, 0, 0, 1 << 11, 1 << 11, None),
+            &groups,
+            0.1,
+            true,
+            11,
+            &ForZoom::new(11, 0, 0, 1 << 11, 1 << 11, None),
         );
         assert!(
             matches!(result, Err(GeometryError::BadPolygonFill(_))),
@@ -319,7 +369,10 @@ fn side_of_hole_intercepted() {
             assert!(!filled.contains(&TileId::new(7, 4, 14)));
 
             // Exact clipped rings for tile (7,4,14): a full-tile square plus the clipped hole.
-            let groups = result.tile_data().get(&TileId::new(7, 4, 14)).expect("tile (7,4)");
+            let groups = result
+                .tile_data()
+                .get(&TileId::new(7, 4, 14))
+                .expect("tile (7,4)");
             let poly = {
                 let exterior = groups[0][0].clone();
                 let holes = groups[0].iter().skip(1).cloned().collect();

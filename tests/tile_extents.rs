@@ -35,7 +35,11 @@ fn top_left() {
     let extents = TileExtents::compute_from_world_bounds(14, envelope(0.0, EPS, 0.0, EPS));
     for z in 0..=14u8 {
         let fz = extents.for_zoom(z);
-        assert_eq!((fz.min_x, fz.max_x, fz.min_y, fz.max_y), (0, 1, 0, 1), "z{z}");
+        assert_eq!(
+            (fz.min_x, fz.max_x, fz.min_y, fz.max_y),
+            (0, 1, 0, 1),
+            "z{z}"
+        );
     }
 }
 
@@ -45,7 +49,11 @@ fn top_right() {
     for z in 0..=14u8 {
         let max = 1i32 << z;
         let fz = extents.for_zoom(z);
-        assert_eq!((fz.min_x, fz.max_x, fz.min_y, fz.max_y), (max - 1, max, 0, 1), "z{z}");
+        assert_eq!(
+            (fz.min_x, fz.max_x, fz.min_y, fz.max_y),
+            (max - 1, max, 0, 1),
+            "z{z}"
+        );
     }
 }
 
@@ -55,7 +63,11 @@ fn bottom_left() {
     for z in 0..=14u8 {
         let max = 1i32 << z;
         let fz = extents.for_zoom(z);
-        assert_eq!((fz.min_x, fz.max_x, fz.min_y, fz.max_y), (0, 1, max - 1, max), "z{z}");
+        assert_eq!(
+            (fz.min_x, fz.max_x, fz.min_y, fz.max_y),
+            (0, 1, max - 1, max),
+            "z{z}"
+        );
     }
 }
 
@@ -65,16 +77,21 @@ fn shape() {
     // planetiler feeds `worldToLatLonCoords(shape)`; the world-coord polygon is used directly
     // here since the shape-clip path is what's under test (and stubbed).
     let shape = new_polygon(&[
-        0.5, 0.5 - s * 5.0,
-        0.5 + s * 5.0, 0.5,
-        0.5, 0.5 + s * 5.0,
-        0.5 - s * 5.0, 0.5,
-        0.5, 0.5 - s * 5.0,
+        0.5,
+        0.5 - s * 5.0,
+        0.5 + s * 5.0,
+        0.5,
+        0.5,
+        0.5 + s * 5.0,
+        0.5 - s * 5.0,
+        0.5,
+        0.5,
+        0.5 - s * 5.0,
     ]);
     let extents = TileExtents::compute_from_world_bounds_with_shape(
         14,
         envelope(0.5 - s * 4.0, 0.5 + s * 4.0, 0.5 - s * 4.0, 0.5 + s * 4.0),
-        shape,
+        &shape,
     );
     for z in 0..=14u8 {
         let middle = (1u32 << z) / 2;
@@ -82,6 +99,12 @@ fn shape() {
     }
     let half = 1u32 << 13;
     assert!(extents.test(half + 3, half, 14), "inside shape and bounds");
-    assert!(!extents.test(half + 4, half, 14), "inside shape, outside bounds");
-    assert!(!extents.test(half + 3, half + 3, 14), "inside bounds, outside shape");
+    assert!(
+        !extents.test(half + 4, half, 14),
+        "inside shape, outside bounds"
+    );
+    assert!(
+        !extents.test(half + 3, half + 3, 14),
+        "inside bounds, outside shape"
+    );
 }

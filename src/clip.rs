@@ -221,6 +221,8 @@ fn validate_and_simplify(geom: Geometry<f64>) -> Option<Geometry<f64>> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use approx::assert_relative_eq;
 
     use super::*;
@@ -228,7 +230,7 @@ mod tests {
     #[test]
     fn transform_matches_martin_reference() {
         // Ported verbatim from martin's rect.rs unit test: this locks the tile transform.
-        let opts = SliceOptions::new(std::num::NonZeroU32::new(4096).expect("nonzero"), 256);
+        let opts = SliceOptions::new(NonZeroU32::new(4096).expect("nonzero"), 256);
         let mut rect = Rect::from_tile(TileId::new(70, 43, 7), opts);
         rect.add_buffer();
         let c = rect.to_tile_coord(Coord {
