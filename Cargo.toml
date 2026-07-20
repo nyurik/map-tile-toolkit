@@ -10,6 +10,10 @@ keywords = ["mlt", "mvt", "tile", "geojson", "geo"]
 categories = ["science::geo"]
 rust-version = "1.88"
 
+[[bench]]
+name = "clipping"
+harness = false
+
 [dependencies]
 geo = "0.33.1"
 geo-types = "0.7.19"
@@ -19,12 +23,9 @@ thiserror = "2"
 approx = "0.5"
 criterion = "0.8"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
+geojson = { version = "0.24", features = ["geo-types"] }
 insta = "1"
 wkt = "0.14"
-
-[[bench]]
-name = "clipping"
-harness = false
 
 # Optimized build with debug symbols, used by `just flamegraph` for readable profiles.
 [profile.profiling]
