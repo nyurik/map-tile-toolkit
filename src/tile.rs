@@ -16,7 +16,7 @@ pub(crate) const EARTH_CIRCUMFERENCE: f64 = 40_075_016.685_578_5;
 pub(crate) const ORIGIN_SHIFT: f64 = EARTH_CIRCUMFERENCE / 2.0;
 
 /// A tile address in the standard XYZ scheme (`z` = zoom, `x`/`y` = column/row).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TileId {
     pub x: u32,
     pub y: u32,

@@ -13,10 +13,14 @@ rust-version = "1.88"
 [dependencies]
 geo = "0.33.1"
 geo-types = "0.7.19"
+thiserror = "2"
 
 [dev-dependencies]
 approx = "0.5"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
+insta = "1"
+test_each_file = "0.3"
+wkt = "0.14"
 
 [lints.rust]
 unsafe_code = "forbid"
