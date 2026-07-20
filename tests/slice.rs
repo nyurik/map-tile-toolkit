@@ -72,22 +72,32 @@ fn polygon_clipped_to_quadrant_stays_within_buffer() {
 }
 
 #[test]
-fn linestring_crossing_boundary_is_clipped() {
-    // From inside tile (0,0,1) (x<0) to inside tile (1,0,1) (x>0): crosses the x=0 edge.
+fn linestring_crossing_boundary_keeps_original_vertices() {
+    // From inside tile (0,0,1) (x<0) out into tile (1,0,1) (x>0), past this tile's buffer.
+    // The line clip keeps original vertices, so both endpoints survive and the outside one is
+    // preserved beyond the buffer rather than cut to the boundary.
     let line = Geometry::LineString(LineString::from(vec![
         (-ORIGIN_SHIFT * 0.5, ORIGIN_SHIFT * 0.5),
         (ORIGIN_SHIFT * 0.5, ORIGIN_SHIFT * 0.5),
     ]));
     let sliced = slice_tile(&line, (0, 0, 1), opts()).expect("line touches the tile");
-    assert_within_buffer(&sliced, opts());
+    let cs = coords(&sliced);
+    assert_eq!(
+        cs.len(),
+        2,
+        "both original vertices kept, none created: {cs:?}"
+    );
+    let extent = i32::try_from(opts().extent.get()).expect("fits");
+    let buffer = i32::try_from(opts().buffer).expect("fits");
     assert!(
-        coords(&sliced).len() >= 2,
-        "clipped line keeps at least 2 vertices"
+        cs.iter().any(|c| c.x > extent + buffer),
+        "the first-outside vertex is kept past the buffer, got {cs:?}"
     );
 }
 
 #[test]
-fn multilinestring_is_clipped() {
+fn multilinestring_keeps_each_line_as_a_piece() {
+    // One line crosses out of the tile; the other lies fully inside it. Both survive as pieces.
     let mls = Geometry::MultiLineString(MultiLineString(vec![
         LineString::from(vec![
             (-ORIGIN_SHIFT * 0.5, ORIGIN_SHIFT * 0.5),
@@ -99,7 +109,39 @@ fn multilinestring_is_clipped() {
         ]),
     ]));
     let sliced = slice_tile(&mls, (0, 0, 1), opts()).expect("lines touch the tile");
-    assert_within_buffer(&sliced, opts());
+    let Geometry::MultiLineString(out) = &sliced else {
+        panic!("expected a MultiLineString, got {sliced:?}");
+    };
+    assert_eq!(
+        out.0.len(),
+        2,
+        "both input lines survive as separate pieces"
+    );
+}
+
+#[test]
+fn linestring_excursion_splits_into_pieces() {
+    // A single line starts inside tile (0,0,1), makes a wide excursion far outside the buffer,
+    // and returns. With no new vertices cut, it comes back as two pieces — one per visit — each
+    // keeping the first vertex just outside the buffer; the far middle vertex is discarded.
+    let o = ORIGIN_SHIFT;
+    let line = Geometry::LineString(LineString::from(vec![
+        (-o * 0.5, o * 0.5), // v0 inside the tile
+        (-o * 0.5, o * 1.5), // v1 straight up, past the top buffer (first-outside on exit)
+        (o * 0.5, o * 1.5),  // v2 far outside — its segments miss the tile, so it is dropped
+        (o * 0.5, o * 0.5),  // v3 down the right side, still outside
+        (-o * 0.5, o * 0.5), // v4 back inside the tile (first-outside kept is v3)
+    ]));
+    let sliced = slice_tile(&line, (0, 0, 1), opts()).expect("line visits the tile twice");
+    let Geometry::MultiLineString(out) = &sliced else {
+        panic!("expected a MultiLineString, got {sliced:?}");
+    };
+    assert_eq!(out.0.len(), 2, "leaves and re-enters -> two pieces");
+    assert_eq!(
+        coords(&sliced).len(),
+        4,
+        "5 input vertices, the far middle one dropped -> 4 kept"
+    );
 }
 
 #[test]

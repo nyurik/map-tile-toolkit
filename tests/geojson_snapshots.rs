@@ -1,6 +1,13 @@
 //! Visual regression snapshots: slice each GeoJSON fixture and snapshot the result as a
 //! binary `.geojson` snapshot.
 //!
+//! Each fixture produces **two** snapshots, one per slicing entry point:
+//! * `<name>_slice_all_tiles.geojson` — the batch [`slice_all_tiles`] (eager `stripe` slicer).
+//! * `<name>_slice_tile.geojson` — [`slice_tile`] (single-tile rectangle clip) called once per
+//!   tile that the batch produced, so the two snapshots cover the same tiles through the two
+//!   different code paths (which clip lines differently: the batch splits at tile boundaries, the
+//!   single-tile path keeps original vertices).
+//!
 //! Each snapshot is a GeoJSON `FeatureCollection` whose **first** feature is the original input
 //! geometry (thick dark outline) followed by **one feature per tile** (thinner, alternating
 //! fill colors), all reprojected back to WGS84 lon/lat. Because the snapshot file ends in
@@ -19,12 +26,13 @@
 use std::f64::consts::PI;
 use std::fs;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, GeometryCollection};
 use geojson::{Feature, FeatureCollection, GeoJson, JsonObject, JsonValue};
-use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles};
+use insta::assert_binary_snapshot;
+use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
 
 /// Web Mercator plane width (meters), matching the crate's `EARTH_CIRCUMFERENCE`.
@@ -113,13 +121,9 @@ fn load_fixture(path: &Path) -> (Geometry<f64>, u8) {
     (geom, zoom)
 }
 
-/// Build the output `FeatureCollection`: input first, then one feature per tile slice.
-fn render(input: &Geometry<f64>, zoom: u8) -> FeatureCollection {
-    let opts = SliceOptions::new(NonZeroU32::new(EXTENT).expect("nonzero"), BUFFER_PX);
-    let mercator = input.map_coords(lonlat_to_mercator);
-
-    // First feature: the original, a thick dark outline distinct from the slices.
-    let mut features = vec![feature(
+/// The input geometry as the first feature: a thick dark outline distinct from the slices.
+fn input_feature(input: &Geometry<f64>) -> Feature {
+    feature(
         input,
         vec![
             ("role", json!("input")),
@@ -128,31 +132,38 @@ fn render(input: &Geometry<f64>, zoom: u8) -> FeatureCollection {
             ("fill", json!("#111111")),
             ("fill-opacity", json!(0.03)),
         ],
-    )];
+    )
+}
 
-    // One feature per tile, reprojected to lon/lat, colored by parity so neighbors contrast.
-    for (id, sliced) in slice_all_tiles(&mercator, zoom, opts) {
-        let lonlat = sliced
-            .map_coords(|c| tile_local_to_mercator(id, c))
-            .map_coords(mercator_to_lonlat);
-        let color = if (id.x + id.y) % 2 == 0 {
-            "#1f77b4"
-        } else {
-            "#ff7f0e"
-        };
-        features.push(feature(
-            &lonlat,
-            vec![
-                ("role", json!("tile")),
-                ("tile", json!(format!("{}/{}/{}", id.z, id.x, id.y))),
-                ("stroke", json!(color)),
-                ("stroke-width", json!(1)),
-                ("fill", json!(color)),
-                ("fill-opacity", json!(0.4)),
-            ],
-        ));
+/// One tile's slice, reprojected to lon/lat, colored by tile parity so neighbors contrast.
+fn tile_feature(id: TileId, sliced: &Geometry<i32>) -> Feature {
+    let lonlat = sliced
+        .map_coords(|c| tile_local_to_mercator(id, c))
+        .map_coords(mercator_to_lonlat);
+    let color = if (id.x + id.y).is_multiple_of(2) {
+        "#1f77b4"
+    } else {
+        "#ff7f0e"
+    };
+    feature(
+        &lonlat,
+        vec![
+            ("role", json!("tile")),
+            ("tile", json!(format!("{}/{}/{}", id.z, id.x, id.y))),
+            ("stroke", json!(color)),
+            ("stroke-width", json!(1)),
+            ("fill", json!(color)),
+            ("fill-opacity", json!(0.4)),
+        ],
+    )
+}
+
+/// Build the output `FeatureCollection`: the input first, then one feature per tile slice.
+fn build_fc(input: &Geometry<f64>, tiles: &[(TileId, Geometry<i32>)]) -> FeatureCollection {
+    let mut features = vec![input_feature(input)];
+    for (id, sliced) in tiles {
+        features.push(tile_feature(*id, sliced));
     }
-
     FeatureCollection {
         bbox: None,
         features,
@@ -172,13 +183,33 @@ fn geojson_fixtures() {
     paths.sort();
     assert!(!paths.is_empty(), "no fixtures found in {}", dir.display());
 
-    insta::with_settings!({ snapshot_path => "snapshots/geojson", prepend_module_to_snapshot => false }, {
-        for path in paths {
-            let stem = path.file_stem().expect("stem").to_str().expect("utf8");
-            let (geom, zoom) = load_fixture(&path);
-            let fc = render(&geom, zoom);
-            let bytes = serde_json::to_vec_pretty(&fc).expect("serializes");
-            insta::assert_binary_snapshot!(format!("{stem}.geojson").as_str(), bytes);
-        }
+    insta::with_settings!({
+        snapshot_path => "snapshots",
+        prepend_module_to_snapshot => false
+    }, {
+        write_geojson_snapshots(&mut paths);
     });
+}
+
+fn write_geojson_snapshots(paths: &mut Vec<PathBuf>) {
+    let opts = SliceOptions::new(NonZeroU32::new(EXTENT).expect("nonzero"), BUFFER_PX);
+    for path in paths {
+        let stem = path.file_stem().expect("stem").to_str().expect("utf8");
+        let (geom, zoom) = load_fixture(&path);
+        let mercator = geom.map_coords(lonlat_to_mercator);
+
+        // Batch path: slice into every tile at once with the eager stripe slicer.
+        let batch: Vec<(TileId, Geometry<i32>)> =
+            slice_all_tiles(&mercator, zoom, opts).collect();
+        let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &batch)).expect("serializes");
+        assert_binary_snapshot!(&format!("{stem}_slice_all_tiles.geojson"), bytes);
+
+        // Single-tile path: re-slice each tile the batch produced, one `slice_tile` per id.
+        let single: Vec<(TileId, Geometry<i32>)> = batch
+            .iter()
+            .filter_map(|(id, _)| slice_tile(&mercator, *id, opts).map(|g| (*id, g)))
+            .collect();
+        let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &single)).expect("serializes");
+        assert_binary_snapshot!(&format!("{stem}_slice_tile.geojson"), bytes);
+    }
 }

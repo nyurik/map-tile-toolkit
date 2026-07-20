@@ -34,9 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original geometry, every per-tile slice, and the tile grid back to lon/lat and prints a styled
   GeoJSON feature collection for pasting into geojson.io / QGIS / kepler.gl.
 - Visual regression snapshots (`tests/geojson_snapshots.rs`): each `tests/fixtures/geojson/*.geojson`
-  fixture is sliced and stored as a binary `.geojson` `insta` snapshot (input geometry as the first
-  feature, then one feature per tile, with simplestyle colors). The `.geojson` extension makes the
-  snapshots render on a map directly in GitHub, so a diff is a visual diff.
+  fixture is sliced into two binary `.geojson` `insta` snapshots — one from `slice_all_tiles` and
+  one from `slice_tile` per covered tile — so both slicing paths are covered (input geometry as the
+  first feature, then one feature per tile, with simplestyle colors). The `.geojson` extension makes
+  the snapshots render on a map directly in GitHub, so a diff is a visual diff.
 - `criterion` benchmarks (`benches/clipping.rs`, run with `cargo bench`) comparing the two
   clipping engines over geometry of increasing complexity — the per-tile `geo`-overlay path
   (`slice_tile`/`slice_all_tiles`) vs the eager `stripe` slicer — plus a stripe fill-detection
@@ -46,8 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `slice_tile` now clips with dedicated axis-aligned rectangle primitives (Sutherland-Hodgman
-  for polygons, Liang-Barsky for lines) instead of `geo`'s general boolean overlay — `O(vertices)`
-  and ~3–8× faster on the `clip_one_tile` benchmark.
+  for polygons) instead of `geo`'s general boolean overlay — `O(vertices)` and ~3–8× faster on the
+  `clip_one_tile` benchmark.
+- `slice_tile` clips line strings by **keeping their original vertices** rather than cutting new
+  ones at the tile edge: it keeps every vertex inside the buffered tile plus the first vertex just
+  outside each boundary crossing, dropping fully-outside stretches. A line that leaves and
+  re-enters returns as a `MultiLineString` (one piece per visit), and kept outside vertices may lie
+  beyond the buffer. (This affects only the single-tile path; the `slice_all_tiles` batch path
+  still splits lines at tile boundaries via the `stripe` slicer.)
 - `slice_all_tiles` / `for_each_tile_slice` now slice in a single pass with the eager `stripe`
   slicer (near-linear in geometry size) instead of clipping every candidate tile independently
   (~5–6× faster on the batch benchmark). The two engines produce equivalent slices up to ±1px

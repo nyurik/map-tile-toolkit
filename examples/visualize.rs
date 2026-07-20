@@ -27,8 +27,8 @@ use std::num::NonZeroU32;
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, LineString, Polygon};
 use geojson::{Feature, FeatureCollection, JsonObject, JsonValue};
-use serde_json::json;
 use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
+use serde_json::json;
 use wkt::TryFromWkt as _;
 
 /// Web Mercator plane width (meters), matching the crate's `EARTH_CIRCUMFERENCE`.
@@ -220,17 +220,14 @@ fn main() {
         tiles.push(id);
         let lonlat = sliced.map_coords(|c| tile_local_to_mercator(id, c, extent));
         let lonlat = lonlat.map_coords(mercator_to_lonlat);
-        let color = if (id.x + id.y) % 2 == 0 {
+        let color = if (id.x + id.y).is_multiple_of(2) {
             "#1f77b4"
         } else {
             "#ff7f0e"
         };
         let mut props = style(color, color, 0.35, 1.5);
         props.push(("role", json!("slice")));
-        props.push((
-            "tile",
-            json!(format!("{}/{}/{}", id.z, id.x, id.y)),
-        ));
+        props.push(("tile", json!(format!("{}/{}/{}", id.z, id.x, id.y))));
         features.push(feature(&lonlat, props));
     }
 
@@ -238,10 +235,7 @@ fn main() {
     for id in &tiles {
         let mut props = style("#999999", "#999999", 0.0, 1.0);
         props.push(("role", json!("tile-grid")));
-        props.push((
-            "tile",
-            json!(format!("{}/{}/{}", id.z, id.x, id.y)),
-        ));
+        props.push(("tile", json!(format!("{}/{}/{}", id.z, id.x, id.y))));
         features.push(feature(&tile_outline(*id), props));
     }
 
@@ -253,10 +247,7 @@ fn main() {
                 .map_coords(mercator_to_lonlat);
             let mut props = style("#d62728", "#d62728", 0.5, 2.5);
             props.push(("role", json!("single")));
-            props.push((
-                "tile",
-                json!(format!("{}/{}/{}", id.z, id.x, id.y)),
-            ));
+            props.push(("tile", json!(format!("{}/{}/{}", id.z, id.x, id.y))));
             features.push(feature(&lonlat, props));
         } else {
             eprintln!("note: tile {id:?} has no slice of this geometry");

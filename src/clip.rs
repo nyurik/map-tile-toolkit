@@ -1,12 +1,14 @@
 //! Per-tile clipping: turn a Web Mercator geometry into one tile's integer geometry.
 //!
 //! This is the engine behind [`crate::slice_tile`]. Tiles are axis-aligned rectangles in Web
-//! Mercator, so the geometry is clipped to the (buffered) tile rectangle with dedicated
-//! rectangle-clip primitives — Sutherland-Hodgman for polygon rings and Liang-Barsky for
-//! line segments — which are `O(vertices)` and avoid the cost of a general boolean overlay.
-//! The clipped geometry is then transformed to the integer tile grid (flipping Y), any
-//! self-touch the snap introduced is repaired, rings are oriented for tile winding, the
-//! result is validated, and finally cast to `i32`.
+//! Mercator, so the geometry is clipped to the (buffered) tile rectangle in `O(vertices)`,
+//! avoiding the cost of a general boolean overlay. Polygon rings are cut with Sutherland-Hodgman
+//! (new vertices at the tile edge). Line strings are handled differently: rather than cutting new
+//! vertices at the boundary, they keep their original vertices — every vertex inside the buffered
+//! tile plus the first vertex just outside each time the line crosses the boundary (see
+//! [`Rect::clip_line_string`]). The clipped geometry is then transformed to the integer tile grid
+//! (flipping Y), any self-touch the snap introduced is repaired, rings are oriented for tile
+//! winding, the result is validated, and finally cast to `i32`.
 
 #![allow(
     clippy::float_cmp,
@@ -96,8 +98,8 @@ impl Rect {
         self.max_y += buffer_y;
     }
 
-    /// Clip a set of line strings to the tile with Liang-Barsky, snap to the integer grid,
-    /// and validate; `None` if nothing remains.
+    /// Clip line strings to the tile (keeping their original vertices), snap to the integer
+    /// grid, and validate; `None` if nothing remains.
     fn clip_lines(&self, lines: &MultiLineString<f64>) -> Option<Geometry<f64>> {
         let clipped: Vec<LineString<f64>> = lines
             .0
@@ -175,30 +177,37 @@ impl Rect {
         out
     }
 
-    /// Clip one line string into its inside-the-tile pieces with Liang-Barsky.
+    /// Split a line string into the pieces that touch the (buffered) tile, keeping the
+    /// **original** vertices — no new vertices are cut at the boundary.
+    ///
+    /// A vertex is kept when it lies inside the buffered tile, or is an endpoint of a segment
+    /// that crosses it. Consecutive kept vertices form one piece, so each piece's endpoints are
+    /// the first vertices just outside the buffer where the line entered/left it. Fully-outside
+    /// stretches between two visits are dropped, so a line that exits and later re-enters comes
+    /// back as separate pieces (a `MultiLineString`), each keeping its first-outside vertex.
     fn clip_line_string(&self, ls: &LineString<f64>) -> Vec<LineString<f64>> {
+        let pts = &ls.0;
+        let n = pts.len();
+        if n < 2 {
+            return Vec::new();
+        }
+
+        // Keep both endpoints of every segment that touches the tile. Because a touching segment
+        // marks both its endpoints, each kept vertex always has a kept neighbor, so runs are
+        // never isolated single vertices.
+        let mut keep = vec![false; n];
+        for i in 0..n - 1 {
+            if self.segment_intersects(pts[i], pts[i + 1]) {
+                keep[i] = true;
+                keep[i + 1] = true;
+            }
+        }
+
         let mut pieces: Vec<Vec<Coord<f64>>> = Vec::new();
         let mut cur: Vec<Coord<f64>> = Vec::new();
-        for seg in ls.0.windows(2) {
-            let (a, b) = (seg[0], seg[1]);
-            if let Some((ca, cb)) = self.clip_segment(a, b) {
-                if cur.last() != Some(&ca) {
-                    if cur.len() >= 2 {
-                        pieces.push(std::mem::take(&mut cur));
-                    } else {
-                        cur.clear();
-                    }
-                    cur.push(ca);
-                }
-                cur.push(cb);
-                // The segment exited the tile: finalize this piece so a re-entry starts fresh.
-                if cb != b {
-                    if cur.len() >= 2 {
-                        pieces.push(std::mem::take(&mut cur));
-                    } else {
-                        cur.clear();
-                    }
-                }
+        for i in 0..n {
+            if keep[i] {
+                cur.push(pts[i]);
             } else if cur.len() >= 2 {
                 pieces.push(std::mem::take(&mut cur));
             } else {
@@ -211,8 +220,9 @@ impl Rect {
         pieces.into_iter().map(LineString).collect()
     }
 
-    /// Liang-Barsky clip of segment `a`..`b` to the tile; `None` if fully outside.
-    fn clip_segment(&self, a: Coord<f64>, b: Coord<f64>) -> Option<(Coord<f64>, Coord<f64>)> {
+    /// Does segment `a`..`b` intersect the (buffered) tile rectangle? A Liang-Barsky parameter
+    /// test with no interpolation — for lines we keep original vertices rather than cut new ones.
+    fn segment_intersects(&self, a: Coord<f64>, b: Coord<f64>) -> bool {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
         let p = [-dx, dx, -dy, dy];
         let q = [
@@ -226,20 +236,20 @@ impl Rect {
         for i in 0..4 {
             if p[i] == 0.0 {
                 if q[i] < 0.0 {
-                    return None; // parallel to this edge and outside it
+                    return false; // parallel to this edge and outside it
                 }
             } else {
                 let t = q[i] / p[i];
                 if p[i] < 0.0 {
                     if t > t1 {
-                        return None;
+                        return false;
                     }
                     if t > t0 {
                         t0 = t;
                     }
                 } else {
                     if t < t0 {
-                        return None;
+                        return false;
                     }
                     if t < t1 {
                         t1 = t;
@@ -247,16 +257,7 @@ impl Rect {
                 }
             }
         }
-        Some((
-            Coord {
-                x: a.x + t0 * dx,
-                y: a.y + t0 * dy,
-            },
-            Coord {
-                x: a.x + t1 * dx,
-                y: a.y + t1 * dy,
-            },
-        ))
+        true
     }
 
     fn edge_inside(&self, c: Coord<f64>, edge: Edge) -> bool {

@@ -64,11 +64,12 @@ just visualize --wkt "POLYGON((-30 20, 50 20, 50 65, -30 65, -30 20))" --zoom 4
 ```
 
 The same output doubles as a visual regression suite: `tests/geojson_snapshots.rs` slices each
-`tests/fixtures/geojson/*.geojson` fixture and stores the result as a **binary `.geojson`
-snapshot** under `tests/snapshots/geojson/`. Because those snapshot files end in `.geojson`,
-GitHub renders them on a map right in the repo/PR — so a snapshot diff is a visual diff of the
-clipping output. Add a fixture (any lon/lat GeoJSON with a top-level `"zoom"` member) and run
-`just bless` to generate its snapshot.
+`tests/fixtures/geojson/*.geojson` fixture into **two binary `.geojson` snapshots** under
+`tests/snapshots/geojson/` — one from `slice_all_tiles` (`_slice_all_tiles.geojson`) and one from
+`slice_tile` per covered tile (`_slice_tile.geojson`), so both code paths are covered. Because the
+snapshot files end in `.geojson`, GitHub renders them on a map right in the repo/PR — so a
+snapshot diff is a visual diff of the clipping output. Add a fixture (any lon/lat `geojson` file
+with a top-level `"zoom"` member) and run `just bless` to generate its snapshots.
 
 ## Development
 
