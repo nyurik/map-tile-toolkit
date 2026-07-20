@@ -17,9 +17,14 @@ thiserror = "2"
 
 [dev-dependencies]
 approx = "0.5"
+criterion = "0.8"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
 insta = "1"
 wkt = "0.14"
+
+[[bench]]
+name = "clipping"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

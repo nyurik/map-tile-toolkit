@@ -319,7 +319,7 @@ pub fn wkt(geom: &Geometry<f64>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// render: world geometry -> per-tile reassembled geometry (calls the stub slicer)
+// render: world geometry -> per-tile reassembled geometry (drives the stripe slicer)
 // ---------------------------------------------------------------------------
 
 /// Full-world tile extents for a zoom.
@@ -329,7 +329,7 @@ pub fn full_world_extents(z: u8) -> ForZoom {
 }
 
 /// Render a world-space geometry across `min_zoom..=max_zoom` with a pixel buffer, returning
-/// per-tile geometries in tile-local pixel space. Composes scale → extract → slice (stub) →
+/// per-tile geometries in tile-local pixel space. Composes scale → extract → slice →
 /// reassemble, mirroring `FeatureRenderer`.
 pub fn render(
     world: &Geometry<f64>,
@@ -391,7 +391,7 @@ fn geom_kind(g: &Geometry<f64>) -> Kind {
     }
 }
 
-/// Dispatch a scaled geometry to the appropriate stub slicer.
+/// Dispatch a scaled geometry to the appropriate slicer entry point.
 fn slice_scaled(scaled: &Geometry<f64>, buffer: f64, z: u8, extents: &ForZoom) -> TiledGeometry {
     match scaled {
         Geometry::Point(p) => TiledGeometry::slice_points_into_tiles(&[p.0], buffer, z, extents)

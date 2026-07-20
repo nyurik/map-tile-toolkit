@@ -56,6 +56,7 @@ tile-bounds filtering in [`extents`] and geometry helpers in [`geo_utils`].
   Install it with `cargo install just`.
 * To get a list of available commands, run `just`.
 * To run tests, use `just test`.
+* To run the clipping benchmarks, use `cargo bench` (compares the per-tile and stripe slicers).
 
 ## License
 

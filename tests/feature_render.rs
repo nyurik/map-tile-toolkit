@@ -1,8 +1,7 @@
 //! Ported from the geometry-clipping subset of planetiler `render/FeatureRendererTest.java`.
 //!
-//! Each test renders a world-space geometry through the (stubbed) slicer via
-//! [`support::render`] and checks the per-tile output. Coordinates and expected values are
-//! planetiler's. These are **red** until the slicer is implemented.
+//! Each test renders a world-space geometry through the slicer via [`support::render`] and
+//! checks the per-tile output. Coordinates and expected values are planetiler's.
 //!
 //! ## Coverage of planetiler `FeatureRendererTest`
 //!

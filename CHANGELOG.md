@@ -30,3 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PLANETILER` note, because JTS `buffer(0)`/`GeometryPrecisionReducer` and `geo`'s overlay
   engine repair self-overlaps to topologically-valid but not bit-identical geometry
   (`snap_and_fix_issue_511` area; `fix_invalid_input_geometry` apex).
+- `criterion` benchmarks (`benches/clipping.rs`, run with `cargo bench`) comparing the two
+  clipping engines over geometry of increasing complexity — the per-tile `geo`-overlay path
+  (`slice_tile`/`slice_all_tiles`) vs the eager `stripe` slicer — plus a stripe fill-detection
+  case. (Planetiler ships no clipping benchmark; these follow the shape of its
+  `BenchmarkSimplify`.)

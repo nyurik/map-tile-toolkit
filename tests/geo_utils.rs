@@ -1,7 +1,6 @@
 //! Ported from the clip-relevant subset of planetiler `geo/GeoUtilsTest.java`:
 //! world-coordinate projection, polygon→linestring, convexity invariance, snap-and-fix
-//! repair, and the min-zoom-for-pixel-size heuristic. All target functions are stubbed, so
-//! these are **red** until implemented.
+//! repair, and the min-zoom-for-pixel-size heuristic.
 
 #![allow(clippy::pedantic, reason = "ported test coordinates and literals")]
 

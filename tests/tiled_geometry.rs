@@ -1,8 +1,7 @@
 //! Ported from planetiler `render/TiledGeometryTest.java`.
 //!
 //! These exercise the eager stripe slicer: covered-tile enumeration and slicing polygon
-//! rings into per-tile coordinate sequences (with buffer, holes, and interior fill). The
-//! slicer is currently stubbed, so these tests are **red** until it is implemented.
+//! rings into per-tile coordinate sequences (with buffer, holes, and interior fill).
 
 #![allow(clippy::pedantic, reason = "ported test coordinates and literals")]
 

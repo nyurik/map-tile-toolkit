@@ -1,7 +1,6 @@
 //! Ported from planetiler `geo/TileExtentsTest.java`.
 //!
-//! Which tiles a world bounding box (and optional clip shape) covers, per zoom. `TileExtents`
-//! is stubbed, so these are **red** until implemented.
+//! Which tiles a world bounding box (and optional clip shape) covers, per zoom.
 
 #![allow(clippy::pedantic, reason = "ported test coordinates and literals")]
 
@@ -75,7 +74,7 @@ fn bottom_left() {
 fn shape() {
     let s = 1.0 / f64::from(1i32 << 14); // 2^-14
     // planetiler feeds `worldToLatLonCoords(shape)`; the world-coord polygon is used directly
-    // here since the shape-clip path is what's under test (and stubbed).
+    // here since the shape-clip path is what's under test.
     let shape = new_polygon(&[
         0.5,
         0.5 - s * 5.0,

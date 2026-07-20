@@ -1,13 +1,9 @@
-//! The clip seam: turn a Web Mercator geometry into one tile integer geometry.
+//! Per-tile clipping: turn a Web Mercator geometry into one tile's integer geometry.
 //!
-//! This is the "A0" engine — it reuses `geo`'s overlay-based clipping ([`BooleanOps`])
-//! for the geometrically hard work, and only adds the tile-grid transform, integer snap,
-//! and topology repair around it. It is deliberately isolated behind
-//! [`clip_geometry_to_tile`] so a faster clipper (a dedicated rectangle clip, or an eager
-//! stripe slicer) can replace it later without touching the public [`crate::slice`] API.
-//!
-//! The pipeline mirrors `martin`'s proven `martin-core` `GeoJSON` tile path: clip in
-//! Web Mercator `f64`, snap to the integer grid (flipping Y), repair self-touches the
+//! This is the engine behind [`crate::slice_tile`] and [`crate::slice_all_tiles`]. It clips a
+//! geometry to a single tile (plus buffer) using `geo`'s overlay-based clipping
+//! ([`BooleanOps`]) and adds the tile-grid transform, integer snap, and topology repair:
+//! clip in Web Mercator `f64`, snap to the integer grid (flipping Y), repair self-touches the
 //! snap may introduce, orient rings for tile winding, validate, and finally cast to `i32`.
 
 use geo::bool_ops::FillRule;
