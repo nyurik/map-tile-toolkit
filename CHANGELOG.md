@@ -17,7 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every tile it touches at a zoom (per-tile coordinate sequences + interior fill detection +
   antimeridian wrapping), ported from planetiler/geojson-vt. Plus `TileExtents` (`extents`)
   and clip helpers (`geo_utils`: world projection, `polygon_to_linestring`, `is_convex`,
-  `snap_and_fix_polygon`, `min_zoom_for_pixel_size`). Validated against planetiler's test
-  suite (75 tests). Two assertions are `#[ignore]`d: they depend on JTS `buffer(0)` /
-  `GeometryPrecisionReducer` output that `geo`'s overlay engine resolves to a
-  topologically-valid but not bit-identical result.
+  `snap_and_fix_polygon`, `min_zoom_for_pixel_size`).
+- Ported planetiler's full geometry-clipping test suite (91 tests, all running, none ignored):
+  every `TiledGeometryTest` and `TileExtentsTest` case, the clip-relevant `GeoUtilsTest`
+  cases, and every clipping case of `FeatureRendererTest` — including the rotation
+  intersection oracle (compared against `geo::BooleanOps`), fill inference, nested/overlapping
+  multipolygons, and antimeridian wrapping. Non-clipping cases (simplification, min-size,
+  encode-grid rounding, label grids, linear ranges, geometry pipeline) are documented as
+  intentionally out of scope, along with `testSpiral` (input needs JTS `buffer()`) and
+  `testEmitPointsRespectShape` (needs a planetiler resource; the shape-clip path is covered by
+  `tile_extents::shape`). Two cases assert `geo`'s result with a documented `DIVERGENCE FROM
+  PLANETILER` note, because JTS `buffer(0)`/`GeometryPrecisionReducer` and `geo`'s overlay
+  engine repair self-overlaps to topologically-valid but not bit-identical geometry
+  (`snap_and_fix_issue_511` area; `fix_invalid_input_geometry` apex).

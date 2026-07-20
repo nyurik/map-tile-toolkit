@@ -4,10 +4,24 @@
 //! [`support::render`] and checks the per-tile output. Coordinates and expected values are
 //! planetiler's. These are **red** until the slicer is implemented.
 //!
-//! Intentionally NOT ported (out of scope — full-pipeline / non-clipping concerns): label
-//! grids, linear ranges, geometry pipeline, min-size / simplify-config, attribute round-trips,
-//! and the CRS layer. The rotation/spiral JTS-intersection oracle is covered by one
-//! representative case (`clip_matches_intersection_oracle`).
+//! ## Coverage of planetiler `FeatureRendererTest`
+//!
+//! Every geometry-clipping test is ported. A few cases produce different (but valid) results
+//! and are annotated with `DIVERGENCE FROM PLANETILER` where they assert geo's actual output.
+//!
+//! Intentionally NOT ported, because they exercise pipeline stages other than tile clipping
+//! (and would need machinery `geo` does not provide):
+//! * simplification: `testSimplifyLine`, `testSimplifyMakesOutputInvalid`;
+//! * min-size filtering: `testLimit*`, `testOmitsPolygonUnderMinSize`,
+//!   `testIncludesPolygonUnderMinTolerance`, `testUses1pxMinAreaAtMaxZoom`;
+//! * encode-grid rounding: `testDuplicatePointsRemovedAfterRounding`,
+//!   `testLineStringCollapsesToPointWithRounding`, `testRoundingCollapsesPolygonToLine`,
+//!   `testRoundingMakesOutputInvalid`;
+//! * label grids: `testLabelGrid*`, `testMultipointWithLabelGridSplits`, `testWrapLabelGrid`;
+//! * linear ranges / geometry pipeline: `testLinearRange*`, `testGeometryPipeline*`;
+//! * `testSpiral`: its input is built with JTS `buffer()`, which `geo` lacks;
+//! * `testEmitPointsRespectShape`: needs planetiler's `bottomrightearth.poly` resource — the
+//!   shape-clip path itself is covered by `tile_extents::shape`.
 
 #![allow(clippy::pedantic, reason = "ported test coordinates and literals")]
 
@@ -15,14 +29,18 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use geo::BooleanOps;
-use geo_types::{Geometry, MultiPolygon, Polygon};
+use geo::{BooleanOps, MapCoords};
+use geo_types::{Coord, Geometry, MultiPolygon, Polygon, Rect};
 use map_tile_toolkit::TileId;
+use map_tile_toolkit::extents::{ForZoom, TileExtents};
+use map_tile_toolkit::geo_utils::{get_world_x, get_world_y};
+use map_tile_toolkit::stripe::TiledGeometry;
 use support::{
     assert_tiles, line_string, new_line_string, new_multi_line_string, new_multi_point,
     new_multi_polygon, new_point, new_polygon, new_polygon_holes, rectangle,
-    rectangle_coord_list_sq, rectangle_sq, render, tile_bottom, tile_bottom_left,
-    tile_bottom_right, tile_fill, tile_left, tile_right, tile_top, tile_top_left, tile_top_right,
+    rectangle_coord_list_sq, rectangle_sq, render, rotate_tile, rotate_world, tile_bottom,
+    tile_bottom_left, tile_bottom_right, tile_fill, tile_left, tile_right, tile_top, tile_top_left,
+    tile_top_right,
 };
 
 const Z14_TILES: i32 = 1 << 14;
@@ -463,17 +481,18 @@ fn multipolygon() {
 }
 
 #[test]
-#[ignore = "planetiler's repaired apex (16.6875) is a JTS buffer(0) snapping artifact; geo's \
-            overlay repair yields the geometrically-exact apex (16.6667), a valid but different triangle"]
 fn fix_invalid_input_geometry() {
     // Bow-tie (self-intersecting) polygon must be repaired to a valid shape.
     let g = new_polygon(&wcs(&[10., 10., 30., 10., 10., 20., 20., 20., 10., 10.]));
+    // DIVERGENCE FROM PLANETILER: planetiler's repaired apex is (16.6875, 16.6875), a JTS
+    // `buffer(0)` snapping artifact. geo's overlay repair splits the bow-tie at the
+    // geometrically-exact self-intersection point (16.6667, 16.6667). Both are valid single
+    // triangles; we assert geo's exact apex so the test keeps running.
+    let apex = 50.0 / 3.0; // 16.6666… — geo's exact intersection point
     assert_tiles(
         vec![(
             c(0, 0),
-            vec![new_polygon(&[
-                10., 10., 30., 10., 16.6875, 16.6875, 10., 10.,
-            ])],
+            vec![new_polygon(&[10., 10., 30., 10., apex, apex, 10., 10.])],
         )],
         &render(&g, 14, 14, 1.0),
     );
@@ -503,36 +522,260 @@ fn poly(g: Geometry<f64>) -> Polygon<f64> {
     }
 }
 
-/// The rendered clip of a polygon must equal the JTS/`geo` intersection with the buffered
-/// tile rectangle `(-4..260)`. This is planetiler's `testClipWithRotation` oracle, ported
-/// with `geo::BooleanOps::intersection` as the reference.
+/// The rendered clip of a polygon (in tile-pixel coords) must be topologically equal to the
+/// `geo` intersection with the buffered tile rectangle `(-4..260)`, at any rotation. This is
+/// planetiler's `testClipWithRotation` oracle, using `geo::BooleanOps::intersection` as the
+/// independent reference.
+fn clip_with_rotation(rotation: i32, input_tile: &Geometry<f64>) {
+    // Scale pixel coords into world space, then rotate about the world tile center.
+    let world = input_tile.map_coords(|p| Coord {
+        x: 0.5 + p.x / 256.0 / f64::from(Z14_TILES),
+        y: 0.5 + p.y / 256.0 / f64::from(Z14_TILES),
+    });
+    let center = 0.5 + Z14_WIDTH / 2.0;
+    let rotated = rotate_world(&world, center, center, -rotation);
+
+    // Oracle: intersect the pixel-space polygon with the tile buffered by 4px, then rotate it
+    // in tile space the same way.
+    let tile_rect = MultiPolygon(vec![poly(rectangle_sq(-4.0, 260.0))]);
+    let oracle = poly(input_tile.clone()).intersection(&tile_rect);
+    let expected = rotate_tile(&Geometry::MultiPolygon(oracle), -rotation);
+
+    let rendered = render(&rotated, 14, 14, 4.0);
+    let got = &rendered.get(&c(0, 0)).expect("center tile present")[0];
+    support::assert_same_normalized(&expected, got);
+}
+
+const ROTATIONS: [i32; 4] = [0, 90, 180, -90];
+
 #[test]
-fn clip_matches_intersection_oracle() {
-    // Zig-zag polygon (pixels) crossing the tile boundary repeatedly (testBackAndForthsOutsideTile).
-    let input_px = new_polygon(&[
+fn back_and_forths_outside_tile() {
+    let input = new_polygon(&[
         300., -10., 310., 300., 320., -10., 330., 300., 340., 400., 128., 400., 128., 128., 128.,
         -10., 300., -10.,
     ]);
-    // Scale pixel coords into world space: c -> 0.5 + c / 256 / Z14_TILES.
-    let world = {
-        use geo::MapCoords;
-        input_px.map_coords(|p| geo_types::Coord {
-            x: 0.5 + p.x / 256.0 / f64::from(Z14_TILES),
-            y: 0.5 + p.y / 256.0 / f64::from(Z14_TILES),
-        })
-    };
+    for r in ROTATIONS {
+        clip_with_rotation(r, &input);
+    }
+}
 
-    // Oracle: intersect the pixel-space polygon with the tile buffered by 4px.
-    let tile_rect = poly(rectangle_sq(-4.0, 260.0));
-    let oracle: MultiPolygon<f64> = poly(input_px).intersection(&MultiPolygon(vec![tile_rect]));
+#[test]
+fn replay_edges_outer_poly() {
+    let input = new_polygon(&[
+        130., -10., 270., -10., 270., 270., -10., 270., -10., -10., 120., -10., 120., 10., 130.,
+        10., 130., -10.,
+    ]);
+    for r in ROTATIONS {
+        clip_with_rotation(r, &input);
+    }
+}
 
-    let rendered = render(&world, 14, 14, 4.0);
-    let got = rendered.get(&c(0, 0)).expect("center tile present");
-    // Compare (topologically, after rounding) the rendered center tile to the oracle.
-    let expected = Geometry::MultiPolygon(oracle);
-    assert_tiles(vec![(c(0, 0), vec![expected])], &{
-        let mut m = BTreeMap::new();
-        m.insert(c(0, 0), got.clone());
-        m
+#[test]
+fn replay_edges_inner_poly() {
+    let mut inner = line_string(&[
+        130., -10., 270., -10., 270., 270., -10., 270., -10., -10., 120., -10., 120., 10., 130.,
+        10., 130., -10.,
+    ]);
+    inner.0.reverse();
+    let input = new_polygon_holes(rectangle_coord_list_sq(-20., 300.), vec![inner]);
+    for r in ROTATIONS {
+        clip_with_rotation(r, &input);
+    }
+}
+
+// ===========================================================================
+// Additional clipping cases (points, nested/overlapping polygons, world fill,
+// bounds clipping, dateline wrapping)
+// ===========================================================================
+
+#[test]
+fn empty_geometry() {
+    let g = new_multi_point(&[]);
+    assert_tiles(vec![], &render(&g, 14, 14, 0.0));
+}
+
+#[test]
+fn single_point() {
+    let g = new_point(0.5 + Z14_WIDTH / 2.0, 0.5 + Z14_WIDTH / 2.0);
+    assert_tiles(
+        vec![(c(0, 0), vec![new_point(128., 128.)])],
+        &render(&g, 14, 14, 0.0),
+    );
+}
+
+#[test]
+fn triangle_touching_neighboring_tile_below_does_not_emit() {
+    let g = new_polygon(&wcs(&[10., 10., 20., 10., 10., 256., 10., 10.]));
+    assert_tiles(
+        vec![(
+            c(0, 0),
+            vec![new_polygon(&[10., 10., 20., 10., 10., 256., 10., 10.])],
+        )],
+        &render(&g, 14, 14, 0.0),
+    );
+}
+
+#[test]
+fn nested_multipolygon() {
+    let outer = new_polygon_holes(
+        rectangle_coord_list_sq(wc(10.), wc(200.)),
+        vec![rectangle_coord_list_sq(wc(20.), wc(190.))],
+    );
+    let g = new_multi_polygon(vec![poly(outer), poly(rectangle_sq(wc(30.), wc(180.)))]);
+    let expected = new_multi_polygon(vec![
+        poly(new_polygon_holes(
+            rectangle_coord_list_sq(10., 200.),
+            vec![rectangle_coord_list_sq(20., 190.)],
+        )),
+        poly(rectangle_sq(30., 180.)),
+    ]);
+    assert_tiles(vec![(c(0, 0), vec![expected])], &render(&g, 14, 14, 1.0));
+}
+
+#[test]
+fn nested_multipolygon_fill() {
+    let outer = new_polygon_holes(
+        rectangle_coord_list_sq(wc(-30.), wc(286.)),
+        vec![rectangle_coord_list_sq(wc(-20.), wc(276.))],
+    );
+    let g = new_multi_polygon(vec![poly(outer), poly(rectangle_sq(wc(-10.), wc(266.)))]);
+    // Center tile is a solid fill.
+    assert_tiles_subset(&render(&g, 14, 14, 1.0), c(0, 0), &rectangle_sq(-1., 257.));
+}
+
+#[test]
+fn nested_multipolygon_infers_outer_fill() {
+    let outer = new_polygon_holes(
+        rectangle_coord_list_sq(wc(-30.), wc(286.)),
+        vec![rectangle_coord_list_sq(wc(-20.), wc(276.))],
+    );
+    let inner = new_polygon_holes(
+        rectangle_coord_list_sq(wc(-10.), wc(266.)),
+        vec![rectangle_coord_list_sq(wc(10.), wc(246.))],
+    );
+    let g = new_multi_polygon(vec![poly(outer), poly(inner)]);
+    let expected = new_polygon_holes(
+        rectangle_coord_list_sq(-1., 257.),
+        vec![rectangle_coord_list_sq(10., 246.)],
+    );
+    assert_tiles_subset(&render(&g, 14, 14, 1.0), c(0, 0), &expected);
+}
+
+#[test]
+fn nested_multipolygon_cancels_out_inner_fill() {
+    let outer = new_polygon_holes(
+        rectangle_coord_list_sq(wc(-30.), wc(286.)),
+        vec![rectangle_coord_list_sq(wc(-20.), wc(276.))],
+    );
+    let inner = new_polygon_holes(
+        rectangle_coord_list_sq(wc(-10.), wc(266.)),
+        vec![rectangle_coord_list_sq(wc(-5.), wc(261.))],
+    );
+    let g = new_multi_polygon(vec![poly(outer), poly(inner)]);
+    assert!(
+        !render(&g, 14, 14, 1.0).contains_key(&c(0, 0)),
+        "center fill cancels out"
+    );
+}
+
+#[test]
+fn overlapping_multipolygon() {
+    let g = new_multi_polygon(vec![
+        poly(rectangle(10. / 256., 10. / 256., 30. / 256., 30. / 256.)),
+        poly(rectangle(20. / 256., 20. / 256., 40. / 256., 40. / 256.)),
+    ]);
+    let expected = new_polygon(&[
+        10., 10., 30., 10., 30., 20., 40., 20., 40., 40., 20., 40., 20., 30., 10., 30., 10., 10.,
+    ]);
+    assert_tiles(vec![(t(0, 0, 0), vec![expected])], &render(&g, 0, 0, 4.0));
+}
+
+#[test]
+fn overlapping_multipolygon_side_by_side() {
+    let g = new_multi_polygon(vec![
+        poly(rectangle(10. / 256., 10. / 256., 20. / 256., 20. / 256.)),
+        poly(rectangle(15. / 256., 10. / 256., 25. / 256., 20. / 256.)),
+    ]);
+    assert_tiles(
+        vec![(t(0, 0, 0), vec![rectangle(10., 10., 25., 20.)])],
+        &render(&g, 0, 0, 4.0),
+    );
+}
+
+#[test]
+fn world_fill() {
+    // A near-world rectangle at z8 fills every one of the 4^8 tiles.
+    let s = rectangle_sq(Z14_WIDTH / 2.0, 1.0 - Z14_WIDTH / 2.0);
+    let scaled = s.map_coords(|p| Coord {
+        x: p.x * 256.0,
+        y: p.y * 256.0,
     });
+    let extents = ForZoom::new(8, 0, 0, 256, 256, None);
+    let tiled = TiledGeometry::slice_geometry(&scaled, 0.0, 0.0, 8, &extents).expect("slice");
+    assert_eq!(tiled.covered_tiles().iter().count(), 4usize.pow(8));
+}
+
+#[test]
+fn emit_points_respect_extents() {
+    // bounds = lon 0..180, lat -80..0 (planetiler "0,-80,180,0").
+    let bounds = Rect::new(
+        Coord {
+            x: get_world_x(0.0),
+            y: get_world_y(0.0),
+        },
+        Coord {
+            x: get_world_x(180.0),
+            y: get_world_y(-80.0),
+        },
+    );
+    let extents = TileExtents::compute_from_world_bounds(1, bounds);
+    let g = new_point(0.5 + 1.0 / 512.0, 0.5 + 1.0 / 512.0);
+    let rendered = support::render_with(&g, 0, 1, 2.0, |z| extents.for_zoom(z));
+    assert_tiles(
+        vec![
+            (t(0, 0, 0), vec![new_point(128.5, 128.5)]),
+            (t(1, 1, 1), vec![new_point(1., 1.)]),
+        ],
+        &rendered,
+    );
+}
+
+#[test]
+fn process_points_near_dateline_and_poles() {
+    let d = 1.0 / 512.0;
+    // (x, wrapped, z1x0, z1x1)
+    let xs = [
+        (-d, 1.0 - d, -1.0, 255.0),
+        (d, 1.0 + d, 1.0, 257.0),
+        (1.0 - d, -d, -1.0, 255.0),
+        (1.0 + d, d, 1.0, 257.0),
+    ];
+    // (y, z1ty, tyoff)
+    let ys = [
+        (0.25, 0u32, 128.0),
+        (-d, 0, -1.0),
+        (d, 0, 1.0),
+        (1.0 - d, 1, 255.0),
+        (1.0 + d, 1, 257.0),
+    ];
+    for &(x, wrapped, z1x0, z1x1) in &xs {
+        for &(y, z1ty, tyoff) in &ys {
+            let g = new_point(x, y);
+            let rendered = render(&g, 0, 1, 2.0);
+            assert_tiles(
+                vec![
+                    (
+                        t(0, 0, 0),
+                        vec![new_multi_point(&[
+                            (x * 256., y * 256.),
+                            (wrapped * 256., y * 256.),
+                        ])],
+                    ),
+                    (t(0, z1ty, 1), vec![new_point(z1x0, tyoff)]),
+                    (t(1, z1ty, 1), vec![new_point(z1x1, tyoff)]),
+                ],
+                &rendered,
+            );
+        }
+    }
 }

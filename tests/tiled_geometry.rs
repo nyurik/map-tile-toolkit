@@ -11,6 +11,7 @@ mod support;
 use std::collections::BTreeSet;
 
 use geo_types::Geometry;
+use insta::assert_snapshot;
 use map_tile_toolkit::TileId;
 use map_tile_toolkit::extents::ForZoom;
 use map_tile_toolkit::stripe::{CoordSeqGroups, GeometryError, TiledGeometry};
@@ -378,7 +379,7 @@ fn side_of_hole_intercepted() {
                 let holes = groups[0].iter().skip(1).cloned().collect();
                 Geometry::Polygon(geo_types::Polygon::new(exterior, holes))
             };
-            insta::assert_snapshot!(
+            assert_snapshot!(
                 wkt(&round(&poly, 10.0)),
                 @"POLYGON((0 0,256 0,256 256,0 256,0 0),(0 256,0 0,256 0,256 51.2,128 51.2,128 204.8,256 204.8,256 0,0 0,0 256))"
             );
