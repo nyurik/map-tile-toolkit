@@ -26,8 +26,9 @@ wkt = "0.14"
 name = "clipping"
 harness = false
 
-# Keep debug symbols in benchmark builds so `just flamegraph` produces readable stacks.
-[profile.bench]
+# Optimized build with debug symbols, used by `just flamegraph` for readable profiles.
+[profile.profiling]
+inherits = "release"
 debug = true
 
 [lints.rust]

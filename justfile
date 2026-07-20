@@ -86,22 +86,26 @@ env-info:
     @echo "CARGO_BUILD_WARNINGS='$CARGO_BUILD_WARNINGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
 
-# Flamegraph clipping benchmarks matching `filter` (needs Linux perf + cargo-flamegraph)
-flamegraph filter secs='10':  (cargo-install 'cargo-flamegraph' 'flamegraph')
+# Flamegraph the clipping code for one geometry `kind` and `op` (needs Linux perf)
+# kind: polygon | polygon_with_holes | polyline    op: stripe | per_tile | one_tile
+flamegraph kind='polygon' op='stripe' secs='10':  (cargo-install 'cargo-flamegraph' 'flamegraph')
     #!/usr/bin/env bash
     set -euo pipefail
     # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
-    # Example: `just flamegraph slice_all_tiles/polyline/stripe`
+    # Profiles a dedicated loop binary (examples/profile_clip.rs) — no benchmark harness or
+    # `cargo metadata` startup, so the flamegraph shows only the clipping code.
     mkdir -p target/flamegraphs
-    out="target/flamegraphs/$(echo '{{filter}}' | tr '/ :' '___').svg"
-    cargo flamegraph --bench clipping --output "$out" -- --profile-time {{secs}} '{{filter}}'
+    out="target/flamegraphs/{{op}}_{{kind}}.svg"
+    cargo flamegraph --profile profiling --example profile_clip --output "$out" -- {{kind}} {{op}} {{secs}}
     echo "Wrote $out"
 
-# Generate one flamegraph per geometry type for the "slice into all tiles" path.
+# Generate one flamegraph per geometry type for the eager "slice into all tiles" path.
 flamegraph-all secs='10':
-    {{just}} flamegraph 'slice_all_tiles/polygon/stripe' {{secs}}
-    {{just}} flamegraph 'slice_all_tiles/polygon_with_holes/stripe' {{secs}}
-    {{just}} flamegraph 'slice_all_tiles/polyline/stripe' {{secs}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for kind in polygon polygon_with_holes polyline; do
+        {{just}} flamegraph "$kind" stripe {{secs}}
+    done
 
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
