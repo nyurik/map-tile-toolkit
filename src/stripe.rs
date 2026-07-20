@@ -109,8 +109,8 @@ impl MutSeq {
         self.pts.len()
     }
 
-    fn to_line_string(&self) -> LineString<f64> {
-        LineString(self.pts.clone())
+    fn into_line_string(self) -> LineString<f64> {
+        LineString(self.pts)
     }
 }
 
@@ -136,41 +136,78 @@ fn fill_seq(buffer: f64) -> MutSeq {
 // A set of integer Y values supporting the even-odd fill bookkeeping.
 // ---------------------------------------------------------------------------
 
+/// A set of integer Y values stored as sorted, distinct membership-toggle boundaries.
+///
+/// Membership of `y` is "inside" when the number of boundaries `<= y` is odd, so the set is
+/// the union of half-open runs `[edges[0], edges[1]) ∪ [edges[2], edges[3]) ∪ …` (`edges`
+/// always has even length). This makes `xor` two boundary toggles instead of touching every
+/// integer, and the set operations linear in the number of runs rather than the covered span.
 #[derive(Debug, Default, Clone)]
 struct RangeSet {
-    set: BTreeSet<i32>,
+    edges: Vec<i32>,
 }
 
 impl RangeSet {
+    /// Insert or remove a single boundary, keeping `edges` sorted and distinct.
+    fn toggle(&mut self, b: i32) {
+        match self.edges.binary_search(&b) {
+            Ok(i) => {
+                self.edges.remove(i);
+            }
+            Err(i) => self.edges.insert(i, b),
+        }
+    }
     /// Toggle membership of the inclusive range `[lo, hi]`.
     fn xor(&mut self, lo: i32, hi: i32) {
-        for y in lo..=hi {
-            if !self.set.remove(&y) {
-                self.set.insert(y);
-            }
-        }
+        self.toggle(lo);
+        self.toggle(hi + 1);
     }
     fn contains(&self, y: i32) -> bool {
-        self.set.contains(&y)
+        self.edges.partition_point(|&b| b <= y) % 2 == 1
     }
     fn is_empty(&self) -> bool {
-        self.set.is_empty()
+        self.edges.is_empty()
+    }
+    /// Combine two range sets under a boolean membership predicate (union/intersection/diff).
+    fn combine(&self, other: &Self, op: impl Fn(bool, bool) -> bool) -> Self {
+        let (a, b) = (&self.edges, &other.edges);
+        let mut edges = Vec::new();
+        let (mut i, mut j) = (0usize, 0usize);
+        let (mut in_a, mut in_b, mut cur) = (false, false, false);
+        while i < a.len() || j < b.len() {
+            let next = match (a.get(i), b.get(j)) {
+                (Some(&x), Some(&y)) => x.min(y),
+                (Some(&x), None) => x,
+                (None, Some(&y)) => y,
+                (None, None) => break,
+            };
+            while i < a.len() && a[i] == next {
+                in_a = !in_a;
+                i += 1;
+            }
+            while j < b.len() && b[j] == next {
+                in_b = !in_b;
+                j += 1;
+            }
+            let now = op(in_a, in_b);
+            if now != cur {
+                edges.push(next);
+                cur = now;
+            }
+        }
+        Self { edges }
     }
     fn intersect(&self, other: &Self) -> Self {
-        Self {
-            set: self.set.intersection(&other.set).copied().collect(),
-        }
+        self.combine(other, |a, b| a && b)
     }
     fn add_all(&mut self, other: &Self) {
-        self.set.extend(other.set.iter().copied());
+        *self = self.combine(other, |a, b| a || b);
     }
     fn remove_all(&mut self, other: &Self) {
-        for y in &other.set {
-            self.set.remove(y);
-        }
+        *self = self.combine(other, |a, b| a && !b);
     }
     fn iter(&self) -> impl Iterator<Item = i32> + '_ {
-        self.set.iter().copied()
+        self.edges.chunks_exact(2).flat_map(|c| c[0]..c[1])
     }
 }
 
@@ -502,9 +539,9 @@ impl TiledGeometry {
             }
             let min_points = if self.area { 4 } else { 2 };
             let out: Vec<LineString<f64>> = seqs
-                .iter()
+                .into_iter()
                 .filter(|s| s.size() >= min_points)
-                .map(MutSeq::to_line_string)
+                .map(MutSeq::into_line_string)
                 .collect();
             if !out.is_empty() && self.extents.test(tile.x as i32, tile.y as i32) {
                 self.tile_contents.entry(tile).or_default().push(out);
@@ -615,8 +652,10 @@ impl TiledGeometry {
         let mut tile_ys_with_detail: Option<BTreeSet<i32>> = None;
         let mut right_filled: Option<RangeSet> = None;
         let mut left_filled: Option<RangeSet> = None;
-        // y -> index of the open slice within in_progress[tile(x,y)]
-        let mut y_slices: BTreeMap<i32, usize> = BTreeMap::new();
+        // The open slice for each tile row `y`, owned here and drained into `in_progress` at
+        // the end — so the per-vertex loop mutates this small `y`-keyed map rather than
+        // re-searching the large `TileId`-keyed `in_progress` map on every point.
+        let mut y_slices: BTreeMap<i32, MutSeq> = BTreeMap::new();
 
         struct Skipped {
             left: bool,
@@ -686,19 +725,19 @@ impl TiledGeometry {
                     if let Some(detail) = tile_ys_with_detail.as_mut() {
                         detail.insert(y);
                     }
-                    let entry = in_progress.entry(tile).or_default();
                     // infer a fill if a hole is the first thing to touch a filled interior tile
-                    if self.area && !outer && entry.is_empty() {
-                        if !self.is_filled(x, y) {
-                            return Err(GeometryError::BadPolygonFill(format!(
-                                "{x}, {y} is not filled!"
-                            )));
+                    if self.area && !outer {
+                        let entry = in_progress.entry(tile).or_default();
+                        if entry.is_empty() {
+                            if !self.is_filled(x, y) {
+                                return Err(GeometryError::BadPolygonFill(format!(
+                                    "{x}, {y} is not filled!"
+                                )));
+                            }
+                            entry.push(fill_seq(self.buffer));
                         }
-                        entry.push(fill_seq(self.buffer));
                     }
-                    entry.push(MutSeq::new_scaling(0.0, f64::from(y), TILE_SIZE));
-                    let idx = entry.len() - 1;
-                    y_slices.insert(y, idx);
+                    let mut slice = MutSeq::new_scaling(0.0, f64::from(y), TILE_SIZE);
 
                     // backfill edges skipped for this now-detailed tile
                     let contains = left_filled.as_ref().is_some_and(|l| l.contains(y))
@@ -715,16 +754,15 @@ impl TiledGeometry {
                                 } else {
                                     1.0 + self.buffer
                                 };
-                                let slice = &mut in_progress.get_mut(&tile).expect("tile")[idx];
                                 slice.add_point(edge_x, start);
                                 slice.add_point(edge_x, end);
                             }
                         }
                     }
+                    y_slices.insert(y, slice);
                 }
 
-                let idx = *y_slices.get(&y).expect("y slice exists");
-                let slice = &mut in_progress.get_mut(&tile).expect("tile exists")[idx];
+                let slice = y_slices.get_mut(&y).expect("y slice exists");
                 let mut exited = false;
                 if ay < top_limit {
                     if by > top_limit {
@@ -746,7 +784,11 @@ impl TiledGeometry {
                     exited = true;
                 }
                 if !self.area && exited {
-                    y_slices.remove(&y);
+                    // The line left the clip band; finalize this piece so a re-entry starts a
+                    // fresh linestring.
+                    if let Some(seq) = y_slices.remove(&y) {
+                        in_progress.entry(tile).or_default().push(seq);
+                    }
                 }
                 y += 1;
             }
@@ -761,15 +803,19 @@ impl TiledGeometry {
             let k1 = f64::from(y) - self.buffer;
             let k2 = f64::from(y) + 1.0 + self.buffer;
             if ay >= k1 && ay <= k2 {
-                if let Some(&idx) = y_slices.get(&y) {
-                    let tile = TileId::new(xu, y as u32, self.z);
-                    in_progress.get_mut(&tile).expect("tile exists")[idx].add_point(ax, ay);
+                if let Some(slice) = y_slices.get_mut(&y) {
+                    slice.add_point(ax, ay);
                 }
             }
         }
 
-        if self.area {
-            close_open_rings(&y_slices, xu, self.z, in_progress);
+        // Drain the open slices into `in_progress`, closing rings for polygons.
+        for (y, mut slice) in y_slices {
+            if self.area {
+                slice.close_ring();
+            }
+            let tile = TileId::new(xu, y as u32, self.z);
+            in_progress.entry(tile).or_default().push(slice);
         }
 
         Ok(match (right_filled, left_filled) {
@@ -801,23 +847,6 @@ impl TiledGeometry {
             .as_ref()
             .and_then(|r| r.get(&x))
             .is_some_and(|col| col.contains(y))
-    }
-}
-
-/// Close every open ring in `y_slices` (borrow-checker-friendly helper for [`TiledGeometry::slice_y`]).
-fn close_open_rings(
-    y_slices: &BTreeMap<i32, usize>,
-    xu: u32,
-    z: u8,
-    in_progress: &mut BTreeMap<TileId, Vec<MutSeq>>,
-) {
-    for (&y, &idx) in y_slices {
-        let tile = TileId::new(xu, y as u32, z);
-        if let Some(seqs) = in_progress.get_mut(&tile) {
-            if let Some(slice) = seqs.get_mut(idx) {
-                slice.close_ring();
-            }
-        }
     }
 }
 

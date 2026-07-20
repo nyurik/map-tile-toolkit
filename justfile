@@ -99,12 +99,14 @@ flamegraph kind='polygon' op='stripe' secs='10':  (cargo-install 'cargo-flamegra
     cargo flamegraph --profile profiling --example profile_clip --output "$out" -- {{kind}} {{op}} {{secs}}
     echo "Wrote $out"
 
-# Generate one flamegraph per geometry type for the eager "slice into all tiles" path.
+# Generate flamegraphs per geometry type for both the one-tile and all-tiles clip paths.
 flamegraph-all secs='10':
     #!/usr/bin/env bash
     set -euo pipefail
     for kind in polygon polygon_with_holes polyline; do
-        {{just}} flamegraph "$kind" stripe {{secs}}
+        for op in one_tile stripe; do
+            {{just}} flamegraph "$kind" "$op" {{secs}}
+        done
     done
 
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
