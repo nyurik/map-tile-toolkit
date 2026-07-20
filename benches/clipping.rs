@@ -1,12 +1,12 @@
-//! Benchmarks for the geometry-clipping paths.
+//! Geometry-clipping benchmarks, organized by geometry type.
 //!
-//! Each clipper is run over synthetic geometry of increasing complexity, reporting
-//! throughput, to compare the two clipping strategies:
+//! For each geometry type — polygon, polygon-with-holes, and polyline — two operations are
+//! measured:
 //!
-//! * **per-tile** (`slice_tile` / `slice_all_tiles`): clip to each tile with `geo`'s overlay
-//!   engine, `O(tiles × geometry)`.
-//! * **stripe** (`stripe::TiledGeometry`): the eager slicer, roughly `O(geometry)` for a whole
-//!   zoom level, with interior fill detection.
+//! * **one tile** ([`slice_tile`]): extract a single tile's clipped slice from the geometry
+//!   (the tile-server operation).
+//! * **all tiles**: slice the geometry into every tile it occupies, via both clipping paths —
+//!   the per-tile [`slice_all_tiles`] and the eager [`stripe::TiledGeometry`] slicer.
 //!
 //! Run with `cargo bench`. All input is deterministic (no RNG) so runs are comparable.
 
@@ -17,6 +17,7 @@ use std::hint::black_box;
 use std::num::NonZeroU32;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, LineString, Polygon};
 use map_tile_toolkit::extents::ForZoom;
 use map_tile_toolkit::stripe::TiledGeometry;
@@ -26,9 +27,8 @@ use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 const CIRC: f64 = 40_075_016.685_578_5;
 const ORIGIN: f64 = CIRC / 2.0;
 
-const VERTEX_COUNTS: [usize; 3] = [16, 64, 256];
-/// Zoom for the head-to-head per-tile-vs-stripe comparison (256 tiles — keeps the per-tile path tractable).
-const ZOOM: u8 = 4;
+/// Zoom used for the "all tiles" benchmarks (1024 tiles).
+const ZOOM: u8 = 5;
 const BUFFER_PX: u32 = 64;
 const EXTENT: u32 = 4096;
 
@@ -40,99 +40,108 @@ fn buffer_fraction() -> f64 {
     f64::from(BUFFER_PX) / f64::from(EXTENT)
 }
 
-fn for_zoom(z: u8) -> ForZoom {
+fn full_extents(z: u8) -> ForZoom {
     let n = 1i32 << z;
     ForZoom::new(z, 0, 0, n, n, None)
 }
 
-/// A closed regular `n`-gon ring in world-fraction coordinates (`0..1` = whole world),
-/// centered at `(0.5, 0.5)` with the given radius.
-fn ngon_world(n: usize, radius: f64) -> Vec<(f64, f64)> {
-    let mut ring: Vec<(f64, f64)> = (0..n)
+// --- synthetic geometries, in world-fraction coordinates (0..1 = whole world) -------------
+
+/// A closed regular `n`-gon ring centered at `(cx, cy)` with radius `r`.
+fn ring(cx: f64, cy: f64, r: f64, n: usize) -> LineString<f64> {
+    let mut pts: Vec<Coord<f64>> = (0..n)
         .map(|k| {
             let theta = 2.0 * PI * (k as f64) / (n as f64);
-            (0.5 + radius * theta.cos(), 0.5 + radius * theta.sin())
+            Coord { x: cx + r * theta.cos(), y: cy + r * theta.sin() }
         })
         .collect();
-    ring.push(ring[0]);
-    ring
+    pts.push(pts[0]);
+    LineString(pts)
 }
 
-/// World-fraction ring → a Web Mercator polygon (input to the per-tile path).
-fn mercator_polygon(ring: &[(f64, f64)]) -> Geometry<f64> {
-    let coords = ring
-        .iter()
-        .map(|&(wx, wy)| Coord { x: -ORIGIN + wx * CIRC, y: ORIGIN - wy * CIRC })
-        .collect::<Vec<_>>();
-    Geometry::Polygon(Polygon::new(LineString(coords), vec![]))
+/// A 64-gon covering much of the world.
+fn polygon_world() -> Geometry<f64> {
+    Geometry::Polygon(Polygon::new(ring(0.5, 0.5, 0.4, 64), vec![]))
 }
 
-/// World-fraction ring → a polygon in `2^zoom` tile units (input to the stripe slicer).
-fn tile_polygon(ring: &[(f64, f64)], zoom: u8) -> Geometry<f64> {
+/// The same outer ring with two interior holes.
+fn polygon_with_holes_world() -> Geometry<f64> {
+    Geometry::Polygon(Polygon::new(
+        ring(0.5, 0.5, 0.4, 64),
+        vec![ring(0.35, 0.5, 0.08, 32), ring(0.65, 0.5, 0.08, 32)],
+    ))
+}
+
+/// A sinusoidal polyline that passes through the world center and spans a band of tiles.
+fn polyline_world() -> Geometry<f64> {
+    let n = 65; // odd, so the midpoint vertex lands exactly on (0.5, 0.5)
+    let pts: Vec<Coord<f64>> = (0..n)
+        .map(|k| {
+            let t = (k as f64) / ((n - 1) as f64);
+            Coord { x: 0.1 + 0.8 * t, y: 0.5 + 0.35 * (2.0 * PI * 2.0 * t).sin() }
+        })
+        .collect();
+    Geometry::LineString(LineString(pts))
+}
+
+/// World-fraction → Web Mercator (input to `slice_tile` / `slice_all_tiles`).
+fn to_mercator(geom: &Geometry<f64>) -> Geometry<f64> {
+    geom.map_coords(|c| Coord { x: -ORIGIN + c.x * CIRC, y: ORIGIN - c.y * CIRC })
+}
+
+/// World-fraction → `2^zoom` tile units (input to the stripe slicer).
+fn to_tile_units(geom: &Geometry<f64>, zoom: u8) -> Geometry<f64> {
     let scale = f64::from(1u32 << zoom);
-    let coords = ring
-        .iter()
-        .map(|&(wx, wy)| Coord { x: wx * scale, y: wy * scale })
-        .collect::<Vec<_>>();
-    Geometry::Polygon(Polygon::new(LineString(coords), vec![]))
+    geom.map_coords(|c| Coord { x: c.x * scale, y: c.y * scale })
 }
 
-/// Per-tile vs stripe, clipping the same N-gon into every tile it touches at [`ZOOM`].
-fn bench_batch(c: &mut Criterion) {
-    let mut group = c.benchmark_group("batch_clip_all_tiles_z4");
-    // The per-tile path runs ~1-2 ms/iter, too slow for criterion's default 100 samples in 5s.
-    group.sample_size(50);
+fn geometries() -> [(&'static str, Geometry<f64>); 3] {
+    [
+        ("polygon", polygon_world()),
+        ("polygon_with_holes", polygon_with_holes_world()),
+        ("polyline", polyline_world()),
+    ]
+}
+
+// --- benchmarks -----------------------------------------------------------
+
+/// Extract a single tile's slice from each geometry type.
+fn bench_clip_one_tile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clip_one_tile");
+    let opts = opts();
+    let tile = TileId::new(1 << (ZOOM - 1), 1 << (ZOOM - 1), ZOOM); // center tile (16, 16, 5)
+    for (name, geom) in geometries() {
+        let merc = to_mercator(&geom);
+        group.bench_function(name, |b| b.iter(|| black_box(slice_tile(&merc, tile, opts))));
+    }
+    group.finish();
+}
+
+/// Slice each geometry type into every tile it occupies, via both clipping paths.
+fn bench_slice_all_tiles(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_all_tiles");
+    // The per-tile path runs several ms/iter, too slow for criterion's default 100 samples.
+    group.sample_size(30);
     let opts = opts();
     let buffer = buffer_fraction();
-    let extents = for_zoom(ZOOM);
-    for &n in &VERTEX_COUNTS {
-        let ring = ngon_world(n, 0.45);
-        let merc = mercator_polygon(&ring);
-        let tile = tile_polygon(&ring, ZOOM);
+    let extents = full_extents(ZOOM);
+    for (name, geom) in geometries() {
+        let merc = to_mercator(&geom);
+        let tile_units = to_tile_units(&geom, ZOOM);
 
-        group.bench_with_input(BenchmarkId::new("per_tile", n), &merc, |b, g| {
+        group.bench_with_input(BenchmarkId::new(name, "per_tile"), &merc, |b, g| {
             b.iter(|| black_box(slice_all_tiles(g, ZOOM, opts).count()));
         });
-        group.bench_with_input(BenchmarkId::new("stripe", n), &tile, |b, g| {
+        group.bench_with_input(BenchmarkId::new(name, "stripe"), &tile_units, |b, g| {
             b.iter(|| {
                 let sliced = TiledGeometry::slice_geometry(g, 0.0, buffer, ZOOM, &extents)
                     .expect("slice");
-                black_box(sliced.tile_data().len())
+                black_box(sliced.tile_data().len() + sliced.filled_tiles().count())
             });
         });
     }
     group.finish();
 }
 
-/// Single-tile clip (the tile-server path): clip an N-gon to one tile it overlaps.
-fn bench_single_tile(c: &mut Criterion) {
-    let mut group = c.benchmark_group("single_tile_clip_z4");
-    let opts = opts();
-    let tile = TileId::new(8, 8, ZOOM); // near the polygon center at z4
-    for &n in &VERTEX_COUNTS {
-        let merc = mercator_polygon(&ngon_world(n, 0.45));
-        group.bench_with_input(BenchmarkId::new("slice_tile", n), &merc, |b, g| {
-            b.iter(|| black_box(slice_tile(g, tile, opts)));
-        });
-    }
-    group.finish();
-}
-
-/// Stripe fill detection: a near-world square at z8 fills the whole 256×256 grid. (The
-/// per-tile path is omitted here — 65 536 per-tile overlays would dominate the whole run.)
-fn bench_stripe_fill(c: &mut Criterion) {
-    let square = vec![(0.02, 0.02), (0.98, 0.02), (0.98, 0.98), (0.02, 0.98), (0.02, 0.02)];
-    let geom = tile_polygon(&square, 8);
-    let extents = for_zoom(8);
-    let buffer = buffer_fraction();
-    c.bench_function("stripe_fill_z8", |b| {
-        b.iter(|| {
-            let sliced =
-                TiledGeometry::slice_geometry(&geom, 0.0, buffer, 8, &extents).expect("slice");
-            black_box(sliced.filled_tiles().count() + sliced.tile_data().len())
-        });
-    });
-}
-
-criterion_group!(benches, bench_batch, bench_single_tile, bench_stripe_fill);
+criterion_group!(benches, bench_clip_one_tile, bench_slice_all_tiles);
 criterion_main!(benches);
