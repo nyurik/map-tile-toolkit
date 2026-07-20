@@ -35,3 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`slice_tile`/`slice_all_tiles`) vs the eager `stripe` slicer — plus a stripe fill-detection
   case. (Planetiler ships no clipping benchmark; these follow the shape of its
   `BenchmarkSimplify`.)
+
+### Changed
+
+- `slice_tile` now clips with dedicated axis-aligned rectangle primitives (Sutherland-Hodgman
+  for polygons, Liang-Barsky for lines) instead of `geo`'s general boolean overlay — `O(vertices)`
+  and ~3–8× faster on the `clip_one_tile` benchmark.
+- `slice_all_tiles` / `for_each_tile_slice` now slice in a single pass with the eager `stripe`
+  slicer (near-linear in geometry size) instead of clipping every candidate tile independently
+  (~5–6× faster on the batch benchmark). The two engines produce equivalent slices up to ±1px
+  integer snapping, so `slice_all_tiles` and `slice_tile` agree topologically/area-wise rather
+  than byte-for-byte.

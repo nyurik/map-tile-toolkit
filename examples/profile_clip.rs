@@ -33,7 +33,10 @@ fn ring(cx: f64, cy: f64, r: f64, n: usize) -> LineString<f64> {
     let mut pts: Vec<Coord<f64>> = (0..n)
         .map(|k| {
             let theta = 2.0 * PI * (k as f64) / (n as f64);
-            Coord { x: cx + r * theta.cos(), y: cy + r * theta.sin() }
+            Coord {
+                x: cx + r * theta.cos(),
+                y: cy + r * theta.sin(),
+            }
         })
         .collect();
     pts.push(pts[0]);
@@ -53,7 +56,10 @@ fn geometry(kind: &str) -> Geometry<f64> {
             let pts = (0..n)
                 .map(|k| {
                     let t = (k as f64) / f64::from(n - 1);
-                    Coord { x: 0.1 + 0.8 * t, y: 0.5 + 0.35 * (2.0 * PI * 2.0 * t).sin() }
+                    Coord {
+                        x: 0.1 + 0.8 * t,
+                        y: 0.5 + 0.35 * (2.0 * PI * 2.0 * t).sin(),
+                    }
                 })
                 .collect();
             Geometry::LineString(LineString(pts))
@@ -63,12 +69,18 @@ fn geometry(kind: &str) -> Geometry<f64> {
 }
 
 fn to_mercator(g: &Geometry<f64>) -> Geometry<f64> {
-    g.map_coords(|c| Coord { x: -ORIGIN + c.x * CIRC, y: ORIGIN - c.y * CIRC })
+    g.map_coords(|c| Coord {
+        x: -ORIGIN + c.x * CIRC,
+        y: ORIGIN - c.y * CIRC,
+    })
 }
 
 fn to_tile_units(g: &Geometry<f64>) -> Geometry<f64> {
     let scale = f64::from(1u32 << ZOOM);
-    g.map_coords(|c| Coord { x: c.x * scale, y: c.y * scale })
+    g.map_coords(|c| Coord {
+        x: c.x * scale,
+        y: c.y * scale,
+    })
 }
 
 fn main() {

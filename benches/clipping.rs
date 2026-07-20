@@ -52,7 +52,10 @@ fn ring(cx: f64, cy: f64, r: f64, n: usize) -> LineString<f64> {
     let mut pts: Vec<Coord<f64>> = (0..n)
         .map(|k| {
             let theta = 2.0 * PI * (k as f64) / (n as f64);
-            Coord { x: cx + r * theta.cos(), y: cy + r * theta.sin() }
+            Coord {
+                x: cx + r * theta.cos(),
+                y: cy + r * theta.sin(),
+            }
         })
         .collect();
     pts.push(pts[0]);
@@ -78,7 +81,10 @@ fn polyline_world() -> Geometry<f64> {
     let pts: Vec<Coord<f64>> = (0..n)
         .map(|k| {
             let t = (k as f64) / ((n - 1) as f64);
-            Coord { x: 0.1 + 0.8 * t, y: 0.5 + 0.35 * (2.0 * PI * 2.0 * t).sin() }
+            Coord {
+                x: 0.1 + 0.8 * t,
+                y: 0.5 + 0.35 * (2.0 * PI * 2.0 * t).sin(),
+            }
         })
         .collect();
     Geometry::LineString(LineString(pts))
@@ -86,13 +92,19 @@ fn polyline_world() -> Geometry<f64> {
 
 /// World-fraction → Web Mercator (input to `slice_tile` / `slice_all_tiles`).
 fn to_mercator(geom: &Geometry<f64>) -> Geometry<f64> {
-    geom.map_coords(|c| Coord { x: -ORIGIN + c.x * CIRC, y: ORIGIN - c.y * CIRC })
+    geom.map_coords(|c| Coord {
+        x: -ORIGIN + c.x * CIRC,
+        y: ORIGIN - c.y * CIRC,
+    })
 }
 
 /// World-fraction → `2^zoom` tile units (input to the stripe slicer).
 fn to_tile_units(geom: &Geometry<f64>, zoom: u8) -> Geometry<f64> {
     let scale = f64::from(1u32 << zoom);
-    geom.map_coords(|c| Coord { x: c.x * scale, y: c.y * scale })
+    geom.map_coords(|c| Coord {
+        x: c.x * scale,
+        y: c.y * scale,
+    })
 }
 
 fn geometries() -> [(&'static str, Geometry<f64>); 3] {
@@ -112,7 +124,9 @@ fn bench_clip_one_tile(c: &mut Criterion) {
     let tile = TileId::new(1 << (ZOOM - 1), 1 << (ZOOM - 1), ZOOM); // center tile (16, 16, 5)
     for (name, geom) in geometries() {
         let merc = to_mercator(&geom);
-        group.bench_function(name, |b| b.iter(|| black_box(slice_tile(&merc, tile, opts))));
+        group.bench_function(name, |b| {
+            b.iter(|| black_box(slice_tile(&merc, tile, opts)))
+        });
     }
     group.finish();
 }
@@ -134,8 +148,8 @@ fn bench_slice_all_tiles(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new(name, "stripe"), &tile_units, |b, g| {
             b.iter(|| {
-                let sliced = TiledGeometry::slice_geometry(g, 0.0, buffer, ZOOM, &extents)
-                    .expect("slice");
+                let sliced =
+                    TiledGeometry::slice_geometry(g, 0.0, buffer, ZOOM, &extents).expect("slice");
                 black_box(sliced.tile_data().len() + sliced.filled_tiles().count())
             });
         });

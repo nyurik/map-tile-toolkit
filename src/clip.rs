@@ -1,17 +1,28 @@
 //! Per-tile clipping: turn a Web Mercator geometry into one tile's integer geometry.
 //!
-//! This is the engine behind [`crate::slice_tile`] and [`crate::slice_all_tiles`]. It clips a
-//! geometry to a single tile (plus buffer) using `geo`'s overlay-based clipping
-//! ([`BooleanOps`]) and adds the tile-grid transform, integer snap, and topology repair:
-//! clip in Web Mercator `f64`, snap to the integer grid (flipping Y), repair self-touches the
-//! snap may introduce, orient rings for tile winding, validate, and finally cast to `i32`.
+//! This is the engine behind [`crate::slice_tile`]. Tiles are axis-aligned rectangles in Web
+//! Mercator, so the geometry is clipped to the (buffered) tile rectangle with dedicated
+//! rectangle-clip primitives — Sutherland-Hodgman for polygon rings and Liang-Barsky for
+//! line segments — which are `O(vertices)` and avoid the cost of a general boolean overlay.
+//! The clipped geometry is then transformed to the integer tile grid (flipping Y), any
+//! self-touch the snap introduced is repaired, rings are oriented for tile winding, the
+//! result is validated, and finally cast to `i32`.
 
-use geo::bool_ops::FillRule;
+#![allow(
+    clippy::float_cmp,
+    clippy::collapsible_if,
+    clippy::needless_range_loop,
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    reason = "axis-aligned clip math with intentional exact coordinate comparisons"
+)]
+
 use geo::orient::Direction;
-use geo::{
-    BooleanOps as _, MapCoords as _, Orient as _, Simplify as _, Validation as _, unary_union,
+use geo::{MapCoords as _, Orient as _, Simplify as _, Validation as _, unary_union};
+use geo_types::{
+    Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
+    Point, Polygon,
 };
-use geo_types::{Coord, Geometry, GeometryCollection, MultiLineString, MultiPoint, Point, Polygon};
 
 use crate::tile::{SliceOptions, TileId, tile_bbox, tile_length_from_zoom};
 
@@ -36,10 +47,9 @@ pub(crate) fn clip_geometry_to_tile(
 
 /// Cast an integer-valued tile-space geometry from `f64` to `i32`.
 ///
-/// The transform in [`Rect::transform_to_tile_coordinates`] floors coordinates, so every
-/// value is already a whole number well within `i32` range; the cast is exact.
-#[expect(clippy::cast_possible_truncation)]
-fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
+/// Callers snap/floor coordinates first, so every value is already a whole number well within
+/// `i32` range; the cast is exact.
+pub(crate) fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
     geom.map_coords(|c| Coord {
         x: c.x as i32,
         y: c.y as i32,
@@ -47,8 +57,6 @@ fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
 }
 
 /// A single tile in Web Mercator space, carrying the tile resolution it is rendered at.
-///
-/// Extracted from `martin`'s `martin-core/src/tiles/geojson/rect.rs`.
 #[derive(Debug, Clone)]
 struct Rect {
     min_x: f64,
@@ -88,89 +96,205 @@ impl Rect {
         self.max_y += buffer_y;
     }
 
-    /// The (buffered) tile rectangle as a clip polygon in Web Mercator coordinates.
-    fn clip_polygon(&self) -> Polygon<f64> {
-        geo_types::Rect::new(
-            Coord {
-                x: self.min_x,
-                y: self.min_y,
-            },
-            Coord {
-                x: self.max_x,
-                y: self.max_y,
-            },
-        )
-        .to_polygon()
-    }
-
-    /// Clip a 1-D geometry to the tile, snap to the integer grid, and validate; `None` if
-    /// nothing remains.
-    fn clip_lines(&self, lines: &MultiLineString<f64>) -> Option<Geometry<f64>> {
-        let clipped = self.clip_polygon().clip(lines, false);
-        if clipped.0.is_empty() {
-            return None;
-        }
-        let tile_space = clipped.map_coords(|c| self.to_tile_coord(c));
-        validate_and_simplify(tile_space.into())
-    }
-
-    /// Intersect a 2-D geometry with the tile, snap to the integer grid, orient for tile,
+    /// Clip a set of line strings to the tile with Liang-Barsky, snap to the integer grid,
     /// and validate; `None` if nothing remains.
-    fn clip_area(&self, area: &impl geo::BooleanOps<Scalar = f64>) -> Option<Geometry<f64>> {
-        let clipped = self
-            .clip_polygon()
-            .intersection_with_fill_rule(area, FillRule::EvenOdd);
-        if clipped.0.is_empty() {
+    fn clip_lines(&self, lines: &MultiLineString<f64>) -> Option<Geometry<f64>> {
+        let clipped: Vec<LineString<f64>> = lines
+            .0
+            .iter()
+            .flat_map(|ls| self.clip_line_string(ls))
+            .collect();
+        if clipped.is_empty() {
             return None;
         }
-        let snapped = clipped.map_coords(|c| self.to_tile_coord(c));
-        // The integer snap can pinch a polygon into a self-touch; re-resolve it through the
-        // overlay engine so the topology is repaired rather than failing validation and
-        // dropping the feature.
-        let resolved = if snapped.is_valid() {
-            snapped
-        } else {
-            unary_union([&snapped])
-        };
-        if resolved.0.is_empty() {
-            // The snap collapsed the polygon below tile resolution; drop it rather than emit
-            // an empty geometry.
-            return None;
-        }
-        // The snap flips y, reversing ring orientation; re-orient so exterior rings are
-        // counter-clockwise (tile required winding once y points down in tile space).
-        let tile_space = resolved.orient(Direction::Default);
+        let tile_space = MultiLineString(clipped).map_coords(|c| self.to_tile_coord(c));
         validate_and_simplify(tile_space.into())
     }
 
-    /// Clip a Web Mercator geometry to this (buffered) tile and snap it to the integer tile
-    /// grid; `None` when nothing of the geometry remains inside the tile.
-    fn clip_transform_validate_geometry(&self, geom: &Geometry<f64>) -> Option<Geometry<f64>> {
-        match geom {
-            Geometry::Point(p) => self
-                .inside(p.x(), p.y())
-                .then(|| Geometry::Point(self.to_tile_coord(p.0).into())),
-            Geometry::MultiPoint(ps) => {
-                let kept: Vec<Point<f64>> = ps
-                    .iter()
-                    .filter(|p| self.inside(p.x(), p.y()))
-                    .map(|p| self.to_tile_coord(p.0).into())
-                    .collect();
-                (!kept.is_empty()).then_some(Geometry::MultiPoint(MultiPoint(kept)))
+    /// Clip polygons to the tile with Sutherland-Hodgman, snap to the integer grid, orient
+    /// for tile winding, and validate; `None` if nothing remains.
+    fn clip_area(&self, polys: &[Polygon<f64>]) -> Option<Geometry<f64>> {
+        let clipped: Vec<Polygon<f64>> =
+            polys.iter().filter_map(|p| self.clip_polygon(p)).collect();
+        if clipped.is_empty() {
+            return None;
+        }
+        let snapped = MultiPolygon(clipped).map_coords(|c| self.to_tile_coord(c));
+        finalize_area(snapped)
+    }
+
+    /// Clip one polygon (exterior plus holes) to the tile rectangle.
+    fn clip_polygon(&self, poly: &Polygon<f64>) -> Option<Polygon<f64>> {
+        let exterior = self.clip_ring(poly.exterior());
+        // A ring needs at least 3 distinct vertices to enclose area.
+        if exterior.len() < 3 {
+            return None;
+        }
+        let holes: Vec<LineString<f64>> = poly
+            .interiors()
+            .iter()
+            .filter_map(|hole| {
+                let ring = self.clip_ring(hole);
+                (ring.len() >= 3).then(|| close_ring(ring))
+            })
+            .collect();
+        Some(Polygon::new(close_ring(exterior), holes))
+    }
+
+    /// Sutherland-Hodgman clip of a ring against the four tile edges; returns the clipped
+    /// ring's distinct vertices (unclosed), empty if the ring falls entirely outside.
+    fn clip_ring(&self, ring: &LineString<f64>) -> Vec<Coord<f64>> {
+        let mut poly = distinct_ring(ring);
+        for edge in Edge::ALL {
+            if poly.is_empty() {
+                break;
             }
-            Geometry::LineString(ls) => self.clip_lines(&MultiLineString(vec![ls.clone()])),
-            Geometry::MultiLineString(mls) => self.clip_lines(mls),
-            Geometry::Polygon(polygon) => self.clip_area(polygon),
-            Geometry::MultiPolygon(polygons) => self.clip_area(polygons),
-            Geometry::GeometryCollection(gs) => {
-                let kept: Vec<Geometry<f64>> = gs
-                    .iter()
-                    .filter_map(|g| self.clip_transform_validate_geometry(g))
-                    .collect();
-                (!kept.is_empty()).then_some(Geometry::GeometryCollection(GeometryCollection(kept)))
+            poly = self.clip_ring_edge(&poly, edge);
+        }
+        poly
+    }
+
+    /// One Sutherland-Hodgman pass against a single tile edge.
+    fn clip_ring_edge(&self, input: &[Coord<f64>], edge: Edge) -> Vec<Coord<f64>> {
+        let mut out = Vec::with_capacity(input.len() + 1);
+        let n = input.len();
+        for i in 0..n {
+            let cur = input[i];
+            let prev = input[(i + n - 1) % n];
+            let cur_in = self.edge_inside(cur, edge);
+            let prev_in = self.edge_inside(prev, edge);
+            if cur_in {
+                if !prev_in {
+                    out.push(self.edge_intersect(prev, cur, edge));
+                }
+                out.push(cur);
+            } else if prev_in {
+                out.push(self.edge_intersect(prev, cur, edge));
             }
-            // GeoJSON never parses into these geometry variants.
-            Geometry::Line(_) | Geometry::Rect(_) | Geometry::Triangle(_) => None,
+        }
+        out
+    }
+
+    /// Clip one line string into its inside-the-tile pieces with Liang-Barsky.
+    fn clip_line_string(&self, ls: &LineString<f64>) -> Vec<LineString<f64>> {
+        let mut pieces: Vec<Vec<Coord<f64>>> = Vec::new();
+        let mut cur: Vec<Coord<f64>> = Vec::new();
+        for seg in ls.0.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            if let Some((ca, cb)) = self.clip_segment(a, b) {
+                if cur.last() != Some(&ca) {
+                    if cur.len() >= 2 {
+                        pieces.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                    cur.push(ca);
+                }
+                cur.push(cb);
+                // The segment exited the tile: finalize this piece so a re-entry starts fresh.
+                if cb != b {
+                    if cur.len() >= 2 {
+                        pieces.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.clear();
+                    }
+                }
+            } else if cur.len() >= 2 {
+                pieces.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+        if cur.len() >= 2 {
+            pieces.push(cur);
+        }
+        pieces.into_iter().map(LineString).collect()
+    }
+
+    /// Liang-Barsky clip of segment `a`..`b` to the tile; `None` if fully outside.
+    fn clip_segment(&self, a: Coord<f64>, b: Coord<f64>) -> Option<(Coord<f64>, Coord<f64>)> {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let p = [-dx, dx, -dy, dy];
+        let q = [
+            a.x - self.min_x,
+            self.max_x - a.x,
+            a.y - self.min_y,
+            self.max_y - a.y,
+        ];
+        let mut t0 = 0.0_f64;
+        let mut t1 = 1.0_f64;
+        for i in 0..4 {
+            if p[i] == 0.0 {
+                if q[i] < 0.0 {
+                    return None; // parallel to this edge and outside it
+                }
+            } else {
+                let t = q[i] / p[i];
+                if p[i] < 0.0 {
+                    if t > t1 {
+                        return None;
+                    }
+                    if t > t0 {
+                        t0 = t;
+                    }
+                } else {
+                    if t < t0 {
+                        return None;
+                    }
+                    if t < t1 {
+                        t1 = t;
+                    }
+                }
+            }
+        }
+        Some((
+            Coord {
+                x: a.x + t0 * dx,
+                y: a.y + t0 * dy,
+            },
+            Coord {
+                x: a.x + t1 * dx,
+                y: a.y + t1 * dy,
+            },
+        ))
+    }
+
+    fn edge_inside(&self, c: Coord<f64>, edge: Edge) -> bool {
+        match edge {
+            Edge::Left => c.x >= self.min_x,
+            Edge::Right => c.x <= self.max_x,
+            Edge::Bottom => c.y >= self.min_y,
+            Edge::Top => c.y <= self.max_y,
+        }
+    }
+
+    /// Intersection of segment `a`..`b` with the (axis-aligned) line of `edge`.
+    fn edge_intersect(&self, a: Coord<f64>, b: Coord<f64>, edge: Edge) -> Coord<f64> {
+        match edge {
+            Edge::Left | Edge::Right => {
+                let x = if matches!(edge, Edge::Left) {
+                    self.min_x
+                } else {
+                    self.max_x
+                };
+                let t = (x - a.x) / (b.x - a.x);
+                Coord {
+                    x,
+                    y: a.y + t * (b.y - a.y),
+                }
+            }
+            Edge::Bottom | Edge::Top => {
+                let y = if matches!(edge, Edge::Bottom) {
+                    self.min_y
+                } else {
+                    self.max_y
+                };
+                let t = (y - a.y) / (b.y - a.y);
+                Coord {
+                    x: a.x + t * (b.x - a.x),
+                    y,
+                }
+            }
         }
     }
 
@@ -194,6 +318,69 @@ impl Rect {
             y: extent - ((c.y - min_y) * y_multiplier).floor(),
         }
     }
+
+    /// Clip a Web Mercator geometry to this (buffered) tile and snap it to the integer tile
+    /// grid; `None` when nothing of the geometry remains inside the tile.
+    fn clip_transform_validate_geometry(&self, geom: &Geometry<f64>) -> Option<Geometry<f64>> {
+        match geom {
+            Geometry::Point(p) => self
+                .inside(p.x(), p.y())
+                .then(|| Geometry::Point(self.to_tile_coord(p.0).into())),
+            Geometry::MultiPoint(ps) => {
+                let kept: Vec<Point<f64>> = ps
+                    .iter()
+                    .filter(|p| self.inside(p.x(), p.y()))
+                    .map(|p| self.to_tile_coord(p.0).into())
+                    .collect();
+                (!kept.is_empty()).then_some(Geometry::MultiPoint(MultiPoint(kept)))
+            }
+            Geometry::LineString(ls) => self.clip_lines(&MultiLineString(vec![ls.clone()])),
+            Geometry::MultiLineString(mls) => self.clip_lines(mls),
+            Geometry::Polygon(polygon) => self.clip_area(std::slice::from_ref(polygon)),
+            Geometry::MultiPolygon(polygons) => self.clip_area(&polygons.0),
+            Geometry::GeometryCollection(gs) => {
+                let kept: Vec<Geometry<f64>> = gs
+                    .iter()
+                    .filter_map(|g| self.clip_transform_validate_geometry(g))
+                    .collect();
+                (!kept.is_empty()).then_some(Geometry::GeometryCollection(GeometryCollection(kept)))
+            }
+            // GeoJSON never parses into these geometry variants.
+            Geometry::Line(_) | Geometry::Rect(_) | Geometry::Triangle(_) => None,
+        }
+    }
+}
+
+/// The four edges of the clip rectangle, as Sutherland-Hodgman half-planes.
+#[derive(Clone, Copy)]
+enum Edge {
+    Left,
+    Right,
+    Bottom,
+    Top,
+}
+
+impl Edge {
+    const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Bottom, Self::Top];
+}
+
+/// A ring's distinct vertices (dropping the closing duplicate, if present).
+fn distinct_ring(ring: &LineString<f64>) -> Vec<Coord<f64>> {
+    let pts = &ring.0;
+    match (pts.first(), pts.last()) {
+        (Some(f), Some(l)) if pts.len() > 1 && f == l => pts[..pts.len() - 1].to_vec(),
+        _ => pts.clone(),
+    }
+}
+
+/// Close a ring by repeating its first vertex at the end.
+fn close_ring(mut pts: Vec<Coord<f64>>) -> LineString<f64> {
+    if let Some(&first) = pts.first() {
+        if pts.last() != Some(&first) {
+            pts.push(first);
+        }
+    }
+    LineString(pts)
 }
 
 /// Drop duplicate/collinear points within [`SIMPLIFY_EPS`]; points/multipoints are unchanged.
@@ -211,8 +398,26 @@ fn simplify_geo(geom: Geometry<f64>) -> Geometry<f64> {
 
 /// Validate a tile-space geometry and drop duplicate points; geometry the integer snap
 /// pinched into an invalid shape yields `None`.
-fn validate_and_simplify(geom: Geometry<f64>) -> Option<Geometry<f64>> {
+pub(crate) fn validate_and_simplify(geom: Geometry<f64>) -> Option<Geometry<f64>> {
     geom.is_valid().then(|| simplify_geo(geom))
+}
+
+/// Repair, orient, and validate an already-snapped tile-space polygonal geometry.
+///
+/// The integer snap can pinch a polygon into a self-touch; re-resolve it through the overlay
+/// engine so the topology is repaired rather than dropped. The snap also flips Y (reversing
+/// ring orientation), so re-orient exterior rings counter-clockwise for tile winding. Shared
+/// by [`Rect::clip_area`] and the stripe-based batch reassembly. `None` if nothing survives.
+pub(crate) fn finalize_area(snapped: MultiPolygon<f64>) -> Option<Geometry<f64>> {
+    let resolved = if snapped.is_valid() {
+        snapped
+    } else {
+        unary_union([&snapped])
+    };
+    if resolved.0.is_empty() {
+        return None;
+    }
+    validate_and_simplify(resolved.orient(Direction::Default).into())
 }
 
 #[cfg(test)]
