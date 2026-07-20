@@ -25,6 +25,7 @@ criterion = "0.8"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
 geojson = { version = "0.24", features = ["geo-types"] }
 insta = "1"
+serde_json = "1"
 wkt = "0.14"
 
 # Optimized build with debug symbols, used by `just flamegraph` for readable profiles.

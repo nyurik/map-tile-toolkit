@@ -50,6 +50,26 @@ tile-bounds filtering in [`extents`] and geometry helpers in [`geo_utils`].
 [`extents`]: https://docs.rs/map-tile-toolkit/latest/map_tile_toolkit/extents/
 [`geo_utils`]: https://docs.rs/map-tile-toolkit/latest/map_tile_toolkit/geo_utils/
 
+### Inspecting slices visually
+
+To eyeball what the slicer produces, the `visualize` example reprojects the original geometry,
+every per-tile slice, and the tile grid back to lon/lat and prints a styled `geojson`
+feature collection. Paste the output into [geojson.io](https://geojson.io), QGIS, or kepler.gl:
+
+```sh
+# A sample square-with-a-hole over Europe, sliced at zoom 3, highlighting one tile.
+just visualize --zoom 3 --tile 3/4/2 > slices.geojson
+# Or your own geometry (lon/lat WKT):
+just visualize --wkt "POLYGON((-30 20, 50 20, 50 65, -30 65, -30 20))" --zoom 4
+```
+
+The same output doubles as a visual regression suite: `tests/geojson_snapshots.rs` slices each
+`tests/fixtures/geojson/*.geojson` fixture and stores the result as a **binary `.geojson`
+snapshot** under `tests/snapshots/geojson/`. Because those snapshot files end in `.geojson`,
+GitHub renders them on a map right in the repo/PR — so a snapshot diff is a visual diff of the
+clipping output. Add a fixture (any lon/lat GeoJSON with a top-level `"zoom"` member) and run
+`just bless` to generate its snapshot.
+
 ## Development
 
 * This project is easier to develop with [just](https://github.com/casey/just#readme), a modern alternative to `make`.

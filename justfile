@@ -109,6 +109,11 @@ flamegraph-all secs='10':
         done
     done
 
+# Emit a GeoJSON FeatureCollection (original + slices + tile grid) to inspect in geojson.io/QGIS.
+# Pass extra args through, e.g. `just visualize --zoom 5 --tile 5/16/10`. Defaults to a sample.
+visualize *args:
+    cargo run --quiet --example visualize -- {{args}}
+
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
     #!/usr/bin/env bash

@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PLANETILER` note, because JTS `buffer(0)`/`GeometryPrecisionReducer` and `geo`'s overlay
   engine repair self-overlaps to topologically-valid but not bit-identical geometry
   (`snap_and_fix_issue_511` area; `fix_invalid_input_geometry` apex).
+- `visualize` example (`cargo run --example visualize` / `just visualize`) that reprojects the
+  original geometry, every per-tile slice, and the tile grid back to lon/lat and prints a styled
+  GeoJSON feature collection for pasting into geojson.io / QGIS / kepler.gl.
+- Visual regression snapshots (`tests/geojson_snapshots.rs`): each `tests/fixtures/geojson/*.geojson`
+  fixture is sliced and stored as a binary `.geojson` `insta` snapshot (input geometry as the first
+  feature, then one feature per tile, with simplestyle colors). The `.geojson` extension makes the
+  snapshots render on a map directly in GitHub, so a diff is a visual diff.
 - `criterion` benchmarks (`benches/clipping.rs`, run with `cargo bench`) comparing the two
   clipping engines over geometry of increasing complexity — the per-tile `geo`-overlay path
   (`slice_tile`/`slice_all_tiles`) vs the eager `stripe` slicer — plus a stripe fill-detection
