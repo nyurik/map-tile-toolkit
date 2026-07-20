@@ -8,8 +8,7 @@
 [![CI build status](https://github.com/nyurik/map-tile-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/nyurik/map-tile-toolkit/actions)
 [![Codecov](https://img.shields.io/codecov/c/github/nyurik/map-tile-toolkit)](https://app.codecov.io/gh/nyurik/map-tile-toolkit)
 
-A template repository for new Rust library crates. It bundles the tooling and
-CI shared across these crates so a new library starts with everything wired up.
+A toolkit for map tile-related operations.
 
 ## Development
 

@@ -1,18 +1,22 @@
 [package]
 name = "map-tile-toolkit"
 version = "0.1.0"
-description = "A template for creating new Rust crates"
+description = "Convert GeoJSON/geo geometries into per-tile slices ready for encoding"
 authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
 repository = "https://github.com/nyurik/map-tile-toolkit"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-keywords = ["template"]
-categories = ["development-tools"]
-rust-version = "1.71"
+keywords = ["mlt", "mvt", "tile", "geojson", "geo"]
+categories = ["science::geo"]
+rust-version = "1.88"
 
 [dependencies]
+geo = "0.33.1"
+geo-types = "0.7.19"
 
 [dev-dependencies]
+approx = "0.5"
+fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -20,9 +24,13 @@ unused_qualifications = "warn"
 
 [lints.clippy]
 # Restrictions
+disallowed_methods = "forbid"
 panic_in_result_fn = "warn"
 todo = "warn"
+unimplemented = "warn"
 unwrap_used = "warn"
+use_self = "warn"
+
 # Pedantics without being too noisy
 cargo = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

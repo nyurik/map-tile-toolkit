@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 defaults:
@@ -60,13 +59,14 @@ jobs:
   # This job checks if any of the previous jobs failed or were canceled.
   # This approach also allows some jobs to be skipped if they are not needed.
   ci-passed:
+    permissions: {}
     needs: [ test, test-msrv ]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Result of the needed steps
         run: echo "${{ toJSON(needs) }}"
-      - if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
 
   # Release unpublished packages or create a PR with changes
