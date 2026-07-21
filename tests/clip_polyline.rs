@@ -200,8 +200,8 @@ fn slice_one_fixture([path]: [&Path; 1]) {
 
     // (2) Independently, clip one tile at a time across the whole tile span the geometry could
     // reach (padded by one tile). Collecting every non-empty result must reproduce `all` exactly —
-    // this checks both that the batch found no wrong pieces and that it missed no tile (e.g. an
-    // empty tile a segment merely passes through must be absent from both).
+    // this checks the batch found no wrong pieces and missed no tile (including tiles a segment
+    // only crosses, which both paths must include).
     let (lo, hi) = padded_tile_span(&geom);
     let mut one: BTreeMap<TileId, Geometry<i32>> = BTreeMap::new();
     for y in lo.y..=hi.y {

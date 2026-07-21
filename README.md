@@ -50,6 +50,19 @@ equals `slice_tile(geom, tile, size)` for every tile the geometry touches.
   `FeatureCollection` (the original line plus every per-tile piece) that renders on a map.
   `tests/fixtures/grid.geojson` overlays the tile grid. Run `just bless` to regenerate snapshots.
 
+## Visualizing Tests
+
+All input tests are in `tests/fixtures` dir, and integration test converts each to a snapshot in `tests/snapshots` dir also as a `.geojson` file. The snapshot contains original input geometry as the first feature, followed by all slices.
+
+Use QGIS or some other .geojson file viewer to inspect
+* Browse to `tests` dir in QGIS "Browser" panel
+* Add `grid.geojson` to "Layers" panel to have a reference. Note that the grid uses .5 pixel offset to show tile boundaries between integer coordinates.
+* Select all .geojson files from the `snapshots` subdir and add them to "Layers" panel (you may need to click "Accept layers" a few times)
+* Select the added snap files except for the grid one and hide them (click on first, shift+click on last, space bar)
+* Click on one test case, and make sure it is both clicked and there is a checked checkbox next to it to show it.
+* Enable "identify features" tool (ctrl+shift+i), and drag a big box over all geometries
+* use "identify results" panel to inspect each segment
+
 ## License
 
 Licensed under either of

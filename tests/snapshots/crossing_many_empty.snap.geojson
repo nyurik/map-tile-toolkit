@@ -7,11 +7,11 @@
         "type": "LineString",
         "coordinates": [
           [
-            5.0,
+            -15.0,
             10.0
           ],
           [
-            110.0,
+            90.0,
             10.0
           ]
         ]
@@ -28,11 +28,32 @@
         "type": "LineString",
         "coordinates": [
           [
-            5.0,
+            -15.0,
             10.0
           ],
           [
-            110.0,
+            90.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile -1/0",
+        "stroke": "#ff7f0e",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -15.0,
+            10.0
+          ],
+          [
+            90.0,
             10.0
           ]
         ]
@@ -49,18 +70,60 @@
         "type": "LineString",
         "coordinates": [
           [
-            5.0,
+            -15.0,
             10.0
           ],
           [
-            110.0,
+            90.0,
             10.0
           ]
         ]
       },
       "properties": {
-        "role": "tile 4/0",
+        "role": "tile 1/0",
+        "stroke": "#ff7f0e",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -15.0,
+            10.0
+          ],
+          [
+            90.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/0",
         "stroke": "#1f77b4",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -15.0,
+            10.0
+          ],
+          [
+            90.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 3/0",
+        "stroke": "#ff7f0e",
         "stroke-width": 3
       }
     }

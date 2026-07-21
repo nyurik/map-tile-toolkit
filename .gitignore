@@ -4,6 +4,7 @@
 *.pdb
 *.proptest-regressions
 *.pyc
+*.qgz
 .DS_Store
 .envrc
 .idea/

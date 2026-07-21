@@ -111,6 +111,31 @@
         "type": "LineString",
         "coordinates": [
           [
+            55.0,
+            22.0
+          ],
+          [
+            10.0,
+            40.0
+          ],
+          [
+            45.0,
+            55.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/1",
+        "stroke": "#1f77b4",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
             10.0,
             40.0
           ],

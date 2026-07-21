@@ -121,6 +121,27 @@
         "type": "LineString",
         "coordinates": [
           [
+            5.0,
+            10.0
+          ],
+          [
+            70.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
+        "stroke": "#ff7f0e",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
             10.0,
             60.0
           ],
