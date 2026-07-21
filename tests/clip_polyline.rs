@@ -19,10 +19,9 @@ use std::fs;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
-use geojson::{Feature, GeometryValue, JsonObject, JsonValue};
-use geojson::{FeatureCollection, GeoJson};
+use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
 use insta::assert_binary_snapshot;
-use map_tile_toolkit::{TileId, slice_all_tiles, slice_tile};
+use map_tile_toolkit::{TileId, slice_all_tiles, slice_tile, tile_of};
 use serde_json::json;
 
 /// Tile size for the test grid (matches `tests/fixtures/grid.geojson`).
@@ -90,6 +89,33 @@ fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
         }
         other => panic!("expected a polyline geometry, got {other:?}"),
     }
+}
+
+/// The component lines of a polyline geometry.
+fn each_line(geom: &Geometry<i32>) -> Vec<&LineString<i32>> {
+    match geom {
+        Geometry::LineString(ls) => vec![ls],
+        Geometry::MultiLineString(mls) => mls.0.iter().collect(),
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
+/// Inclusive tile-coordinate bounds covering every vertex of `geom`, padded by one tile so the
+/// per-tile scan also checks the empty tiles just outside the geometry.
+fn padded_tile_span(geom: &Geometry<i32>) -> (TileId, TileId) {
+    let mut lo = TileId::new(i32::MAX, i32::MAX);
+    let mut hi = TileId::new(i32::MIN, i32::MIN);
+    for line in each_line(geom) {
+        for &c in &line.0 {
+            let t = tile_of(c, TILE_SIZE);
+            lo = TileId::new(lo.x.min(t.x), lo.y.min(t.y));
+            hi = TileId::new(hi.x.max(t.x), hi.y.max(t.y));
+        }
+    }
+    (
+        TileId::new(lo.x - 1, lo.y - 1),
+        TileId::new(hi.x + 1, hi.y + 1),
+    )
 }
 
 /// A copy of `geom` with every vertex repeated once — consecutive duplicates the slicers must
@@ -172,16 +198,20 @@ fn slice_one_fixture([path]: [&Path; 1]) {
     // (1) Slice the whole geometry into every tile it touches.
     let all = slice_all_tiles(&geom, TILE_SIZE);
 
-    // (2) Re-clip each tile "all" produced, one at a time, and require an identical result.
-    let one: BTreeMap<TileId, Geometry<i32>> = all
-        .keys()
-        .map(|&tile| {
-            let piece = slice_tile(&geom, tile, TILE_SIZE).unwrap_or_else(|| {
-                panic!("tile {tile:?} is in `all` but `slice_tile` returned None")
-            });
-            (tile, piece)
-        })
-        .collect();
+    // (2) Independently, clip one tile at a time across the whole tile span the geometry could
+    // reach (padded by one tile). Collecting every non-empty result must reproduce `all` exactly —
+    // this checks both that the batch found no wrong pieces and that it missed no tile (e.g. an
+    // empty tile a segment merely passes through must be absent from both).
+    let (lo, hi) = padded_tile_span(&geom);
+    let mut one: BTreeMap<TileId, Geometry<i32>> = BTreeMap::new();
+    for y in lo.y..=hi.y {
+        for x in lo.x..=hi.x {
+            let tile = TileId::new(x, y);
+            if let Some(piece) = slice_tile(&geom, tile, TILE_SIZE) {
+                one.insert(tile, piece);
+            }
+        }
+    }
     assert_eq!(all, one, "batch and per-tile slicing disagree for {stem}");
 
     // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
