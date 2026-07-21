@@ -32,19 +32,21 @@ use std::path::Path;
 
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, GeometryCollection};
-use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
+use geojson::{Feature, FeatureCollection, GeoJson, JsonValue};
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
+
+mod support;
+use support::feature;
 
 mod files {
     use test_each_file::test_each_path;
 
     use super::snapshot_one_fixture;
 
-    // Generate one test per fixture (like `clip_polyline.rs`) instead of iterating the directory
-    // in a single test. The fixture tree is shared by geometry kind; fixtures carrying a `bbox`
-    // (the polyline-clip cases handled by `clip_polyline.rs`) are skipped at runtime.
+    // Generate one test per fixture.
+    // The fixture tree is shared by geometry kind; fixtures carrying a `bbox`
     test_each_path! { for ["geojson"] in "./tests/fixtures/polyline" as polyline => snapshot_one_fixture }
     test_each_path! { for ["geojson"] in "./tests/fixtures/polygon" as polygon => snapshot_one_fixture }
     test_each_path! { for ["geojson"] in "./tests/fixtures/polygon_with_holes" as polygon_with_holes => snapshot_one_fixture }
@@ -88,20 +90,6 @@ fn tile_local_to_mercator(tile: TileId, c: Coord<i32>) -> Coord<f64> {
 }
 
 // --- feature building ----------------------------------------------------------------------
-
-fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
-    let mut properties = JsonObject::new();
-    for (k, v) in props {
-        properties.insert(k.to_string(), v);
-    }
-    Feature {
-        bbox: None,
-        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
-        id: None,
-        properties: Some(properties),
-        foreign_members: None,
-    }
-}
 
 /// Parse a GeoJSON fixture into a single geometry (a `GeometryCollection` if it holds several)
 /// plus its `"zoom"` member (default 3). Returns `None` for a fixture carrying a `bbox` — a

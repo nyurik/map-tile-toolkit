@@ -21,10 +21,27 @@ use geo_types::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
     Point, Polygon, coord,
 };
+use geojson::{Feature, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::TileId;
 use map_tile_toolkit::extents::ForZoom;
 use map_tile_toolkit::stripe::{CoordSeqGroups, TiledGeometry};
 use wkt::{ToWkt, TryFromWkt};
+
+/// A GeoJSON [`Feature`] wrapping `geom` with the given [simplestyle-spec] properties, shared by
+/// the `.geojson` snapshot harnesses. Because a snapshot file ends in `.geojson`, GitHub and
+/// geojson.io render the properties (`stroke`/`fill`/…) directly on a map.
+///
+/// [simplestyle-spec]: https://github.com/mapbox/simplestyle-spec
+pub fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
+    let properties = props.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<JsonObject>();
+    Feature {
+        bbox: None,
+        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
+        id: None,
+        properties: Some(properties),
+        foreign_members: None,
+    }
+}
 
 /// Tile-local coordinate-space side length (planetiler `SIZE`).
 pub const SIZE: f64 = 256.0;

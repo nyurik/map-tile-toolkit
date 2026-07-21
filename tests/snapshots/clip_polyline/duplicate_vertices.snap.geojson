@@ -4,37 +4,32 @@
     {
       "type": "Feature",
       "geometry": {
-        "type": "Polygon",
+        "type": "MultiLineString",
         "coordinates": [
           [
             [
-              0.0,
-              0.0
+              2.0,
+              2.0
             ],
             [
-              100.0,
-              0.0
+              2.0,
+              2.0
             ],
             [
-              100.0,
-              100.0
+              4.0,
+              4.0
             ],
             [
-              0.0,
-              100.0
-            ],
-            [
-              0.0,
-              0.0
+              4.0,
+              4.0
             ]
           ]
         ]
       },
       "properties": {
-        "fill": "#111111",
-        "fill-opacity": 0.03,
-        "role": "bbox",
-        "stroke": "#111111"
+        "role": "input",
+        "stroke": "#888888",
+        "stroke-width": 10
       }
     },
     {
@@ -43,15 +38,19 @@
         "type": "LineString",
         "coordinates": [
           [
-            200.0,
-            200.0
+            2.0,
+            2.0
+          ],
+          [
+            4.0,
+            4.0
           ]
         ]
       },
       "properties": {
-        "role": "input",
-        "stroke": "#888888",
-        "stroke-width": 1
+        "role": "output",
+        "stroke": "#1f77b4",
+        "stroke-width": 30
       }
     }
   ]

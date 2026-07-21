@@ -4,27 +4,41 @@
     {
       "type": "Feature",
       "geometry": {
+        "type": "MultiLineString",
+        "coordinates": [
+          []
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "stroke": "#888888",
+        "stroke-width": 1
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
         "type": "Polygon",
         "coordinates": [
           [
             [
+              20.0,
+              0.0
+            ],
+            [
+              20.0,
+              20.0
+            ],
+            [
+              0.0,
+              20.0
+            ],
+            [
               0.0,
               0.0
             ],
             [
-              100.0,
-              0.0
-            ],
-            [
-              100.0,
-              100.0
-            ],
-            [
-              0.0,
-              100.0
-            ],
-            [
-              0.0,
+              20.0,
               0.0
             ]
           ]
@@ -35,27 +49,6 @@
         "fill-opacity": 0.03,
         "role": "bbox",
         "stroke": "#111111"
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            200.0,
-            200.0
-          ],
-          [
-            300.0,
-            300.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "input",
-        "stroke": "#888888",
-        "stroke-width": 1
       }
     }
   ]
