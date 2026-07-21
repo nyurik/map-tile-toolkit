@@ -1,12 +1,13 @@
 //! Visual regression snapshots: slice each GeoJSON fixture and snapshot the result as a
 //! binary `.geojson` snapshot.
 //!
-//! Each fixture produces **two** snapshots, one per slicing entry point:
-//! * `<name>_slice_all_tiles.geojson` — the batch [`slice_all_tiles`] (eager `stripe` slicer).
-//! * `<name>_slice_tile.geojson` — [`slice_tile`] (single-tile rectangle clip) called once per
-//!   tile that the batch produced, so the two snapshots cover the same tiles through the two
-//!   different code paths (which clip lines differently: the batch splits at tile boundaries, the
-//!   single-tile path keeps original vertices).
+//! Each fixture produces **two** snapshots, one per slicing entry point, each in its own tree:
+//! * `snapshots/slice_all_tiles/<kind>/<name>.geojson` — the batch [`slice_all_tiles`] (eager
+//!   `stripe` slicer).
+//! * `snapshots/slice_tile/<kind>/<name>.geojson` — [`slice_tile`] (single-tile rectangle clip)
+//!   called once per tile that the batch produced, so the two snapshots cover the same tiles
+//!   through the two different code paths (which clip lines differently: the batch splits at tile
+//!   boundaries, the single-tile path keeps original vertices).
 //!
 //! Each snapshot is a GeoJSON `FeatureCollection` whose **first** feature is the original input
 //! geometry (thick dark outline) followed by **one feature per tile** (thinner, alternating
@@ -15,8 +16,9 @@
 //! snapshot diff is a visual diff of the clipping output. The [simplestyle-spec] properties
 //! (`stroke`/`fill`/…) drive the colors.
 //!
-//! Fixtures live in `tests/fixtures/geojson/*.geojson` (lon/lat), each carrying a top-level
-//! `"zoom"` member. Regenerate snapshots with `just bless` (or `INSTA_UPDATE=always cargo test
+//! Fixtures live in `tests/fixtures/<kind>/*.geojson` (lon/lat), each carrying a top-level
+//! `"zoom"` member — a tree shared with `clip_polyline.rs`, whose `bbox`-bearing fixtures are
+//! skipped here. Regenerate snapshots with `just bless` (or `INSTA_UPDATE=always cargo test
 //! --test geojson_snapshots`).
 //!
 //! [simplestyle-spec]: https://github.com/mapbox/simplestyle-spec
@@ -26,7 +28,7 @@
 use std::f64::consts::PI;
 use std::fs;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, GeometryCollection};
@@ -34,6 +36,19 @@ use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, Js
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
+
+mod files {
+    use test_each_file::test_each_path;
+
+    use super::snapshot_one_fixture;
+
+    // Generate one test per fixture (like `clip_polyline.rs`) instead of iterating the directory
+    // in a single test. The fixture tree is shared by geometry kind; fixtures carrying a `bbox`
+    // (the polyline-clip cases handled by `clip_polyline.rs`) are skipped at runtime.
+    test_each_path! { for ["geojson"] in "./tests/fixtures/polyline" as polyline => snapshot_one_fixture }
+    test_each_path! { for ["geojson"] in "./tests/fixtures/polygon" as polygon => snapshot_one_fixture }
+    test_each_path! { for ["geojson"] in "./tests/fixtures/polygon_with_holes" as polygon_with_holes => snapshot_one_fixture }
+}
 
 /// Web Mercator plane width (meters), matching the crate's `EARTH_CIRCUMFERENCE`.
 const CIRC: f64 = 40_075_016.685_578_5;
@@ -89,16 +104,18 @@ fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
 }
 
 /// Parse a GeoJSON fixture into a single geometry (a `GeometryCollection` if it holds several)
-/// plus its `"zoom"` member (default 3).
-fn load_fixture(path: &Path) -> (Geometry<f64>, u8) {
+/// plus its `"zoom"` member (default 3). Returns `None` for a fixture carrying a `bbox` — a
+/// polyline-clip fixture that belongs to `clip_polyline.rs`.
+fn load_fixture(path: &Path) -> Option<(Geometry<f64>, u8)> {
     let text = fs::read_to_string(path).expect("readable fixture");
     let gj: GeoJson = text.parse().expect("valid GeoJSON");
 
     let (features, foreign) = match gj {
+        GeoJson::FeatureCollection(fc) if fc.bbox.is_some() => return None,
         GeoJson::FeatureCollection(fc) => (fc.features, fc.foreign_members),
         GeoJson::Feature(f) => (vec![f], None),
         GeoJson::Geometry(g) => {
-            return (Geometry::<f64>::try_from(g).expect("geometry converts"), 3);
+            return Some((Geometry::<f64>::try_from(g).expect("geometry converts"), 3));
         }
     };
 
@@ -117,7 +134,7 @@ fn load_fixture(path: &Path) -> (Geometry<f64>, u8) {
         .and_then(JsonValue::as_u64)
         .and_then(|z| u8::try_from(z).ok())
         .unwrap_or(3);
-    (geom, zoom)
+    Some((geom, zoom))
 }
 
 /// The input geometry as the first feature: a thick dark outline distinct from the slices.
@@ -170,44 +187,41 @@ fn build_fc(input: &Geometry<f64>, tiles: &[(TileId, Geometry<i32>)]) -> Feature
     }
 }
 
-#[test]
-fn geojson_fixtures() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/geojson");
-    let mut paths: Vec<_> = fs::read_dir(&dir)
-        .expect("fixtures dir exists")
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "geojson"))
-        .collect();
-    paths.sort();
-    assert!(!paths.is_empty(), "no fixtures found in {}", dir.display());
-
-    insta::with_settings!({
-        snapshot_path => "snapshots",
-        prepend_module_to_snapshot => false
-    }, {
-        write_geojson_snapshots(&mut paths);
-    });
-}
-
-fn write_geojson_snapshots(paths: &mut Vec<PathBuf>) {
+/// Slice one fixture through both entry points and snapshot each result. Skips polyline-clip
+/// fixtures (a `bbox` member) that share the type dirs; those belong to `clip_polyline.rs`.
+fn snapshot_one_fixture([path]: [&Path; 1]) {
+    let Some((geom, zoom)) = load_fixture(path) else {
+        return;
+    };
+    let kind = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .expect("fixture lives in a kind dir");
+    let stem = path.file_stem().expect("stem").to_str().expect("utf8");
     let opts = SliceOptions::new(NonZeroU32::new(EXTENT).expect("nonzero"), BUFFER_PX);
-    for path in paths {
-        let stem = path.file_stem().expect("stem").to_str().expect("utf8");
-        let (geom, zoom) = load_fixture(path);
-        let mercator = geom.map_coords(lonlat_to_mercator);
+    let mercator = geom.map_coords(lonlat_to_mercator);
 
-        // Batch path: slice into every tile at once with the eager stripe slicer.
-        let batch: Vec<_> = slice_all_tiles(&mercator, zoom, opts).collect();
-        let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &batch)).expect("serializes");
-        assert_binary_snapshot!(&format!("{stem}_slice_all_tiles.geojson"), bytes);
+    // Batch path: slice into every tile at once with the eager stripe slicer.
+    let batch: Vec<_> = slice_all_tiles(&mercator, zoom, opts).collect();
+    let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &batch)).expect("serializes");
+    insta::with_settings!({
+        snapshot_path => format!("snapshots/slice_all_tiles/{kind}"),
+        prepend_module_to_snapshot => false,
+    }, {
+        assert_binary_snapshot!(&format!("{stem}.geojson"), bytes);
+    });
 
-        // Single-tile path: re-slice each tile the batch produced, one `slice_tile` per id.
-        let single: Vec<(TileId, Geometry<i32>)> = batch
-            .iter()
-            .filter_map(|(id, _)| slice_tile(&mercator, *id, opts).map(|g| (*id, g)))
-            .collect();
-        let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &single)).expect("serializes");
-        assert_binary_snapshot!(&format!("{stem}_slice_tile.geojson"), bytes);
-    }
+    // Single-tile path: re-slice each tile the batch produced, one `slice_tile` per id.
+    let single: Vec<(TileId, Geometry<i32>)> = batch
+        .iter()
+        .filter_map(|(id, _)| slice_tile(&mercator, *id, opts).map(|g| (*id, g)))
+        .collect();
+    let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &single)).expect("serializes");
+    insta::with_settings!({
+        snapshot_path => format!("snapshots/slice_tile/{kind}"),
+        prepend_module_to_snapshot => false,
+    }, {
+        assert_binary_snapshot!(&format!("{stem}.geojson"), bytes);
+    });
 }

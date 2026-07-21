@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use geo::{BoundingRect as _, MapCoords as _};
 use geo_types::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
-    Point, Polygon,
+    Point, Polygon, coord,
 };
 
 use crate::clip::{clip_geometry_to_tile, finalize_area, to_i32, validate_and_simplify};
@@ -159,10 +159,7 @@ fn slice_non_collection(
 
 /// Scale a tile-local (`0..TILE_SIZE`) coordinate to the integer grid and floor it.
 fn scaled(c: Coord<f64>, px: f64) -> Coord<f64> {
-    Coord {
-        x: (c.x * px).floor(),
-        y: (c.y * px).floor(),
-    }
+    coord! { x: (c.x * px).floor(), y: (c.y * px).floor() }
 }
 
 /// Reassemble one tile's stripe output (tile-local coordinate sequences) into integer

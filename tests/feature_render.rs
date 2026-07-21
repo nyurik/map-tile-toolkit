@@ -29,7 +29,7 @@ mod support;
 use std::collections::BTreeMap;
 
 use geo::{BooleanOps, MapCoords};
-use geo_types::{Coord, Geometry, MultiPolygon, Polygon, Rect};
+use geo_types::{Coord, Geometry, MultiPolygon, Polygon, Rect, coord};
 use map_tile_toolkit::TileId;
 use map_tile_toolkit::extents::{ForZoom, TileExtents};
 use map_tile_toolkit::geo_utils::{get_world_x, get_world_y};
@@ -705,10 +705,7 @@ fn overlapping_multipolygon_side_by_side() {
 fn world_fill() {
     // A near-world rectangle at z8 fills every one of the 4^8 tiles.
     let s = rectangle_sq(Z14_WIDTH / 2.0, 1.0 - Z14_WIDTH / 2.0);
-    let scaled = s.map_coords(|p| Coord {
-        x: p.x * 256.0,
-        y: p.y * 256.0,
-    });
+    let scaled = s.map_coords(|p| coord! { x: p.x * 256.0, y: p.y * 256.0 });
     let extents = ForZoom::new(8, 0, 0, 256, 256, None);
     let tiled = TiledGeometry::slice_geometry(&scaled, 0.0, 0.0, 8, &extents).expect("slice");
     assert_eq!(tiled.covered_tiles().iter().count(), 4usize.pow(8));
@@ -718,14 +715,8 @@ fn world_fill() {
 fn emit_points_respect_extents() {
     // bounds = lon 0..180, lat -80..0 (planetiler "0,-80,180,0").
     let bounds = Rect::new(
-        Coord {
-            x: get_world_x(0.0),
-            y: get_world_y(0.0),
-        },
-        Coord {
-            x: get_world_x(180.0),
-            y: get_world_y(-80.0),
-        },
+        coord! { x: get_world_x(0.0), y: get_world_y(0.0) },
+        coord! { x: get_world_x(180.0), y: get_world_y(-80.0) },
     );
     let extents = TileExtents::compute_from_world_bounds(1, bounds);
     let g = new_point(0.5 + 1.0 / 512.0, 0.5 + 1.0 / 512.0);

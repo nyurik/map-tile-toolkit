@@ -23,7 +23,7 @@ use geo::orient::Direction;
 use geo::{MapCoords as _, Orient as _, Simplify as _, Validation as _, unary_union};
 use geo_types::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
-    Point, Polygon,
+    Point, Polygon, coord,
 };
 
 use crate::tile::{SliceOptions, TileId, tile_bbox, tile_length_from_zoom};
@@ -52,10 +52,7 @@ pub(crate) fn clip_geometry_to_tile(
 /// Callers snap/floor coordinates first, so every value is already a whole number well within
 /// `i32` range; the cast is exact.
 pub(crate) fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
-    geom.map_coords(|c| Coord {
-        x: c.x as i32,
-        y: c.y as i32,
-    })
+    geom.map_coords(|c| coord! { x: c.x as i32, y: c.y as i32 })
 }
 
 /// A single tile in Web Mercator space, carrying the tile resolution it is rendered at.
@@ -279,10 +276,8 @@ impl Rect {
                     self.max_x
                 };
                 let t = (x - a.x) / (b.x - a.x);
-                Coord {
-                    x,
-                    y: a.y + t * (b.y - a.y),
-                }
+                let y = a.y + t * (b.y - a.y);
+                Coord { x, y }
             }
             Edge::Bottom | Edge::Top => {
                 let y = if matches!(edge, Edge::Bottom) {
@@ -291,10 +286,8 @@ impl Rect {
                     self.max_y
                 };
                 let t = (y - a.y) / (b.y - a.y);
-                Coord {
-                    x: a.x + t * (b.x - a.x),
-                    y,
-                }
+                let x = a.x + t * (b.x - a.x);
+                Coord { x, y }
             }
         }
     }
@@ -435,10 +428,7 @@ mod tests {
         let opts = SliceOptions::new(NonZeroU32::new(4096).expect("nonzero"), 256);
         let mut rect = Rect::from_tile(TileId::new(70, 43, 7), opts);
         rect.add_buffer();
-        let c = rect.to_tile_coord(Coord {
-            x: 1_962_772.0,
-            y: 6_300_000.0,
-        });
+        let c = rect.to_tile_coord(coord! { x: 1_962_772.0, y: 6_300_000.0 });
         assert_relative_eq!(c.x, 1102.0);
         assert_relative_eq!(c.y, 3596.0);
     }

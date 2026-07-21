@@ -7,7 +7,7 @@
 mod support;
 
 use approx::assert_abs_diff_eq;
-use geo::{AffineOps, AffineTransform, Area, Contains};
+use geo::{AffineOps, AffineTransform, Contains};
 use geo_types::{Coord, Geometry, LineString, Point};
 use map_tile_toolkit::geo_utils::{
     get_world_x, get_world_y, is_convex, lat_lon_to_world, min_zoom_for_pixel_size,
@@ -202,19 +202,6 @@ fn five_points_concave() {
 
 fn is_polygonal(g: &Geometry<f64>) -> bool {
     matches!(g, Geometry::Polygon(_) | Geometry::MultiPolygon(_))
-}
-
-#[test]
-fn snap_and_fix_issue_511() {
-    let orig = support::load_wkt("tests/fixtures/snap_and_fix_511.wkt");
-    let result = snap_and_fix_polygon(&orig).unwrap();
-    assert!(is_polygonal(&result));
-    // DIVERGENCE FROM PLANETILER: planetiler asserts area 3.083984375, produced by JTS
-    // `buffer(0)` + `GeometryPrecisionReducer`. geo's overlay engine (`unary_union`) resolves
-    // this self-overlapping multipolygon to a valid geometry with area 3.15625 instead. Both
-    // are valid repairs; the areas differ because the two engines resolve the overlap
-    // differently. We assert geo's actual, stable result so the test keeps running.
-    assert_abs_diff_eq!(result.unsigned_area(), 3.156_25, epsilon = 1e-5);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use std::f64::consts::PI;
 
 use geo::orient::Direction;
 use geo::{MapCoords as _, Orient, Validation, unary_union};
-use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPolygon};
+use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPolygon, coord};
 
 use crate::stripe::GeometryError;
 
@@ -54,19 +54,13 @@ pub fn get_world_lat(y: f64) -> f64 {
 /// Convert a world coordinate to `(longitude, latitude)` degrees.
 #[must_use]
 pub fn world_to_lat_lon(world: Coord<f64>) -> Coord<f64> {
-    Coord {
-        x: get_world_lon(world.x),
-        y: get_world_lat(world.y),
-    }
+    coord! { x: get_world_lon(world.x), y: get_world_lat(world.y) }
 }
 
 /// Convert `(longitude, latitude)` degrees to a world coordinate.
 #[must_use]
 pub fn lat_lon_to_world(lon_lat: Coord<f64>) -> Coord<f64> {
-    Coord {
-        x: get_world_x(lon_lat.x),
-        y: get_world_y(lon_lat.y),
-    }
+    coord! { x: get_world_x(lon_lat.x), y: get_world_y(lon_lat.y) }
 }
 
 /// Convert a polygon / multipolygon / ring into its boundary as a (multi)linestring.

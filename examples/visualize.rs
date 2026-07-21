@@ -22,6 +22,7 @@
 
 use std::env;
 use std::f64::consts::PI;
+use std::fs::read_to_string;
 use std::num::NonZeroU32;
 
 use geo::MapCoords as _;
@@ -172,8 +173,7 @@ fn parse_args() -> Args {
         match flag.as_str() {
             "--wkt" => geom = Some(Geometry::try_from_wkt_str(&next()).expect("valid WKT")),
             "--file" => {
-                let path = next();
-                let text = std::fs::read_to_string(&path).expect("readable WKT file");
+                let text = read_to_string(next()).expect("readable WKT file");
                 geom = Some(Geometry::try_from_wkt_str(&text).expect("valid WKT"));
             }
             "--zoom" => zoom = next().parse().expect("zoom is a small integer"),

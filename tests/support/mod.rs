@@ -19,7 +19,7 @@ use std::path::Path;
 use geo::{AffineOps, AffineTransform, MapCoords, Relate};
 use geo_types::{
     Coord, Geometry, GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon,
-    Point, Polygon,
+    Point, Polygon, coord,
 };
 use map_tile_toolkit::TileId;
 use map_tile_toolkit::extents::ForZoom;
@@ -351,10 +351,7 @@ pub fn render_with<F: Fn(u8) -> ForZoom>(
     let mut out: BTreeMap<TileId, Vec<Geometry<f64>>> = BTreeMap::new();
     for z in min_zoom..=max_zoom {
         let scale = f64::from(1u32 << z);
-        let scaled = world.map_coords(|c| Coord {
-            x: c.x * scale,
-            y: c.y * scale,
-        });
+        let scaled = world.map_coords(|c| coord! { x: c.x * scale, y: c.y * scale });
         let extents = extents_for(z);
         let tiled = slice_scaled(&scaled, buffer, z, &extents);
         for (tile, groups) in tiled.tile_data() {
