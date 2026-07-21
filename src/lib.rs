@@ -1,20 +1,12 @@
 #![doc = include_str!("../README.md")]
 
-mod clip;
-
-// Integer polyline clipping: slice an already-integer `LineString<i32>` to a tile bounding box,
-// keeping original vertices. See [`clip_polyline::slice_tile`].
-pub mod clip_polyline;
-
-mod slice;
-pub use slice::{for_each_tile_slice, slice_all_tiles, slice_tile};
-
 mod tile;
-pub use tile::{SliceOptions, TileId};
+pub use tile::{TileId, tile_bounds, tile_of};
 
-// Eager stripe slicer: slice one geometry into every tile it touches at a zoom, with
-// interior fill detection and antimeridian wrapping. `extents` filters to in-bounds tiles;
-// `geo_utils` holds shared geometry helpers.
-pub mod extents;
-pub mod geo_utils;
-pub mod stripe;
+// One tile's worth of an integer polyline.
+mod clip_polyline;
+pub use clip_polyline::slice_tile;
+
+// The whole polyline sliced into every tile it touches.
+mod slice_all;
+pub use slice_all::slice_all_tiles;

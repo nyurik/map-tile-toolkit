@@ -1,38 +1,23 @@
 [package]
 name = "map-tile-toolkit"
 version = "0.1.0"
-description = "Convert GeoJSON/geo geometries into per-tile slices ready for encoding"
+description = "Clip integer polylines into per-tile pieces on a simple tile grid"
 authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
 repository = "https://github.com/nyurik/map-tile-toolkit"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-keywords = ["mlt", "mvt", "tile", "geojson", "geo"]
+keywords = ["mvt", "tile", "geo", "polyline", "clip"]
 categories = ["science::geo"]
 rust-version = "1.88"
 
-[[bench]]
-name = "clipping"
-harness = false
-
 [dependencies]
-geo = "0.33.1"
 geo-types = "0.7.19"
-thiserror = "2"
 
 [dev-dependencies]
-approx = "0.5"
-criterion = "0.8"
-fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
 geojson = { version = "1.0.0", features = ["geo-types"] }
 insta = "1"
 serde_json = "1"
 test_each_file = "0.3.7"
-wkt = "0.14"
-
-# Optimized build with debug symbols, used by `just flamegraph` for readable profiles.
-[profile.profiling]
-inherits = "release"
-debug = true
 
 [lints.rust]
 unsafe_code = "forbid"

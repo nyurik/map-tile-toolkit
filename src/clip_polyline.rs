@@ -1,42 +1,67 @@
-//! Integer polyline clipping against a tile bounding box.
+//! One tile's worth of an integer polyline.
 //!
-//! Unlike [`crate::clip`], which clips arbitrary Web Mercator geometry and cuts new vertices at
-//! the tile edge, this path works directly on an already-integer [`LineString<i32>`] and keeps
-//! only its **original** vertices. Given a tile bounding box it walks the polyline once and emits
-//! the runs that touch the box: every vertex inside the box, plus the single vertex just outside
-//! each time the line enters or leaves it. A line that leaves and later re-enters comes back as
-//! separate pieces, so the result is a [`Geometry::LineString`] (one piece) or
-//! [`Geometry::MultiLineString`] (several), or `None` when nothing touches the box.
+//! [`slice_tile`] clips a `LineString`/`MultiLineString` (integer coordinates) to a single tile of
+//! the integer grid, keeping the **original** vertices — every vertex inside the tile, plus the
+//! single vertex just outside each time the line enters or leaves it. A line that leaves and later
+//! re-enters comes back as separate pieces. Nothing is cut at the tile edge, so a segment that
+//! crosses a tile without a vertex inside it is dropped.
+//!
+//! This is the per-tile reference path; [`crate::slice_all_tiles`] slices a whole geometry into
+//! every tile it touches and must agree with calling [`slice_tile`] on each of those tiles.
 
-use geo_types::{Coord, Geometry, LineString, MultiLineString, Rect};
+use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
-/// Clip an integer polyline to a tile bounding box in a single pass, keeping original vertices.
+use crate::tile::{TileId, tile_bounds};
+
+/// Clip an integer polyline geometry to a single tile, keeping original vertices.
 ///
-/// Vertices identical to their predecessor are dropped. Walking the (deduplicated) vertices in
-/// order, a run is collected whenever a vertex lies inside `bbox` — extended backward to include
-/// the vertex the line entered from and forward through the first vertex that leaves the box
-/// (both kept). The walk continues past a run, so a polyline that re-enters `bbox` yields further
-/// pieces.
-///
-/// Returns [`Geometry::LineString`] for a single run, [`Geometry::MultiLineString`] for several,
-/// or `None` when the polyline never touches the box (each run has at least two vertices).
+/// Input is a [`Geometry::LineString`] or [`Geometry::MultiLineString`]; the result is the same
+/// kind (a single run stays a `LineString`, several become a `MultiLineString`), or `None` when
+/// nothing of the geometry falls in the tile.
 #[must_use]
-pub fn slice_tile(line: &LineString<i32>, bbox: Rect<i32>) -> Option<Geometry<i32>> {
-    let (min, max) = (bbox.min(), bbox.max());
-    // `impl Contains<Coord> for Rect` uses non-inclusive comparisons, so test the closed box here.
+pub fn slice_tile(geom: &Geometry<i32>, tile: TileId, tile_size: i32) -> Option<Geometry<i32>> {
+    let (min, max) = tile_bounds(tile, tile_size);
+    let mut pieces = Vec::new();
+    for line in each_line(geom) {
+        clip_line(line, min, max, &mut pieces);
+    }
+    assemble(pieces)
+}
+
+/// The component lines of a polyline geometry.
+pub(crate) fn each_line(geom: &Geometry<i32>) -> Vec<&LineString<i32>> {
+    match geom {
+        Geometry::LineString(ls) => vec![ls],
+        Geometry::MultiLineString(mls) => mls.0.iter().collect(),
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
+/// Clip one line to the closed integer rectangle `[min, max]`, appending each kept run to `out`.
+///
+/// Consecutive duplicate vertices are dropped. Walking the vertices, a run is collected whenever a
+/// vertex lies inside the box — extended backward to include the vertex the line entered from and
+/// forward through the first vertex that leaves the box (both kept). A lone outside vertex whose
+/// next neighbor is inside again is a graze and keeps the run going; two outside vertices in a row
+/// close it. Each run of ≥2 vertices becomes one output line.
+pub(crate) fn clip_line(
+    line: &LineString<i32>,
+    min: Coord<i32>,
+    max: Coord<i32>,
+    out: &mut Vec<LineString<i32>>,
+) {
     let inside = |c: Coord<i32>| c.x >= min.x && c.x <= max.x && c.y >= min.y && c.y <= max.y;
 
     // Pass through only vertices that differ from the previous one, dropping consecutive dups.
     let mut last: Option<Coord<i32>> = None;
     let mut iter = line
-        .coords()
+        .0
+        .iter()
         .copied()
         .filter(move |&c| last.replace(c) != Some(c))
         .peekable();
 
-    let mut pieces: Vec<LineString<i32>> = Vec::new();
     let mut prev: Option<Coord<i32>> = None; // last vertex seen outside the box
-
     while let Some(c) = iter.next() {
         if !inside(c) {
             prev = Some(c); // outside: remember it as the possible entry vertex
@@ -55,10 +80,13 @@ pub fn slice_tile(line: &LineString<i32>, bbox: Rect<i32>) -> Option<Geometry<i3
             }
         }
         if cur.len() >= 2 {
-            pieces.push(LineString(cur));
+            out.push(LineString(cur));
         }
     }
+}
 
+/// Wrap kept runs as a single geometry: `None`, one `LineString`, or a `MultiLineString`.
+pub(crate) fn assemble(mut pieces: Vec<LineString<i32>>) -> Option<Geometry<i32>> {
     match pieces.len() {
         0 => None,
         1 => pieces.pop().map(Geometry::LineString),

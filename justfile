@@ -18,11 +18,6 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
-# Run benchmarks
-bench:
-    cargo bench
-    open target/criterion/report/index.html
-
 # Run integration tests and save its output as the new expected output
 bless *args:  (cargo-install 'cargo-insta')
     cargo insta test --accept --include-ignored --unreferenced=delete --all-features {{args}}
@@ -86,33 +81,6 @@ env-info:
     @echo "CARGO_BUILD_WARNINGS='$CARGO_BUILD_WARNINGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
 
-# Flamegraph the clipping code for one geometry `kind` and `op` (needs Linux perf)
-# kind: polygon | polygon_with_holes | polyline    op: stripe | per_tile | one_tile
-flamegraph kind='polygon' op='stripe' secs='10':  (cargo-install 'cargo-flamegraph' 'flamegraph')
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
-    # Profiles a dedicated loop binary (examples/profile_clip.rs) — no benchmark harness or
-    # `cargo metadata` startup, so the flamegraph shows only the clipping code.
-    mkdir -p target/flamegraphs
-    out="target/flamegraphs/{{op}}_{{kind}}.svg"
-    cargo flamegraph --profile profiling --example profile_clip --output "$out" -- {{kind}} {{op}} {{secs}}
-    echo "Wrote $out"
-
-# Generate flamegraphs per geometry type for both the one-tile and all-tiles clip paths.
-flamegraph-all secs='10':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for kind in polygon polygon_with_holes polyline; do
-        for op in one_tile stripe; do
-            {{just}} flamegraph "$kind" "$op" {{secs}}
-        done
-    done
-
-# Emit a GeoJSON FeatureCollection (original + slices + tile grid) to inspect in geojson.io/QGIS.
-# Pass extra args through, e.g. `just visualize --zoom 5 --tile 5/16/10`. Defaults to a sample.
-visualize *args:
-    cargo run --quiet --example visualize -- {{args}}
 
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:

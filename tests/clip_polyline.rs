@@ -1,141 +1,188 @@
-//! Insta GeoJSON snapshots for the integer polyline clipper ([`clip_polyline::slice_tile`]).
+//! Insta GeoJSON snapshots for the integer polyline slicer.
 //!
-//! Fixtures live in `tests/fixtures/polyline/*.geojson`. Each is a `FeatureCollection` carrying a
-//! top-level GeoJSON `"bbox"` member (`[min_x, min_y, max_x, max_y]`, the clip box) and a single
-//! `LineString` feature. `slice_tile` works on integer coordinates, so fixture coordinates are
-//! whole numbers kept in valid lon/lat range (a small box near the origin) so that both the
-//! fixtures and the snapshots render on a map.
+//! Each fixture in `tests/fixtures/inputs/*.geojson` is a `FeatureCollection` with one `LineString`
+//! or `MultiLineString` feature (whole-number coordinates in valid lon/lat range so the fixtures
+//! and snapshots render on a map). Every fixture is sliced two ways and the two must be **byte
+//! identical**:
 //!
-//! The line is run through [`clip_polyline::slice_tile`] and the result is snapshotted as a
-//! `FeatureCollection`: the input line first, then the clipped output (a `LineString` or
-//! `MultiLineString`). When the clip produces nothing, the clip box is emitted in its place as a
-//! marker. Because the snapshot ends in `.geojson`, a diff renders on a map. Regenerate with
-//! `just bless`.
+//! 1. `slice_all_tiles` — the whole geometry into every tile it touches, in one pass.
+//! 2. For each tile that (1) produced, `slice_tile` re-clips that single tile.
 //!
-//! The `polyline/` dir is shared with `geojson_snapshots.rs`; its tile-slicing fixtures (carrying
-//! a `"zoom"` member rather than a `"bbox"`) are skipped here.
+//! The result is snapshotted as a `FeatureCollection`: the original polyline first, then one
+//! feature per per-tile piece. `tests/fixtures/grid.geojson` overlays the 25-unit tile grid.
+//! Regenerate with `just bless`.
 
 #![allow(clippy::pedantic, reason = "test/inspection tool")]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use geo::MapCoords as _;
-use geo_types::{coord, Geometry, LineString, MultiLineString, Rect};
-use geojson::{Feature, FeatureCollection, GeoJson, JsonValue};
+use geo_types::{Coord, Geometry, LineString, MultiLineString};
+use geojson::{FeatureCollection, GeoJson};
 use insta::assert_binary_snapshot;
-use map_tile_toolkit::clip_polyline::slice_tile;
+use map_tile_toolkit::{TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
+use geojson::{Feature, GeometryValue, JsonObject, JsonValue};
 
-mod support;
+/// Tile size for the test grid (matches `tests/fixtures/grid.geojson`).
+const TILE_SIZE: i32 = 25;
 
 mod files {
     use test_each_file::test_each_path;
 
-    use super::clip_one_fixture;
+    use super::slice_one_fixture;
 
-    // Generate one test per polyline fixture instead of iterating the directory in a single test.
-    test_each_path! { for ["geojson"] in "./tests/fixtures/polyline" => clip_one_fixture }
+    // Generate one test per input fixture.
+    test_each_path! { for ["geojson"] in "./tests/fixtures" => slice_one_fixture }
 }
 
-/// Parse a fixture into its clip box and input line (raw i32 coordinates), or `None` when it
-/// carries no `bbox` — a tile-slicing fixture that belongs to `geojson_snapshots.rs`.
-fn load_fixture(path: &Path) -> Option<(Rect<i32>, LineString<i32>)> {
+/// A GeoJSON [`Feature`] wrapping `geom` with the given [simplestyle-spec] properties. Because a
+/// snapshot file ends in `.geojson`, GitHub and geojson.io render the properties (`stroke`/`fill`/
+/// …) directly on a map.
+///
+/// [simplestyle-spec]: https://github.com/mapbox/simplestyle-spec
+pub fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
+    let properties = props
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect::<JsonObject>();
+    Feature {
+        bbox: None,
+        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
+        id: None,
+        properties: Some(properties),
+        foreign_members: None,
+    }
+}
+
+/// Parse a fixture into its (integer) polyline geometry.
+fn load_fixture(path: &Path) -> Geometry<i32> {
     let text = fs::read_to_string(path).expect("readable fixture");
     let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
         panic!("fixture must be a FeatureCollection: {}", path.display());
     };
-    let b = fc.bbox.as_ref()?;
-    let bbox = Rect::new(
-        coord! { x: b[0] as i32, y: b[1] as i32 },
-        coord! { x: b[2] as i32, y: b[3] as i32 },
-    );
-
     let geom = fc
         .features
         .into_iter()
         .find_map(|f| f.geometry)
         .map(|g| Geometry::<f64>::try_from(g).expect("geometry converts"))
         .expect("fixture has a geometry");
-    let Geometry::LineString(line) = geom else {
-        panic!("clip_polyline only clips polylines, got a non-LineString: {}", path.display());
+    to_i32(&geom)
+}
+
+/// Convert a polyline geometry to integer coordinates (fixtures use whole numbers).
+fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
+    let ls = |ls: &LineString<f64>| {
+        LineString(
+            ls.0.iter()
+                .map(|c| Coord {
+                    x: c.x as i32,
+                    y: c.y as i32,
+                })
+                .collect(),
+        )
     };
-    let line = line.map_coords(|c| coord! { x: c.x as i32, y: c.y as i32 });
-
-    Some((bbox, line))
+    match geom {
+        Geometry::LineString(l) => Geometry::LineString(ls(l)),
+        Geometry::MultiLineString(m) => {
+            Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
+        }
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
 }
 
-/// Wrap an integer geometry as a GeoJSON feature (coordinates are f64, but the values are exact
-/// small integers here).
-fn feature(geom: &Geometry<i32>, props: Vec<(&str, JsonValue)>) -> Feature {
-    let as_f64 = geom.map_coords(|c| coord! { x: f64::from(c.x), y: f64::from(c.y) });
-    support::feature(&as_f64, props)
+/// Convert an integer polyline geometry back to `f64` for GeoJSON output.
+fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
+    let ls = |ls: &LineString<i32>| {
+        LineString(
+            ls.0.iter()
+                .map(|c| Coord {
+                    x: f64::from(c.x),
+                    y: f64::from(c.y),
+                })
+                .collect(),
+        )
+    };
+    match geom {
+        Geometry::LineString(l) => Geometry::LineString(ls(l)),
+        Geometry::MultiLineString(m) => {
+            Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
+        }
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
 }
 
-/// The clip box drawn as a rectangle, so the snapshot shows what each piece was clipped against.
-fn bbox_feature(bbox: Rect<i32>) -> Feature {
-    feature(
-        &Geometry::Polygon(bbox.to_polygon()),
-        vec![
-            ("role", json!("bbox")),
-            ("stroke", json!("#111111")),
-            ("fill", json!("#111111")),
-            ("fill-opacity", json!(0.03)),
-        ],
-    )
-}
-
-/// Build the snapshot: the `input` line(s) first, then the clipped `output` — a `LineString`/
-/// `MultiLineString` when `slice_tile` produced something (`Ok`), or the clip box as a marker
-/// that nothing was generated (`Err`).
-fn build_fc(
-    input: MultiLineString<i32>,
-    output: Result<Geometry<i32>, Rect<i32>>,
-) -> FeatureCollection {
-    let input = feature(
-        &Geometry::MultiLineString(input),
+/// Build the snapshot `FeatureCollection`: the original polyline first, then one feature per
+/// per-tile piece (colored by tile parity so neighbours contrast, tagged with the tile).
+fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> FeatureCollection {
+    let mut features = vec![feature(
+        &to_f64(input),
         vec![
             ("role", json!("input")),
             ("stroke", json!("#888888")),
             ("stroke-width", json!(1)),
         ],
-    );
-    let output = match output {
-        Ok(geom) => feature(
-            &geom,
+    )];
+    for (tile, piece) in tiles {
+        let color = if (tile.x + tile.y).rem_euclid(2) == 0 {
+            "#1f77b4"
+        } else {
+            "#ff7f0e"
+        };
+        features.push(feature(
+            &to_f64(piece),
             vec![
-                ("role", json!("output")),
-                ("stroke", json!("#1f77b4")),
+                ("role", json!("tile")),
+                ("tile", json!(format!("{}/{}", tile.x, tile.y))),
+                ("stroke", json!(color)),
                 ("stroke-width", json!(3)),
             ],
-        ),
-        Err(bbox) => bbox_feature(bbox),
-    };
+        ));
+    }
     FeatureCollection {
         bbox: None,
-        features: vec![input, output],
+        features,
         foreign_members: None,
     }
 }
 
-/// Clip one polyline fixture and snapshot the result.
-fn clip_one_fixture([path]: [&Path; 1]) {
+/// Serialize the snapshot for a per-tile map.
+fn snapshot_bytes(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> Vec<u8> {
+    serde_json::to_vec_pretty(&build_fc(input, tiles)).expect("serializes")
+}
+
+fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
+    let geom = load_fixture(path);
 
-    // Skip tile-slicing fixtures (no bbox) that share the dir; they belong to
-    // `geojson_snapshots.rs`.
-    let Some((bbox, line)) = load_fixture(path) else {
-        return;
-    };
-    // The clipped output, or the clip box when the line fell entirely outside it.
-    let output = slice_tile(&line, bbox).ok_or(bbox);
-    let input = MultiLineString(vec![line]);
+    // (1) Slice the whole geometry into every tile it touches.
+    let all = slice_all_tiles(&geom, TILE_SIZE);
 
-    let bytes = serde_json::to_vec_pretty(&build_fc(input, output)).expect("serializes");
+    // (2) Re-clip each tile "all" produced, one at a time, and require an identical result.
+    let one: BTreeMap<TileId, Geometry<i32>> = all
+        .keys()
+        .map(|&tile| {
+            let piece = slice_tile(&geom, tile, TILE_SIZE).unwrap_or_else(|| {
+                panic!("tile {tile:?} is in `all` but `slice_tile` returned None")
+            });
+            (tile, piece)
+        })
+        .collect();
+    assert_eq!(all, one, "batch and per-tile slicing disagree for {stem}");
+
+    // The two snapshots must be byte identical; snapshot the (shared) result.
+    let all_bytes = snapshot_bytes(&geom, &all);
+    let one_bytes = snapshot_bytes(&geom, &one);
+    assert_eq!(
+        all_bytes, one_bytes,
+        "batch and per-tile snapshots differ for {stem}"
+    );
+
     insta::with_settings!({
-        snapshot_path => "snapshots/clip_polyline",
+        snapshot_path => "snapshots",
         prepend_module_to_snapshot => false,
     }, {
-        assert_binary_snapshot!(&format!("{stem}.geojson"), bytes);
+        assert_binary_snapshot!(&format!("{stem}.geojson"), all_bytes);
     });
 }

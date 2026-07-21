@@ -1,6 +1,0 @@
----
-source: tests/geojson_snapshots.rs
-expression: bytes
-extension: geojson
-snapshot_kind: binary
----
