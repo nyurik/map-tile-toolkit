@@ -19,25 +19,26 @@ new vertices at the tile edge.
 
 ```rust
 use geo_types::{Geometry, LineString};
-use map_tile_toolkit::{slice_all_tiles, slice_tile, TileId};
+use map_tile_toolkit::{Slicer, TileId};
 
-// An integer polyline. With a tile size of 25, tiles are 25 units wide.
+// An integer polyline. With `divider = 25`, tiles are 25 units wide; `buffer` grows each tile's
+// clip box outward (0 = tight against the grid).
 let line = Geometry::LineString(LineString::from(vec![(5, 5), (20, 20), (60, 40)]));
-let tile_size = 25;
+let slicer = Slicer { divider: 25, buffer: 0 };
 
 // Batch: every tile the polyline touches, each piece in the input's coordinate space.
-for (tile, piece) in slice_all_tiles(&line, tile_size) {
+for (tile, piece) in slicer.slice_all(&line) {
     let _ = (tile, piece);
 }
 
 // Single tile: clip to one tile, or `None` when the line does not touch it.
-if let Some(piece) = slice_tile(&line, TileId::new(0, 0), tile_size) {
+if let Some(piece) = slicer.slice(&line, TileId::new(0, 0)) {
     let _ = piece;
 }
 ```
 
-`slice_all_tiles` and `slice_tile` agree by construction: `slice_all_tiles(geom, size)[tile]`
-equals `slice_tile(geom, tile, size)` for every tile the geometry touches.
+`slice_all` and `slice` agree by construction: the pair `slice_all` yields for a tile equals what
+`slice` returns for that tile.
 
 ## Development
 

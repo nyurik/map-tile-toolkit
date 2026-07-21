@@ -1,32 +1,11 @@
-//! One tile's worth of an integer polyline.
+//! Low-level polyline clipping against a single tile box (the engine behind [`crate::Slicer`]).
 //!
-//! [`slice_tile`] clips a `LineString`/`MultiLineString` (integer coordinates) to a single tile of
-//! the integer grid, keeping the **original** vertices — never cutting new ones at the tile edge.
-//! Every segment that touches the tile contributes both of its endpoints, so the line shows up in
-//! **every** tile it passes through, even ones it merely crosses with no vertex inside. A line that
-//! leaves the tile and later re-enters it comes back as separate pieces.
-//!
-//! This is the per-tile reference path; [`crate::slice_all_tiles`] slices a whole geometry into
-//! every tile it touches and must agree with calling [`slice_tile`] on each of those tiles.
+//! Clipping keeps the **original** vertices — never cutting new ones at the tile edge. Every
+//! segment that touches the box contributes both of its endpoints, so a line shows up in every tile
+//! it passes through, even ones it merely crosses with no vertex inside. A stretch that leaves the
+//! box and re-enters comes back as separate pieces.
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
-
-use crate::tile::{TileId, tile_bounds};
-
-/// Clip an integer polyline geometry to a single tile, keeping original vertices.
-///
-/// Input is a [`Geometry::LineString`] or [`Geometry::MultiLineString`]; the result is the same
-/// kind (a single run stays a `LineString`, several become a `MultiLineString`), or `None` when
-/// nothing of the geometry touches the tile.
-#[must_use]
-pub fn slice_tile(geom: &Geometry<i32>, tile: TileId, tile_size: i32) -> Option<Geometry<i32>> {
-    let (min, max) = tile_bounds(tile, tile_size);
-    let mut pieces = Vec::new();
-    for line in each_line(geom) {
-        clip_line(line, min, max, &mut pieces);
-    }
-    assemble(pieces)
-}
 
 /// The component lines of a polyline geometry.
 pub(crate) fn each_line(geom: &Geometry<i32>) -> Vec<&LineString<i32>> {

@@ -1,9 +1,9 @@
 //! Tile addressing on the integer grid.
 //!
-//! A tile of side `size` covers the closed integer square `[x·size, x·size + size − 1]` on each
-//! axis, so the boundary between tiles `k−1` and `k` sits at `k·size − 0.5` (between two integer
-//! coordinates). Integer vertices therefore never land exactly on a tile edge — every vertex
-//! belongs to exactly one tile.
+//! A tile of side `divider` covers the closed integer square `[x·divider, x·divider + divider − 1]`
+//! on each axis, so the boundary between tiles `k−1` and `k` sits at `k·divider − 0.5` (between two
+//! integer coordinates). Integer vertices therefore never land exactly on a tile edge — every
+//! vertex belongs to exactly one tile.
 
 use geo_types::Coord;
 
@@ -27,22 +27,7 @@ impl From<(i32, i32)> for TileId {
     }
 }
 
-/// The tile containing coordinate `c` for the given tile `size`.
-#[must_use]
-pub fn tile_of(c: Coord<i32>, size: i32) -> TileId {
-    TileId::new(c.x.div_euclid(size), c.y.div_euclid(size))
-}
-
-/// The closed integer bounds `(min, max)` of a tile (both inclusive).
-#[must_use]
-pub fn tile_bounds(tile: TileId, size: i32) -> (Coord<i32>, Coord<i32>) {
-    let min = Coord {
-        x: tile.x * size,
-        y: tile.y * size,
-    };
-    let max = Coord {
-        x: min.x + size - 1,
-        y: min.y + size - 1,
-    };
-    (min, max)
+/// The tile that owns coordinate `c` for the given tile side `divider`.
+pub(crate) fn tile_of(c: Coord<i32>, divider: i32) -> TileId {
+    TileId::new(c.x.div_euclid(divider), c.y.div_euclid(divider))
 }

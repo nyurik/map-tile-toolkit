@@ -21,11 +21,19 @@ use std::path::Path;
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
 use insta::assert_binary_snapshot;
-use map_tile_toolkit::{TileId, slice_all_tiles, slice_tile, tile_of};
+use map_tile_toolkit::{Slicer, TileId};
 use serde_json::json;
 
-/// Tile size for the test grid (matches `tests/fixtures/grid.geojson`).
-const TILE_SIZE: i32 = 25;
+/// Tile side for the test grid (matches `tests/fixtures/grid.geojson`).
+const DIVIDER: i32 = 25;
+
+/// The slicer under test (buffer 0 keeps the tile boxes tight against the grid).
+fn slicer() -> Slicer {
+    Slicer {
+        divider: DIVIDER as u32,
+        buffer: 0,
+    }
+}
 
 mod files {
     use test_each_file::test_each_path;
@@ -107,9 +115,9 @@ fn padded_tile_span(geom: &Geometry<i32>) -> (TileId, TileId) {
     let mut hi = TileId::new(i32::MIN, i32::MIN);
     for line in each_line(geom) {
         for &c in &line.0 {
-            let t = tile_of(c, TILE_SIZE);
-            lo = TileId::new(lo.x.min(t.x), lo.y.min(t.y));
-            hi = TileId::new(hi.x.max(t.x), hi.y.max(t.y));
+            let (tx, ty) = (c.x.div_euclid(DIVIDER), c.y.div_euclid(DIVIDER));
+            lo = TileId::new(lo.x.min(tx), lo.y.min(ty));
+            hi = TileId::new(hi.x.max(tx), hi.y.max(ty));
         }
     }
     (
@@ -153,7 +161,7 @@ fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
 }
 
 /// Build the snapshot `FeatureCollection`: the original polyline first, then one feature per
-/// per-tile piece (colored by tile parity so neighbours contrast, tagged with the tile).
+/// per-tile piece (colored by tile parity so neighbors contrast, tagged with the tile).
 fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> FeatureCollection {
     let mut features = vec![feature(
         &to_f64(input),
@@ -194,9 +202,10 @@ fn snapshot_bytes(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>
 fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
     let geom = load_fixture(path);
+    let slicer = slicer();
 
     // (1) Slice the whole geometry into every tile it touches.
-    let all = slice_all_tiles(&geom, TILE_SIZE);
+    let all: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(&geom).into_iter().collect();
 
     // (2) Independently, clip one tile at a time across the whole tile span the geometry could
     // reach (padded by one tile). Collecting every non-empty result must reproduce `all` exactly —
@@ -207,7 +216,7 @@ fn slice_one_fixture([path]: [&Path; 1]) {
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let tile = TileId::new(x, y);
-            if let Some(piece) = slice_tile(&geom, tile, TILE_SIZE) {
+            if let Some(piece) = slicer.slice(&geom, tile) {
                 one.insert(tile, piece);
             }
         }
@@ -217,13 +226,13 @@ fn slice_one_fixture([path]: [&Path; 1]) {
     // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
     // dropped), so both paths on the duplicated input still match the original result.
     let duped = duplicate_vertices(&geom);
+    let all_duped: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(&duped).into_iter().collect();
     assert_eq!(
-        slice_all_tiles(&duped, TILE_SIZE),
-        all,
+        all_duped, all,
         "duplicating every vertex changed the batch result for {stem}"
     );
     for (&tile, piece) in &all {
-        let piece_dup = slice_tile(&duped, tile, TILE_SIZE).unwrap_or_else(|| {
+        let piece_dup = slicer.slice(&duped, tile).unwrap_or_else(|| {
             panic!("tile {tile:?} vanished after vertex duplication for {stem}")
         });
         assert_eq!(
