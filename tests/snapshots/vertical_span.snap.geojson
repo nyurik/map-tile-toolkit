@@ -11,11 +11,11 @@
             5.0
           ],
           [
-            10.0,
+            20.0,
             40.0
           ],
           [
-            10.0,
+            5.0,
             70.0
           ]
         ]
@@ -36,16 +36,15 @@
             5.0
           ],
           [
-            10.0,
+            20.0,
             40.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "0/0"
+        "stroke-width": 3
       }
     },
     {
@@ -58,20 +57,19 @@
             5.0
           ],
           [
-            10.0,
+            20.0,
             40.0
           ],
           [
-            10.0,
+            5.0,
             70.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/1",
         "stroke": "#ff7f0e",
-        "stroke-width": 3,
-        "tile": "0/1"
+        "stroke-width": 3
       }
     },
     {
@@ -80,20 +78,19 @@
         "type": "LineString",
         "coordinates": [
           [
-            10.0,
+            20.0,
             40.0
           ],
           [
-            10.0,
+            5.0,
             70.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/2",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "0/2"
+        "stroke-width": 3
       }
     }
   ]

@@ -8,15 +8,15 @@
         "coordinates": [
           [
             0.0,
-            0.0
+            12.0
           ],
           [
             24.0,
-            24.0
+            12.0
           ],
           [
             25.0,
-            25.0
+            40.0
           ],
           [
             49.0,
@@ -37,23 +37,22 @@
         "coordinates": [
           [
             0.0,
-            0.0
+            12.0
           ],
           [
             24.0,
-            24.0
+            12.0
           ],
           [
             25.0,
-            25.0
+            40.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "0/0"
+        "stroke-width": 3
       }
     },
     {
@@ -63,11 +62,11 @@
         "coordinates": [
           [
             24.0,
-            24.0
+            12.0
           ],
           [
             25.0,
-            25.0
+            40.0
           ],
           [
             49.0,
@@ -76,10 +75,9 @@
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 1/1",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "1/1"
+        "stroke-width": 3
       }
     }
   ]

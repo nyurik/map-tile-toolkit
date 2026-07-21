@@ -16,7 +16,7 @@
           ],
           [
             10.0,
-            12.0
+            20.0
           ]
         ]
       },
@@ -41,15 +41,14 @@
           ],
           [
             10.0,
-            12.0
+            20.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "0/0"
+        "stroke-width": 3
       }
     },
     {
@@ -67,15 +66,14 @@
           ],
           [
             10.0,
-            12.0
+            20.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 2/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "2/0"
+        "stroke-width": 3
       }
     }
   ]

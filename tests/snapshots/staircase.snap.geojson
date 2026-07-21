@@ -8,23 +8,23 @@
         "coordinates": [
           [
             5.0,
-            5.0
-          ],
-          [
-            30.0,
-            10.0
-          ],
-          [
-            55.0,
             20.0
           ],
           [
-            20.0,
+            45.0,
+            4.0
+          ],
+          [
+            55.0,
+            22.0
+          ],
+          [
+            10.0,
             40.0
           ],
           [
             45.0,
-            60.0
+            55.0
           ]
         ]
       },
@@ -41,19 +41,18 @@
         "coordinates": [
           [
             5.0,
-            5.0
+            20.0
           ],
           [
-            30.0,
-            10.0
+            45.0,
+            4.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "0/0"
+        "stroke-width": 3
       }
     },
     {
@@ -63,23 +62,22 @@
         "coordinates": [
           [
             55.0,
-            20.0
+            22.0
           ],
           [
-            20.0,
+            10.0,
             40.0
           ],
           [
             45.0,
-            60.0
+            55.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 0/1",
         "stroke": "#ff7f0e",
-        "stroke-width": 3,
-        "tile": "0/1"
+        "stroke-width": 3
       }
     },
     {
@@ -89,23 +87,22 @@
         "coordinates": [
           [
             5.0,
-            5.0
+            20.0
           ],
           [
-            30.0,
-            10.0
+            45.0,
+            4.0
           ],
           [
             55.0,
-            20.0
+            22.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 1/0",
         "stroke": "#ff7f0e",
-        "stroke-width": 3,
-        "tile": "1/0"
+        "stroke-width": 3
       }
     },
     {
@@ -114,20 +111,19 @@
         "type": "LineString",
         "coordinates": [
           [
-            20.0,
+            10.0,
             40.0
           ],
           [
             45.0,
-            60.0
+            55.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 1/2",
         "stroke": "#ff7f0e",
-        "stroke-width": 3,
-        "tile": "1/2"
+        "stroke-width": 3
       }
     },
     {
@@ -136,24 +132,23 @@
         "type": "LineString",
         "coordinates": [
           [
-            30.0,
-            10.0
+            45.0,
+            4.0
           ],
           [
             55.0,
-            20.0
+            22.0
           ],
           [
-            20.0,
+            10.0,
             40.0
           ]
         ]
       },
       "properties": {
-        "role": "tile",
+        "role": "tile 2/0",
         "stroke": "#1f77b4",
-        "stroke-width": 3,
-        "tile": "2/0"
+        "stroke-width": 3
       }
     }
   ]

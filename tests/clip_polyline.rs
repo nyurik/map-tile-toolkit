@@ -172,8 +172,8 @@ fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> F
         features.push(feature(
             &to_f64(piece),
             vec![
-                ("role", json!("tile")),
-                ("tile", json!(format!("{}/{}", tile.x, tile.y))),
+                // ("role", json!("tile")),
+                ("role", json!(format!("tile {}/{}", tile.x, tile.y))),
                 ("stroke", json!(color)),
                 ("stroke-width", json!(3)),
             ],

@@ -6,7 +6,7 @@
       "properties": {},
       "geometry": {
         "type": "LineString",
-        "coordinates": [[10, 10], [10, 10], [40, 10], [40, 10], [15, 10]]
+        "coordinates": [[10, 10], [10, 10], [40, 22], [40, 22], [15, 8]]
       }
     }
   ]
