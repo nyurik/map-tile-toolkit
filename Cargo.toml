@@ -23,7 +23,7 @@ thiserror = "2"
 approx = "0.5"
 criterion = "0.8"
 fast-mvt = { version = "0.6.2", features = ["reader", "writer"] }
-geojson = { version = "0.24", features = ["geo-types"] }
+geojson = { version = "1.0.0", features = ["geo-types"] }
 insta = "1"
 serde_json = "1"
 wkt = "0.14"
@@ -49,3 +49,4 @@ use_self = "warn"
 # Pedantics without being too noisy
 cargo = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+multiple_crate_versions = "allow"

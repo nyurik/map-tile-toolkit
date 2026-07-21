@@ -26,7 +26,7 @@ use std::num::NonZeroU32;
 
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, LineString, Polygon};
-use geojson::{Feature, FeatureCollection, JsonObject, JsonValue};
+use geojson::{Feature, FeatureCollection, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
 use wkt::TryFromWkt as _;
@@ -77,7 +77,7 @@ fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
     }
     Feature {
         bbox: None,
-        geometry: Some(geojson::Geometry::new(geojson::Value::from(geom))),
+        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
         id: None,
         properties: Some(properties),
         foreign_members: None,

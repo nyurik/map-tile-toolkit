@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use geo::MapCoords as _;
 use geo_types::{Coord, Geometry, GeometryCollection};
-use geojson::{Feature, FeatureCollection, GeoJson, JsonObject, JsonValue};
+use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::{SliceOptions, TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
@@ -81,7 +81,7 @@ fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
     }
     Feature {
         bbox: None,
-        geometry: Some(geojson::Geometry::new(geojson::Value::from(geom))),
+        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
         id: None,
         properties: Some(properties),
         foreign_members: None,
@@ -98,8 +98,7 @@ fn load_fixture(path: &Path) -> (Geometry<f64>, u8) {
         GeoJson::FeatureCollection(fc) => (fc.features, fc.foreign_members),
         GeoJson::Feature(f) => (vec![f], None),
         GeoJson::Geometry(g) => {
-            let geom = Geometry::<f64>::try_from(g).expect("geometry converts");
-            return (geom, 3);
+            return (Geometry::<f64>::try_from(g).expect("geometry converts"), 3);
         }
     };
 
@@ -195,12 +194,11 @@ fn write_geojson_snapshots(paths: &mut Vec<PathBuf>) {
     let opts = SliceOptions::new(NonZeroU32::new(EXTENT).expect("nonzero"), BUFFER_PX);
     for path in paths {
         let stem = path.file_stem().expect("stem").to_str().expect("utf8");
-        let (geom, zoom) = load_fixture(&path);
+        let (geom, zoom) = load_fixture(path);
         let mercator = geom.map_coords(lonlat_to_mercator);
 
         // Batch path: slice into every tile at once with the eager stripe slicer.
-        let batch: Vec<(TileId, Geometry<i32>)> =
-            slice_all_tiles(&mercator, zoom, opts).collect();
+        let batch: Vec<_> = slice_all_tiles(&mercator, zoom, opts).collect();
         let bytes = serde_json::to_vec_pretty(&build_fc(&geom, &batch)).expect("serializes");
         assert_binary_snapshot!(&format!("{stem}_slice_all_tiles.geojson"), bytes);
 

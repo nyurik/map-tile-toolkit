@@ -2,6 +2,10 @@
 
 mod clip;
 
+// Integer polyline clipping: slice an already-integer `LineString<i32>` to a tile bounding box,
+// keeping original vertices. See [`clip_polyline::slice_tile`].
+pub mod clip_polyline;
+
 mod slice;
 pub use slice::{for_each_tile_slice, slice_all_tiles, slice_tile};
 
