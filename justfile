@@ -81,7 +81,6 @@ env-info:
     @echo "CARGO_BUILD_WARNINGS='$CARGO_BUILD_WARNINGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
 
-
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
     #!/usr/bin/env bash

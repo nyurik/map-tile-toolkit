@@ -19,11 +19,11 @@ use std::fs;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
+use geojson::{Feature, GeometryValue, JsonObject, JsonValue};
 use geojson::{FeatureCollection, GeoJson};
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::{TileId, slice_all_tiles, slice_tile};
 use serde_json::json;
-use geojson::{Feature, GeometryValue, JsonObject, JsonValue};
 
 /// Tile size for the test grid (matches `tests/fixtures/grid.geojson`).
 const TILE_SIZE: i32 = 25;
@@ -87,6 +87,19 @@ fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
         Geometry::LineString(l) => Geometry::LineString(ls(l)),
         Geometry::MultiLineString(m) => {
             Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
+        }
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
+/// A copy of `geom` with every vertex repeated once — consecutive duplicates the slicers must
+/// transparently drop, so clipping the copy yields the same result as the original.
+fn duplicate_vertices(geom: &Geometry<i32>) -> Geometry<i32> {
+    let dup = |ls: &LineString<i32>| LineString(ls.0.iter().flat_map(|&c| [c, c]).collect());
+    match geom {
+        Geometry::LineString(l) => Geometry::LineString(dup(l)),
+        Geometry::MultiLineString(m) => {
+            Geometry::MultiLineString(MultiLineString(m.0.iter().map(dup).collect()))
         }
         other => panic!("expected a polyline geometry, got {other:?}"),
     }
@@ -170,6 +183,24 @@ fn slice_one_fixture([path]: [&Path; 1]) {
         })
         .collect();
     assert_eq!(all, one, "batch and per-tile slicing disagree for {stem}");
+
+    // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
+    // dropped), so both paths on the duplicated input still match the original result.
+    let duped = duplicate_vertices(&geom);
+    assert_eq!(
+        slice_all_tiles(&duped, TILE_SIZE),
+        all,
+        "duplicating every vertex changed the batch result for {stem}"
+    );
+    for (&tile, piece) in &all {
+        let piece_dup = slice_tile(&duped, tile, TILE_SIZE).unwrap_or_else(|| {
+            panic!("tile {tile:?} vanished after vertex duplication for {stem}")
+        });
+        assert_eq!(
+            &piece_dup, piece,
+            "duplicated-vertex per-tile differs at {tile:?} for {stem}"
+        );
+    }
 
     // The two snapshots must be byte identical; snapshot the (shared) result.
     let all_bytes = snapshot_bytes(&geom, &all);
