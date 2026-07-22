@@ -12,6 +12,23 @@ use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::{Feature, GeoJson, GeometryValue, JsonObject, JsonValue};
+use map_tile_toolkit::Slicer;
+
+/// Tile divider for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
+pub const SLICER: Slicer = Slicer::new(25, 0).expect("valid divider");
+pub const SLICER_BUFFER: Slicer = Slicer::new(25, 5).expect("valid divider");
+
+/// Slicing [`big_polyline`] with each of these yields a different number of output tiles, so the
+/// same large geometry can be benchmarked/profiled across output scales (shared by the benchmarks
+/// and the `profile` example so both agree). The big polyline spans roughly `[0,420] × [0,535]`:
+/// - `multi` (divider 25) → hundreds of tiles;
+/// - `few` (divider 300) → a 2×2 grid of 4 tiles;
+/// - `single` (divider 1024) → the whole geometry in one tile.
+pub const BIG_CONFIGS: [(&str, Slicer); 3] = [
+    ("multi", Slicer::new(25, 0).unwrap()),
+    ("few", Slicer::new(300, 0).unwrap()),
+    ("single", Slicer::new(1024, 0).unwrap()),
+];
 
 /// Parse a fixture file into its (integer) polyline geometry. Fixtures are `FeatureCollection`s
 /// holding a single `LineString`/`MultiLineString` with whole-number coordinates.
@@ -50,6 +67,36 @@ pub fn load_all_fixtures() -> Vec<(String, Geometry<i32>)> {
     out.sort_by(|a, b| a.0.cmp(&b.0));
     assert!(!out.is_empty(), "no fixtures found in {}", dir.display());
     out
+}
+
+/// A large, deterministic snake-shaped polyline for benchmarking and large-input correctness
+/// checks. It sweeps back and forth (boustrophedon) filling a wide area, so it has many vertices
+/// **and** touches many tiles — the case where re-clipping the whole geometry once per tile
+/// (`O(vertices × tiles)`) diverges sharply from a single routing pass. Small per-step jitter keeps
+/// rows off the axis so segments cross tile boundaries at varied angles. ~3.6k vertices spanning
+/// roughly a 420×540 area (≈17×22 tiles on a 25-unit grid).
+#[must_use]
+pub fn big_polyline() -> Geometry<i32> {
+    const ROWS: i32 = 60;
+    const COLS: i32 = 60;
+    const STEP: i32 = 7; // horizontal vertex spacing (< a 25-unit tile, so segments stay short)
+    const ROW_H: i32 = 9; // vertical spacing between rows
+
+    let mut coords = Vec::with_capacity(((ROWS * (COLS + 1)) + 1) as usize);
+    for r in 0..ROWS {
+        let y0 = r * ROW_H;
+        for k in 0..=COLS {
+            // Even rows sweep left→right, odd rows right→left, so the path stays connected.
+            let x = if r % 2 == 0 {
+                k * STEP
+            } else {
+                (COLS - k) * STEP
+            };
+            let y = y0 + (k * 3) % 5; // jitter in [0, 4]
+            coords.push(Coord { x, y });
+        }
+    }
+    Geometry::LineString(LineString(coords))
 }
 
 /// Convert a polyline geometry to integer coordinates (fixtures use whole numbers).

@@ -31,15 +31,12 @@ use serde_json::json;
 mod support;
 use support::{feature, load_fixture};
 
-/// Tile side for the test grid (matches `tests/fixtures/grid.geojson`).
-const DIVIDER: i32 = 25;
-
 /// Buffer sizes each fixture is snapshotted at, paired with the directory to write into. Buffer 0
 /// keeps the tile boxes flush with the grid; buffer 5 (a fifth of a tile) grows each box outward so
 /// near-edge vertices and crossing segments also land in the neighboring tiles.
 static SLICERS: [(Slicer, &str); 2] = [
-    (Slicer::new(DIVIDER as u32, 0).unwrap(), "snapshots"),
-    (Slicer::new(DIVIDER as u32, 5).unwrap(), "snapshots-5"),
+    (support::SLICER, "snapshots"),
+    (support::SLICER_BUFFER, "snapshots-5"),
 ];
 
 mod files {
@@ -67,7 +64,7 @@ fn padded_tile_span(geom: &Geometry<i32>) -> (TileId, TileId) {
     let mut hi = TileId::new(i32::MIN, i32::MIN);
     for line in each_line(geom) {
         for &c in &line.0 {
-            let (tx, ty) = (c.x.div_euclid(DIVIDER), c.y.div_euclid(DIVIDER));
+            let (tx, ty) = (c.x.div_euclid(25), c.y.div_euclid(25));
             lo = TileId::new(lo.x.min(tx), lo.y.min(ty));
             hi = TileId::new(hi.x.max(tx), hi.y.max(ty));
         }
@@ -153,6 +150,70 @@ fn slice_one_fixture([path]: [&Path; 1]) {
     let geom = load_fixture(path);
     for (slicer, snapshot_dir) in &SLICERS {
         slice_at_buffer(slicer, stem, &geom, snapshot_dir);
+    }
+}
+
+#[test]
+#[ignore = "manually save big geometry"]
+fn save_big_geometry() {
+    let features = vec![feature(&to_f64(&support::big_polyline()), vec![])];
+    let fc = FeatureCollection {
+        bbox: None,
+        features,
+        foreign_members: None,
+    };
+
+    let geojson = serde_json::to_vec_pretty(&fc).expect("serializes");
+    std::fs::write("tests/fixtures/big-geometry.geojson", geojson).expect("writes");
+}
+
+/// The single-pass `slice_all` must still agree with per-tile `slice` on a large geometry that
+/// touches many tiles — the case the fixtures are too small to exercise (and where the old
+/// re-clip-per-tile algorithm did `O(vertices × tiles)` work). Not snapshotted (it would be huge);
+/// this only guards the batch/per-tile equivalence at scale, at both buffer sizes.
+#[test]
+fn big_geometry_batch_matches_per_tile() {
+    let geom = support::big_polyline();
+
+    for (slicer, _) in &SLICERS {
+        let all: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(&geom).into_iter().collect();
+        let (lo, hi) = padded_tile_span(&geom);
+        let mut one = BTreeMap::new();
+        for y in lo.y..=hi.y {
+            for x in lo.x..=hi.x {
+                let tile = TileId::new(x, y);
+                if let Some(piece) = slicer.slice(&geom, tile) {
+                    one.insert(tile, piece);
+                }
+            }
+        }
+        assert_eq!(
+            all,
+            one,
+            "big-geometry batch and per-tile slicing disagree (buffer {})",
+            slicer.buffer()
+        );
+        assert!(
+            all.len() > 100,
+            "expected the big geometry to touch many tiles"
+        );
+    }
+}
+
+/// The shared `BIG_CONFIGS` slicers must slice the big polyline into the documented number of
+/// tiles: `single` → one, `few` → a 2×2 grid of four, `multi` → many. Guards the divider choices
+/// the benchmarks and the `profile` example rely on.
+#[test]
+fn big_config_tile_counts() {
+    let geom = support::big_polyline();
+    for (name, slicer) in support::BIG_CONFIGS {
+        let n = slicer.slice_all(&geom).len();
+        match name {
+            "single" => assert_eq!(n, 1, "`single` should keep the whole polyline in one tile"),
+            "few" => assert_eq!(n, 4, "`few` should produce a 2×2 grid of tiles"),
+            "multi" => assert!(n > 100, "`multi` should produce many tiles, got {n}"),
+            other => panic!("unexpected config {other}"),
+        }
     }
 }
 

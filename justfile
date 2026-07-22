@@ -18,31 +18,25 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
-# Run all slicing benchmarks
+# Run slicing benchmarks; optional criterion filter, e.g. `just bench big`, `just bench single`
 bench filter='':
     cargo bench {{if filter != '' {'-- ' + filter} else {''} }}
 
-# Run slice benchmark
-bench-slice: (bench 'slice')
+# Run only the large-polyline benchmarks (many / a few / a single tile)
+bench-big: (bench 'big')
 
-# Run slice-all benchmark
-bench-slice-all: (bench 'slice-all')
+# Flamegraph one profiling case (see `examples/profile.rs`), e.g. `just flamegraph big-all-multi 5000`
+flamegraph name *args:  (_flamegraph name args)
 
-# Flamegraph the `slice_all` example. Extra args go to the example (e.g. iteration count).
-flamegraph-slice-all *args:  (_flamegraph 'profile_slice_all' 'slice_all' args)
-
-# Flamegraph the per-tile `slice` example. Extra args go to the example (e.g. iteration count).
-flamegraph-slice *args:  (_flamegraph 'profile_slice' 'slice' args)
-
-# Profile one example with cargo-flamegraph, writing target/flamegraphs/<out>.svg
+# Profile the `profile` example for one case with cargo-flamegraph, writing target/flamegraphs/<name>.svg
 [private]
-_flamegraph example out *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
+_flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
     #!/usr/bin/env bash
     set -euo pipefail
     # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
     mkdir -p target/flamegraphs
-    svg="target/flamegraphs/{{out}}.svg"
-    cargo flamegraph --profile profiling --example {{example}} --output "$svg" -- {{args}}
+    svg="target/flamegraphs/{{name}}.svg"
+    cargo flamegraph --profile profiling --example profile --output "$svg" -- {{name}} {{args}}
     echo "Wrote $svg"
 
 # Run integration tests and save its output as the new expected output
