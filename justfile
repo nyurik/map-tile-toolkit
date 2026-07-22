@@ -28,6 +28,23 @@ bench-slice: (bench 'slice')
 # Run slice-all benchmark
 bench-slice-all: (bench 'slice-all')
 
+# Flamegraph the `slice_all` example. Extra args go to the example (e.g. iteration count).
+flamegraph-slice-all *args:  (_flamegraph 'profile_slice_all' 'slice_all' args)
+
+# Flamegraph the per-tile `slice` example. Extra args go to the example (e.g. iteration count).
+flamegraph-slice *args:  (_flamegraph 'profile_slice' 'slice' args)
+
+# Profile one example with cargo-flamegraph, writing target/flamegraphs/<out>.svg
+[private]
+_flamegraph example out *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
+    mkdir -p target/flamegraphs
+    svg="target/flamegraphs/{{out}}.svg"
+    cargo flamegraph --profile profiling --example {{example}} --output "$svg" -- {{args}}
+    echo "Wrote $svg"
+
 # Run integration tests and save its output as the new expected output
 bless *args:  (cargo-install 'cargo-insta')
     cargo insta test --accept --include-ignored --unreferenced=delete --all-features {{args}}

@@ -24,6 +24,11 @@ insta = "1"
 serde_json = "1"
 test_each_file = "0.3.7"
 
+# Release build with debug symbols, used by `just flamegraph-*` for readable profiles.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [lints.rust]
 unsafe_code = "forbid"
 unused_qualifications = "warn"
