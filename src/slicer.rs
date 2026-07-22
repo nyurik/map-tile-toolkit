@@ -5,18 +5,22 @@ use geo_types::{Coord, Geometry, LineString};
 use crate::clip_polyline::{assemble, clip_line, each_line, segment_intersects};
 use crate::tile::{TileId, tile_of};
 
-/// One segment routed into one tile during [`Slicer::slice_all`]. Sorting hits (derived `Ord`:
-/// `tile`, then `line`, then `i0`) groups every tile's segments together in original order. `i0`
-/// and `i1` are the segment endpoints' **original** vertex indices in `line`, so endpoints are
-/// looked up (no coordinate copies) and consecutive-duplicate vertices simply make `i1 > i0 + 1`.
-/// Within a tile a run continues only when the previous segment ended where this one starts
-/// (`prev.i1 == i0`, same line); any gap — or a line boundary — starts a new piece.
+/// One segment routed into one tile during [`Slicer::slice_all`], packed into 10 bytes so the sort
+/// moves little memory. `dx`/`dy` are the tile's offset from a reference tile (the first vertex's
+/// tile): a polyline is geographically local, so the offsets fit `i16` with huge margin, and their
+/// order equals absolute tile order (the reference is constant), so the derived `Ord` — `dx`, `dy`,
+/// then `line`, `i0` — groups each tile's segments in original order. `line`/`i0`/`i1` are the
+/// segment's line index and its endpoints' **original** vertex indices (endpoints are looked up, no
+/// coordinate copies; consecutive-duplicate vertices simply make `i1 > i0 + 1`). Within a tile a
+/// run continues only when the previous segment ended where this one starts (`prev.i1 == i0`, same
+/// line); any gap — or a line boundary — starts a new piece.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct Hit {
-    tile: TileId,
-    line: u32,
-    i0: u32,
-    i1: u32,
+    dx: i16,
+    dy: i16,
+    line: u16,
+    i0: u16,
+    i1: u16,
 }
 
 /// Slices integer polylines ([`Geometry::LineString`] / [`Geometry::MultiLineString`]) into
@@ -79,26 +83,40 @@ impl Slicer {
     /// tile equals what `slice` returns for it.
     ///
     /// The geometry is walked **once**. Every segment (consecutive-duplicate vertices skipped) is
-    /// routed into each tile whose buffered box it touches, recording a [`Hit`] of `(tile, line,
-    /// i0, i1)` — the segment endpoints' original vertex indices. Sorting the hits groups every
-    /// tile's segments together in original order; within a tile a run grows while each segment
-    /// starts where the previous ended (a gap — or a line boundary — starts a new piece), looking
-    /// the endpoints back up from the input. This yields the same runs [`clip_line`] produces per
-    /// tile, but without re-clipping the whole geometry once per tile and without copying vertices.
+    /// routed into each tile whose buffered box it touches, recording a compact [`Hit`] (tile as an
+    /// `i16` offset from the first vertex's tile, plus the segment's line index and its endpoints'
+    /// original vertex indices). Sorting the hits groups every tile's segments together in original
+    /// order; within a tile a run grows while each segment starts where the previous ended (a gap —
+    /// or a line boundary — starts a new piece), looking the endpoints back up from the input. This
+    /// yields the same runs [`clip_line`] produces per tile, but without re-clipping the whole
+    /// geometry once per tile and without copying vertices.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `geom` spans more than `i16::MAX` (32767) tiles from its first vertex on either
+    /// axis, or has a line with `≥ u16::MAX` vertices. Neither occurs for a normal polyline (e.g. an
+    /// OSM way, capped at 2000 nodes and geographically local); both hold with enormous margin.
     #[must_use]
     #[allow(
         clippy::cast_possible_truncation,
-        reason = "line/vertex indices fit in u32 for any realistic polyline (u32::MAX vertices is >32 GB)"
+        reason = "line/vertex indices fit in u16 for a normal polyline; see # Panics"
     )]
     pub fn slice_all(self, geom: &Geometry<i32>) -> Vec<(TileId, Geometry<i32>)> {
         let lines = each_line(geom);
+
+        // All hit tiles are stored as `i16` offsets from this reference tile (the first vertex's
+        // tile). A polyline is local, so the offsets fit with huge margin; empty input → no tiles.
+        let Some(first) = lines.iter().find_map(|l| l.0.first()).copied() else {
+            return Vec::new();
+        };
+        let reference = tile_of(first, self.divider);
 
         // Reserve ~two hits per segment (a segment usually lands in one or two tiles); this is an
         // O(lines) estimate, so it stays cheap for a single huge line too.
         let segments: usize = lines.iter().map(|l| l.0.len().saturating_sub(1)).sum();
         let mut hits: Vec<Hit> = Vec::with_capacity(segments * 2);
         for (li, line) in lines.iter().enumerate() {
-            let li = li as u32;
+            let li = li as u16;
             // Carry the previous vertex (index + coordinate) so the segment start needs no re-index.
             let mut prev: Option<(usize, Coord<i32>)> = None;
             for (idx, &c) in line.0.iter().enumerate() {
@@ -121,15 +139,20 @@ impl Slicer {
                         self.divider,
                     );
                     for ty in lo.y..=hi.y {
+                        let dy = i16::try_from(ty - reference.y)
+                            .expect("tile y offset fits i16 (polyline stays local)");
                         for tx in lo.x..=hi.x {
                             let tile = TileId::new(tx, ty);
                             let (min, max) = self.tile_bounds(tile);
                             if segment_intersects(a, c, min, max) {
+                                let dx = i16::try_from(tx - reference.x)
+                                    .expect("tile x offset fits i16 (polyline stays local)");
                                 hits.push(Hit {
-                                    tile,
+                                    dx,
+                                    dy,
                                     line: li,
-                                    i0: p as u32,
-                                    i1: idx as u32,
+                                    i0: p as u16,
+                                    i1: idx as u16,
                                 });
                             }
                         }
@@ -143,17 +166,21 @@ impl Slicer {
         hits.sort_unstable();
         // Presize the output to the number of distinct tiles (one cheap pass over the sorted hits)
         // so pushing results never reallocates.
-        let distinct = hits.windows(2).filter(|w| w[0].tile != w[1].tile).count()
+        let distinct = hits
+            .windows(2)
+            .filter(|w| (w[0].dx, w[0].dy) != (w[1].dx, w[1].dy))
+            .count()
             + usize::from(!hits.is_empty());
         let mut out: Vec<(TileId, Geometry<i32>)> = Vec::with_capacity(distinct);
         let mut i = 0;
         while i < hits.len() {
-            let tile = hits[i].tile;
+            let (dx, dy) = (hits[i].dx, hits[i].dy);
+            let tile = TileId::new(reference.x + i32::from(dx), reference.y + i32::from(dy));
             // Most tiles hold a single run; size for that and let it grow when a line re-enters.
             let mut pieces: Vec<LineString<i32>> = Vec::with_capacity(1);
             let mut cur: Vec<Coord<i32>> = Vec::new();
-            let mut prev_end: Option<(u32, u32)> = None; // (line, i1) of the previous segment
-            while i < hits.len() && hits[i].tile == tile {
+            let mut prev_end: Option<(u16, u16)> = None; // (line, i1) of the previous segment
+            while i < hits.len() && (hits[i].dx, hits[i].dy) == (dx, dy) {
                 let h = &hits[i];
                 let verts = &lines[h.line as usize].0;
                 let (a, c) = (verts[h.i0 as usize], verts[h.i1 as usize]);
