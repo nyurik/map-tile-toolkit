@@ -1,7 +1,7 @@
-//! The public API never panics: invalid input yields a typed [`Error`] instead.
+//! The public API never panics: invalid input yields a typed [`SliceError`] instead.
 
 use geo_types::Coord;
-use map_tile_toolkit::{Error, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{SliceError, SlicerAll, SlicerOne, TileId};
 
 /// A polyline as a `Vec<Coord<i32>>`.
 fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
@@ -9,7 +9,7 @@ fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
 }
 
 /// A fresh all-tiles slicer over `Coord` (the config validation is what these tests probe).
-fn all(divider: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, Error> {
+fn all(divider: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, SliceError> {
     SlicerAll::new(divider, buffer)
 }
 
@@ -20,14 +20,14 @@ fn one(divider: u32, buffer: u16, tile: TileId) -> SlicerOne<Coord<i32>> {
 
 #[test]
 fn invalid_divider() {
-    assert_eq!(all(0, 0).err(), Some(Error::InvalidDivider));
-    assert_eq!(all(u32::MAX, 0).err(), Some(Error::InvalidDivider));
+    assert_eq!(all(0, 0).err(), Some(SliceError::InvalidDivider));
+    assert_eq!(all(u32::MAX, 0).err(), Some(SliceError::InvalidDivider));
     assert!(all(1, 0).is_ok());
     assert!(all(i32::MAX as u32, u16::MAX).is_ok());
     // Both slicers validate the divider the same way.
     assert_eq!(
         SlicerOne::<Coord<i32>>::new(0, 0, TileId::new(0, 0)).err(),
-        Some(Error::InvalidDivider)
+        Some(SliceError::InvalidDivider)
     );
 }
 
@@ -39,7 +39,7 @@ fn non_polyline_geometry_errors() {
     let point = Geometry::Point(Point::new(1, 2));
     assert_eq!(
         s.add_geometry(&point).err(),
-        Some(Error::UnsupportedGeometry("Point"))
+        Some(SliceError::UnsupportedGeometry("Point"))
     );
 }
 
@@ -51,11 +51,11 @@ fn extreme_tile_errors_instead_of_panicking() {
         one(4096, 0, TileId::new(i32::MAX, i32::MAX))
             .add_feature(&l)
             .err(),
-        Some(Error::Overflow)
+        Some(SliceError::Overflow)
     );
     assert_eq!(
         one(4096, 0, TileId::new(i32::MIN, 0)).add_feature(&l).err(),
-        Some(Error::Overflow)
+        Some(SliceError::Overflow)
     );
     // A far-but-representable tile touches nothing → no features accumulated.
     let mut far = one(4096, 0, TileId::new(1000, 1000));
@@ -69,7 +69,7 @@ fn spanning_too_many_tiles_errors() {
     // Spans 40 000 tiles on x, past i16::MAX (32 767).
     assert_eq!(
         s.add_feature(line(vec![(0, 0), (40_000, 0)])).err(),
-        Some(Error::TooManyTiles)
+        Some(SliceError::TooManyTiles)
     );
 }
 
@@ -80,7 +80,7 @@ fn coordinate_overflow_errors() {
     assert_eq!(
         s.add_feature(line(vec![(i32::MAX, 0), (i32::MAX, 10)]))
             .err(),
-        Some(Error::Overflow)
+        Some(SliceError::Overflow)
     );
 }
 
@@ -91,7 +91,10 @@ fn too_many_vertices_errors() {
     let coords: Vec<Coord<i32>> = (0..=(i32::from(u16::MAX) + 1))
         .map(|i| Coord { x: i % 8, y: 0 })
         .collect();
-    assert_eq!(s.add_feature(&coords).err(), Some(Error::PolylineTooLarge));
+    assert_eq!(
+        s.add_feature(&coords).err(),
+        Some(SliceError::PolylineTooLarge)
+    );
 }
 
 #[test]

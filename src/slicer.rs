@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use geo_types::Coord;
 
-use crate::Error;
+use crate::SliceError;
 use crate::grid::Grid;
 use crate::tile::TileId;
 use crate::vertex::Vertex;
@@ -130,7 +130,7 @@ impl FeatureCounter {
 /// [`iter_tiles`](Self::iter_tiles).
 ///
 /// The slicer never panics: bad input (an oversized polyline, or coordinates that overflow the tile
-/// math) yields an [`Error`] instead.
+/// math) yields an [`SliceError`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerAll<V: Vertex = Coord<i32>> {
     grid: Grid,
@@ -143,8 +143,8 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    pub fn new(divider: u32, buffer: u16) -> Result<Self, Error> {
+    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    pub fn new(divider: u32, buffer: u16) -> Result<Self, SliceError> {
         Ok(Self {
             grid: Grid::new(divider, buffer)?,
             features: FeatureCounter::new(),
@@ -171,9 +171,9 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`Error::PolylineTooLarge`], [`Error::TooManyTiles`], or
-    /// [`Error::Overflow`].
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, Error> {
+    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or
+    /// [`SliceError::Overflow`].
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
         let sliced = self.grid.slice_all(polyline.as_ref())?;
         let id = self.features.open_new();
         for (tile, runs) in sliced {
@@ -191,12 +191,12 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`Error::PolylineTooLarge`], [`Error::TooManyTiles`], or
-    /// [`Error::Overflow`].
+    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or
+    /// [`SliceError::Overflow`].
     pub fn continue_last_feature<P: AsRef<[V]>>(
         &mut self,
         polyline: P,
-    ) -> Result<&mut Self, Error> {
+    ) -> Result<&mut Self, SliceError> {
         let sliced = self.grid.slice_all(polyline.as_ref())?;
         let id = self.features.open_or_new();
         for (tile, runs) in sliced {
@@ -255,8 +255,8 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    pub fn new(divider: u32, buffer: u16, tile: TileId) -> Result<Self, Error> {
+    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    pub fn new(divider: u32, buffer: u16, tile: TileId) -> Result<Self, SliceError> {
         Ok(Self {
             grid: Grid::new(divider, buffer)?,
             tile,
@@ -290,8 +290,8 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// [`Error::Overflow`] if the tile's box or a kept vertex overflows `i32`.
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, Error> {
+    /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
         let id = self.features.open_new();
         absorb(&mut self.runs, id, runs);
@@ -306,11 +306,11 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// [`Error::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
     pub fn continue_last_feature<P: AsRef<[V]>>(
         &mut self,
         polyline: P,
-    ) -> Result<&mut Self, Error> {
+    ) -> Result<&mut Self, SliceError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
         let id = self.features.open_or_new();
         absorb(&mut self.runs, id, runs);

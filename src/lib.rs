@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
-pub use error::Error;
+pub use error::SliceError;
 
 mod tile;
 pub use tile::TileId;

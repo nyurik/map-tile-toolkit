@@ -7,7 +7,7 @@
 
 use geo_types::Coord;
 
-use crate::Error;
+use crate::SliceError;
 use crate::clip_polyline::{clip_line, segment_intersects, to_local};
 use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
@@ -33,7 +33,7 @@ struct Hit {
 const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 
 /// Upper bound on the candidate tiles [`Grid::slice_all`] will examine before giving up with
-/// [`Error::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
+/// [`SliceError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
 /// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
 /// well under a second.
 const MAX_TILE_VISITS: i64 = 1 << 25;
@@ -52,7 +52,7 @@ pub(crate) type TileRuns<V> = Vec<(TileId, Vec<Vec<V>>)>;
 /// polyline may yield several runs in a tile (where it leaves and re-enters).
 ///
 /// The engine never panics: bad input (an oversized polyline, or coordinates that overflow the tile
-/// math) yields an [`Error`] instead.
+/// math) yields an [`SliceError`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Grid {
     /// Tile side length, in coordinate units (always in `1..=i32::MAX`).
@@ -66,10 +66,10 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    pub(crate) const fn new(divider: u32, buffer: u16) -> Result<Self, Error> {
+    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    pub(crate) const fn new(divider: u32, buffer: u16) -> Result<Self, SliceError> {
         if divider == 0 || divider > i32::MAX.cast_unsigned() {
-            Err(Error::InvalidDivider)
+            Err(SliceError::InvalidDivider)
         } else {
             Ok(Self {
                 divider: divider.cast_signed(),
@@ -102,14 +102,14 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// [`Error::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far outside
+    /// [`SliceError::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far outside
     /// the representable coordinate range for this `divider`), or a kept vertex lies more than an
     /// `i32` span from the tile origin so its local coordinate would not fit `i32`.
     pub(crate) fn slice_one<V: Vertex>(
         self,
         polyline: &[V],
         tile: TileId,
-    ) -> Result<Vec<Vec<V>>, Error> {
+    ) -> Result<Vec<Vec<V>>, SliceError> {
         let (min, max) = self.tile_bounds(tile)?;
         // The tile origin is `min` grown back by the buffer: `tile_bounds` already proved
         // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
@@ -144,17 +144,17 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`Error::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
-    /// - [`Error::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
+    /// - [`SliceError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
+    /// - [`SliceError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
     ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
-    /// - [`Error::Overflow`] — a coordinate `± buffer` overflows `i32`, or a kept vertex lies more
+    /// - [`SliceError::Overflow`] — a coordinate `± buffer` overflows `i32`, or a kept vertex lies more
     ///   than an `i32` span from its tile origin (its local coordinate would not fit `i32`).
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         reason = "indices and tile offsets are validated to fit u16/i16 before these casts"
     )]
-    pub(crate) fn slice_all<V: Vertex>(self, polyline: &[V]) -> Result<TileRuns<V>, Error> {
+    pub(crate) fn slice_all<V: Vertex>(self, polyline: &[V]) -> Result<TileRuns<V>, SliceError> {
         let poly = polyline;
 
         // Empty polyline → no tiles.
@@ -165,7 +165,7 @@ impl Grid {
         // Up-front validation, so the hot loop can pack into `Hit` without per-item checks:
         // (1) every vertex index fits u16;
         if poly.len() > MAX_INDEXED_LEN {
-            return Err(Error::PolylineTooLarge);
+            return Err(SliceError::PolylineTooLarge);
         }
         // (2) every tile offset from `reference` fits i16. The extreme tiles come from the overall
         // coordinate bounds grown by the buffer; `?` reports coordinates too close to the i32 edge.
@@ -177,7 +177,8 @@ impl Grid {
             (lo_tile.y, reference.y),
             (hi_tile.y, reference.y),
         ] {
-            i16::try_from(i64::from(tile) - i64::from(refc)).map_err(|_| Error::TooManyTiles)?;
+            i16::try_from(i64::from(tile) - i64::from(refc))
+                .map_err(|_| SliceError::TooManyTiles)?;
         }
 
         // Route each segment into the tiles it touches. All casts below are within the ranges just
@@ -212,7 +213,7 @@ impl Grid {
                 budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
                     * (i64::from(hi.y) - i64::from(lo.y) + 1);
                 if budget < 0 {
-                    return Err(Error::TooManyTiles);
+                    return Err(SliceError::TooManyTiles);
                 }
                 for ty in lo.y..=hi.y {
                     let dy = (ty - reference.y) as i16;
@@ -241,7 +242,7 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// [`Error::Overflow`] if a kept vertex lies more than an `i32` span from its tile origin (its
+    /// [`SliceError::Overflow`] if a kept vertex lies more than an `i32` span from its tile origin (its
     /// local coordinate would not fit `i32`). The tile origins themselves are always in range — every
     /// tile here already passed [`Self::tile_bounds`] while routing.
     #[allow(
@@ -253,7 +254,7 @@ impl Grid {
         mut hits: Vec<Hit>,
         poly: &[V],
         reference: TileId,
-    ) -> Result<TileRuns<V>, Error> {
+    ) -> Result<TileRuns<V>, SliceError> {
         hits.sort_unstable();
         // Pre-alloc the output to the number of distinct tiles (one cheap pass over the sorted hits)
         // so pushing results never reallocates.
@@ -309,44 +310,60 @@ impl Grid {
     }
 
     /// The global coordinate of `tile`'s origin — its `[0, 0]` corner in tile-local space, i.e.
-    /// `(tile.x·divider, tile.y·divider)`. [`Error::Overflow`] if that product leaves `i32`.
-    fn tile_origin(self, tile: TileId) -> Result<Coord<i32>, Error> {
+    /// `(tile.x·divider, tile.y·divider)`. [`SliceError::Overflow`] if that product leaves `i32`.
+    fn tile_origin(self, tile: TileId) -> Result<Coord<i32>, SliceError> {
         Ok(Coord {
-            x: tile.x.checked_mul(self.divider).ok_or(Error::Overflow)?,
-            y: tile.y.checked_mul(self.divider).ok_or(Error::Overflow)?,
+            x: tile
+                .x
+                .checked_mul(self.divider)
+                .ok_or(SliceError::Overflow)?,
+            y: tile
+                .y
+                .checked_mul(self.divider)
+                .ok_or(SliceError::Overflow)?,
         })
     }
 
     /// The closed integer bounds `(min, max)` of `tile`'s clip box, grown by `buffer` on each side.
-    /// All arithmetic is checked; [`Error::Overflow`] means the tile lies outside the representable
+    /// All arithmetic is checked; [`SliceError::Overflow`] means the tile lies outside the representable
     /// coordinate range for this `divider`.
-    fn tile_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), Error> {
-        let base_x = tile.x.checked_mul(self.divider).ok_or(Error::Overflow)?;
-        let base_y = tile.y.checked_mul(self.divider).ok_or(Error::Overflow)?;
+    fn tile_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), SliceError> {
+        let base_x = tile
+            .x
+            .checked_mul(self.divider)
+            .ok_or(SliceError::Overflow)?;
+        let base_y = tile
+            .y
+            .checked_mul(self.divider)
+            .ok_or(SliceError::Overflow)?;
         // Distance from the base corner to the far corner of the buffered box: divider - 1 + buffer.
         let reach = (self.divider - 1)
             .checked_add(self.buffer)
-            .ok_or(Error::Overflow)?;
+            .ok_or(SliceError::Overflow)?;
         Ok((
             Coord {
-                x: base_x.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-                y: base_y.checked_sub(self.buffer).ok_or(Error::Overflow)?,
+                x: base_x
+                    .checked_sub(self.buffer)
+                    .ok_or(SliceError::Overflow)?,
+                y: base_y
+                    .checked_sub(self.buffer)
+                    .ok_or(SliceError::Overflow)?,
             },
             Coord {
-                x: base_x.checked_add(reach).ok_or(Error::Overflow)?,
-                y: base_y.checked_add(reach).ok_or(Error::Overflow)?,
+                x: base_x.checked_add(reach).ok_or(SliceError::Overflow)?,
+                y: base_y.checked_add(reach).ok_or(SliceError::Overflow)?,
             },
         ))
     }
 
     /// The lowest and highest tiles any part of `poly` can reach: the coordinate bounding box grown by
-    /// `buffer`, mapped to tiles. `first` seeds the bounds. [`Error::Overflow`] if a coordinate
+    /// `buffer`, mapped to tiles. `first` seeds the bounds. [`SliceError::Overflow`] if a coordinate
     /// `± buffer` overflows `i32`.
     fn buffered_tile_bounds<V: Vertex>(
         self,
         poly: &[V],
         first: Coord<i32>,
-    ) -> Result<(TileId, TileId), Error> {
+    ) -> Result<(TileId, TileId), SliceError> {
         let (mut min, mut max) = (first, first);
         for v in poly {
             let c = v.position();
@@ -357,15 +374,15 @@ impl Grid {
         }
         let lo = tile_of(
             Coord {
-                x: min.x.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-                y: min.y.checked_sub(self.buffer).ok_or(Error::Overflow)?,
+                x: min.x.checked_sub(self.buffer).ok_or(SliceError::Overflow)?,
+                y: min.y.checked_sub(self.buffer).ok_or(SliceError::Overflow)?,
             },
             self.divider,
         );
         let hi = tile_of(
             Coord {
-                x: max.x.checked_add(self.buffer).ok_or(Error::Overflow)?,
-                y: max.y.checked_add(self.buffer).ok_or(Error::Overflow)?,
+                x: max.x.checked_add(self.buffer).ok_or(SliceError::Overflow)?,
+                y: max.y.checked_add(self.buffer).ok_or(SliceError::Overflow)?,
             },
             self.divider,
         );

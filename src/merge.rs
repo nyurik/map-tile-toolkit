@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use geo_types::Coord;
 
 use crate::vertex::Vertex;
-use crate::{Error, TileId};
+use crate::{SliceError, TileId};
 
 /// Reconstruct the combined pieces of two tiles from their tile-local runs — the inverse of slicing.
 /// Stateless: it takes the runs explicitly (not a slicer's accumulated state), so it works for any
@@ -24,16 +24,16 @@ use crate::{Error, TileId};
 ///
 /// # Errors
 ///
-/// - [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-/// - [`Error::Overflow`] if rebasing a coordinate into the shared frame overflows `i32` (the two
+/// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+/// - [`SliceError::Overflow`] if rebasing a coordinate into the shared frame overflows `i32` (the two
 ///   tiles lie too far apart to share one `i32` local frame).
 pub fn merge<V: Vertex, L: AsRef<[V]>>(
     divider: u32,
     a: (TileId, &[L]),
     b: (TileId, &[L]),
-) -> Result<Vec<Vec<V>>, Error> {
+) -> Result<Vec<Vec<V>>, SliceError> {
     if divider == 0 || divider > i32::MAX.cast_unsigned() {
-        return Err(Error::InvalidDivider);
+        return Err(SliceError::InvalidDivider);
     }
     let (ta, runs_a) = a;
     let (tb, runs_b) = b;
@@ -56,8 +56,8 @@ pub fn merge<V: Vertex, L: AsRef<[V]>>(
             for &v in run {
                 let p = v.position();
                 rebased.push(v.with_position(Coord {
-                    x: i32::try_from(i128::from(p.x) + off_x).map_err(|_| Error::Overflow)?,
-                    y: i32::try_from(i128::from(p.y) + off_y).map_err(|_| Error::Overflow)?,
+                    x: i32::try_from(i128::from(p.x) + off_x).map_err(|_| SliceError::Overflow)?,
+                    y: i32::try_from(i128::from(p.y) + off_y).map_err(|_| SliceError::Overflow)?,
                 }));
             }
             runs.push(rebased);

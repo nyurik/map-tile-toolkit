@@ -7,7 +7,7 @@
 
 use geo_types::Coord;
 
-use crate::Error;
+use crate::SliceError;
 use crate::vertex::Vertex;
 
 /// Is coordinate `c` inside the closed rectangle `[min, max]`?
@@ -72,7 +72,7 @@ pub(crate) fn segment_intersects(
 ///
 /// # Errors
 ///
-/// [`Error::Overflow`] if a kept vertex lies more than an `i32` span from `origin` (its local
+/// [`SliceError::Overflow`] if a kept vertex lies more than an `i32` span from `origin` (its local
 /// position would not fit `i32`).
 pub(crate) fn clip_line<V: Vertex>(
     line: &[V],
@@ -80,7 +80,7 @@ pub(crate) fn clip_line<V: Vertex>(
     max: Coord<i32>,
     origin: Coord<i32>,
     out: &mut Vec<Vec<V>>,
-) -> Result<(), Error> {
+) -> Result<(), SliceError> {
     let mut prev: Option<V> = None;
     let mut cur: Vec<V> = Vec::new();
     for &c in line {
@@ -108,13 +108,13 @@ pub(crate) fn clip_line<V: Vertex>(
 }
 
 /// Re-express vertex `v` in the tile-local frame whose `[0, 0]` corner is `origin`: its position
-/// becomes `position − origin`, its payload unchanged. [`Error::Overflow`] if the offset leaves the
+/// becomes `position − origin`, its payload unchanged. [`SliceError::Overflow`] if the offset leaves the
 /// `i32` range — possible only when a far crossing-segment endpoint lies more than a full `i32` span
 /// from the tile.
-pub(crate) fn to_local<V: Vertex>(v: V, origin: Coord<i32>) -> Result<V, Error> {
+pub(crate) fn to_local<V: Vertex>(v: V, origin: Coord<i32>) -> Result<V, SliceError> {
     let p = v.position();
     Ok(v.with_position(Coord {
-        x: p.x.checked_sub(origin.x).ok_or(Error::Overflow)?,
-        y: p.y.checked_sub(origin.y).ok_or(Error::Overflow)?,
+        x: p.x.checked_sub(origin.x).ok_or(SliceError::Overflow)?,
+        y: p.y.checked_sub(origin.y).ok_or(SliceError::Overflow)?,
     }))
 }

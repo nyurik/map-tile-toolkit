@@ -11,15 +11,15 @@
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
-use crate::{Error, SlicerAll, SlicerOne, TileId};
+use crate::{SliceError, SlicerAll, SlicerOne, TileId};
 
 /// The component lines of a polyline geometry, borrowed (no allocation). Errors for any other
 /// geometry kind rather than panicking.
-fn each_line(geom: &Geometry<i32>) -> Result<&[LineString<i32>], Error> {
+fn each_line(geom: &Geometry<i32>) -> Result<&[LineString<i32>], SliceError> {
     match geom {
         Geometry::LineString(ls) => Ok(std::slice::from_ref(ls)),
         Geometry::MultiLineString(mls) => Ok(&mls.0),
-        other => Err(Error::UnsupportedGeometry(geometry_kind(other))),
+        other => Err(SliceError::UnsupportedGeometry(geometry_kind(other))),
     }
 }
 
@@ -57,10 +57,10 @@ impl SlicerAll<Coord<i32>> {
     ///
     /// # Errors
     ///
-    /// - [`Error::UnsupportedGeometry`] — `geom` is not a `LineString` / `MultiLineString`.
-    /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`Error::PolylineTooLarge`],
-    ///   [`Error::TooManyTiles`], [`Error::Overflow`]).
-    pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, Error> {
+    /// - [`SliceError::UnsupportedGeometry`] — `geom` is not a `LineString` / `MultiLineString`.
+    /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`SliceError::PolylineTooLarge`],
+    ///   [`SliceError::TooManyTiles`], [`SliceError::Overflow`]).
+    pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, SliceError> {
         for (i, line) in each_line(geom)?.iter().enumerate() {
             if i == 0 {
                 self.add_feature(line.0.as_slice())?;
@@ -90,9 +90,9 @@ impl SlicerOne<Coord<i32>> {
     ///
     /// # Errors
     ///
-    /// - [`Error::UnsupportedGeometry`] — `geom` is not a `LineString` / `MultiLineString`.
-    /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`Error::Overflow`]).
-    pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, Error> {
+    /// - [`SliceError::UnsupportedGeometry`] — `geom` is not a `LineString` / `MultiLineString`.
+    /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`SliceError::Overflow`]).
+    pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, SliceError> {
         for (i, line) in each_line(geom)?.iter().enumerate() {
             if i == 0 {
                 self.add_feature(line.0.as_slice())?;

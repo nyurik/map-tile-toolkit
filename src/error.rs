@@ -9,7 +9,7 @@ use thiserror::Error;
 /// Something the slicer cannot process. Returned in place of a panic or a silently-wrong result.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum SliceError {
     /// The tile side (`divider`) was zero, or larger than `i32::MAX`.
     #[error("divider must be between 1 and {}", i32::MAX)]
     InvalidDivider,
