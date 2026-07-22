@@ -15,14 +15,16 @@
 #![allow(clippy::pedantic, reason = "test/inspection tool")]
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
-use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
+use geojson::FeatureCollection;
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::{Slicer, TileId};
 use serde_json::json;
+
+mod support;
+use support::{feature, load_fixture};
 
 /// Tile side for the test grid (matches `tests/fixtures/grid.geojson`).
 const DIVIDER: i32 = 25;
@@ -42,61 +44,6 @@ mod files {
 
     // Generate one test per input fixture.
     test_each_path! { for ["geojson"] in "./tests/fixtures" => slice_one_fixture }
-}
-
-/// A GeoJSON [`Feature`] wrapping `geom` with the given [simplestyle-spec] properties. Because a
-/// snapshot file ends in `.geojson`, GitHub and geojson.io render the properties (`stroke`/`fill`/
-/// …) directly on a map.
-///
-/// [simplestyle-spec]: https://github.com/mapbox/simplestyle-spec
-pub fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
-    let properties = props
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect::<JsonObject>();
-    Feature {
-        bbox: None,
-        geometry: Some(geojson::Geometry::new(GeometryValue::from(geom))),
-        id: None,
-        properties: Some(properties),
-        foreign_members: None,
-    }
-}
-
-/// Parse a fixture into its (integer) polyline geometry.
-fn load_fixture(path: &Path) -> Geometry<i32> {
-    let text = fs::read_to_string(path).expect("readable fixture");
-    let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
-        panic!("fixture must be a FeatureCollection: {}", path.display());
-    };
-    let geom = fc
-        .features
-        .into_iter()
-        .find_map(|f| f.geometry)
-        .map(|g| Geometry::<f64>::try_from(g).expect("geometry converts"))
-        .expect("fixture has a geometry");
-    to_i32(&geom)
-}
-
-/// Convert a polyline geometry to integer coordinates (fixtures use whole numbers).
-fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
-    let ls = |ls: &LineString<f64>| {
-        LineString(
-            ls.0.iter()
-                .map(|c| Coord {
-                    x: c.x as i32,
-                    y: c.y as i32,
-                })
-                .collect(),
-        )
-    };
-    match geom {
-        Geometry::LineString(l) => Geometry::LineString(ls(l)),
-        Geometry::MultiLineString(m) => {
-            Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
-        }
-        other => panic!("expected a polyline geometry, got {other:?}"),
-    }
 }
 
 /// The component lines of a polyline geometry.

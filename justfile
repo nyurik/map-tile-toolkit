@@ -18,6 +18,16 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
+# Run all slicing benchmarks
+bench filter='':
+    cargo bench {{if filter != '' {'-- ' + filter} else {''} }}
+
+# Run slice benchmark
+bench-slice: (bench 'slice')
+
+# Run slice-all benchmark
+bench-slice-all: (bench 'slice-all')
+
 # Run integration tests and save its output as the new expected output
 bless *args:  (cargo-install 'cargo-insta')
     cargo insta test --accept --include-ignored --unreferenced=delete --all-features {{args}}
@@ -37,7 +47,7 @@ ci-coverage: env-info && \
     mkdir -p {{quote(parent_directory(coverage_lcov))}}
 
 # Run all tests as expected by CI
-ci-test: env-info test-fmt clippy test test-doc && assert-git-is-clean
+ci-test: env-info test-fmt clippy test test-doc (bench '--test') && assert-git-is-clean
 
 # Compile default features with minimal dependencies on the configured MSRV
 ci-test-msrv:

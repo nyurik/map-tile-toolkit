@@ -10,10 +10,15 @@ keywords = ["mvt", "tile", "geo", "polyline", "clip"]
 categories = ["science::geo"]
 rust-version = "1.88"
 
+[[bench]]
+name = "slicing"
+harness = false
+
 [dependencies]
 geo-types = "0.7.19"
 
 [dev-dependencies]
+criterion = "0.8.2"
 geojson = { version = "1.0.0", features = ["geo-types"] }
 insta = "1"
 serde_json = "1"
