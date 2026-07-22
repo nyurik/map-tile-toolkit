@@ -18,10 +18,7 @@ use map_tile_toolkit::{Slicer, TileId};
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-const SLICER: Slicer = Slicer {
-    divider: 25,
-    buffer: 0,
-};
+const SLICER: Slicer = Slicer::new(25, 0).unwrap();
 
 fn bench_slice_all(c: &mut Criterion) {
     let geoms: Vec<Geometry<i32>> = support::load_all_fixtures()

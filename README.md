@@ -24,7 +24,7 @@ use map_tile_toolkit::{Slicer, TileId};
 // An integer polyline. With `divider = 25`, tiles are 25 units wide; `buffer` grows each tile's
 // clip box outward (0 = tight against the grid).
 let line = Geometry::LineString(LineString::from(vec![(5, 5), (20, 20), (60, 40)]));
-let slicer = Slicer { divider: 25, buffer: 0 };
+let slicer = Slicer::new(25, 0).unwrap();
 
 // Batch: every tile the polyline touches, each piece in the input's coordinate space.
 for (tile, piece) in slicer.slice_all(&line) {

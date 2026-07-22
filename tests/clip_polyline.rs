@@ -11,6 +11,11 @@
 //! The result is snapshotted as a `FeatureCollection`: the original polyline first, then one
 //! feature per per-tile piece. `tests/fixtures/grid.geojson` overlays the 25-unit tile grid.
 //! Regenerate with `just bless`.
+//!
+//! Every fixture is snapshotted at two buffer sizes, each into its own directory:
+//! - `snapshots/` — buffer 0 (tile boxes flush with the grid);
+//! - `snapshots-5/` — buffer 5 (each tile box grown 5 units per side, so near-edge vertices and
+//!   crossing segments also land in the neighboring tiles).
 
 #![allow(clippy::pedantic, reason = "test/inspection tool")]
 
@@ -29,13 +34,13 @@ use support::{feature, load_fixture};
 /// Tile side for the test grid (matches `tests/fixtures/grid.geojson`).
 const DIVIDER: i32 = 25;
 
-/// The slicer under test (buffer 0 keeps the tile boxes tight against the grid).
-fn slicer() -> Slicer {
-    Slicer {
-        divider: DIVIDER as u32,
-        buffer: 0,
-    }
-}
+/// Buffer sizes each fixture is snapshotted at, paired with the directory to write into. Buffer 0
+/// keeps the tile boxes flush with the grid; buffer 5 (a fifth of a tile) grows each box outward so
+/// near-edge vertices and crossing segments also land in the neighboring tiles.
+static SLICERS: [(Slicer, &str); 2] = [
+    (Slicer::new(DIVIDER as u32, 0).unwrap(), "snapshots"),
+    (Slicer::new(DIVIDER as u32, 5).unwrap(), "snapshots-5"),
+];
 
 mod files {
     use test_each_file::test_each_path;
@@ -118,6 +123,8 @@ fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> F
             ("stroke-width", json!(1)),
         ],
     )];
+    let mut tiles = tiles.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
+    tiles.sort_unstable_by_key(|(k, _)| (k.y, k.x));
     for (tile, piece) in tiles {
         let color = if (tile.x + tile.y).rem_euclid(2) == 0 {
             "#1f77b4"
@@ -141,42 +148,50 @@ fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> F
     }
 }
 
-/// Serialize the snapshot for a per-tile map.
-fn snapshot_bytes(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> Vec<u8> {
-    serde_json::to_vec_pretty(&build_fc(input, tiles)).expect("serializes")
-}
-
 fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
     let geom = load_fixture(path);
-    let slicer = slicer();
+    for (slicer, snapshot_dir) in &SLICERS {
+        slice_at_buffer(slicer, stem, &geom, snapshot_dir);
+    }
+}
 
+/// Run every cross-check for one fixture at one buffer size, then snapshot the result into
+/// `snapshot_dir`.
+fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_dir: &str) {
     // (1) Slice the whole geometry into every tile it touches.
-    let all: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(&geom).into_iter().collect();
+    let all: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(geom).into_iter().collect();
 
     // (2) Independently, clip one tile at a time across the whole tile span the geometry could
     // reach (padded by one tile). Collecting every non-empty result must reproduce `all` exactly —
     // this checks the batch found no wrong pieces and missed no tile (including tiles a segment
     // only crosses, which both paths must include).
-    let (lo, hi) = padded_tile_span(&geom);
-    let mut one: BTreeMap<TileId, Geometry<i32>> = BTreeMap::new();
+    let (lo, hi) = padded_tile_span(geom);
+    let mut one = BTreeMap::new();
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let tile = TileId::new(x, y);
-            if let Some(piece) = slicer.slice(&geom, tile) {
+            if let Some(piece) = slicer.slice(geom, tile) {
                 one.insert(tile, piece);
             }
         }
     }
-    assert_eq!(all, one, "batch and per-tile slicing disagree for {stem}");
+    assert_eq!(
+        all,
+        one,
+        "batch and per-tile slicing disagree for {stem} (buffer {})",
+        slicer.buffer()
+    );
 
     // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
     // dropped), so both paths on the duplicated input still match the original result.
-    let duped = duplicate_vertices(&geom);
+    let duped = duplicate_vertices(geom);
     let all_duped: BTreeMap<TileId, Geometry<i32>> = slicer.slice_all(&duped).into_iter().collect();
     assert_eq!(
-        all_duped, all,
-        "duplicating every vertex changed the batch result for {stem}"
+        all_duped,
+        all,
+        "duplicating every vertex changed the batch result for {stem} (buffer {})",
+        slicer.buffer()
     );
     for (&tile, piece) in &all {
         let piece_dup = slicer.slice(&duped, tile).unwrap_or_else(|| {
@@ -189,17 +204,24 @@ fn slice_one_fixture([path]: [&Path; 1]) {
     }
 
     // The two snapshots must be byte identical; snapshot the (shared) result.
-    let all_bytes = snapshot_bytes(&geom, &all);
-    let one_bytes = snapshot_bytes(&geom, &one);
+    let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &all)).expect("serializes");
+    let one_bytes = serde_json::to_vec_pretty(&build_fc(geom, &one)).expect("serializes");
     assert_eq!(
-        all_bytes, one_bytes,
-        "batch and per-tile snapshots differ for {stem}"
+        all_bytes,
+        one_bytes,
+        "batch and per-tile snapshots differ for {stem} (buffer {})",
+        slicer.buffer()
     );
 
     insta::with_settings!({
-        snapshot_path => "snapshots",
+        snapshot_path => snapshot_dir,
         prepend_module_to_snapshot => false,
     }, {
-        assert_binary_snapshot!(&format!("{stem}.geojson"), all_bytes);
+        let name = if slicer.buffer() > 0 {
+            format!("{stem}-{}.geojson", slicer.buffer())
+        } else {
+            format!("{stem}.geojson")
+        };
+        assert_binary_snapshot!(&name, all_bytes);
     });
 }

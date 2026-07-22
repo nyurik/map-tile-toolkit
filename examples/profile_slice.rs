@@ -15,10 +15,7 @@ use map_tile_toolkit::{Slicer, TileId};
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-const SLICER: Slicer = Slicer {
-    divider: 25,
-    buffer: 0,
-};
+const SLICER: Slicer = Slicer::new(25, 0).unwrap();
 
 /// A fixture geometry paired with the tile ids it touches (precomputed, not part of the hot loop).
 type Case = (Geometry<i32>, Vec<TileId>);

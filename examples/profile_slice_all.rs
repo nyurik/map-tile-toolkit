@@ -14,10 +14,7 @@ use map_tile_toolkit::Slicer;
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-const SLICER: Slicer = Slicer {
-    divider: 25,
-    buffer: 0,
-};
+const SLICER: Slicer = Slicer::new(25, 0).unwrap();
 
 fn main() {
     let (iterations, geoms) = get_params();
