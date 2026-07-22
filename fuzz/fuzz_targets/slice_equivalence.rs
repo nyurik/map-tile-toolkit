@@ -1,34 +1,35 @@
 //! Fuzz the polyline slicer: it must **never panic**, and every `Ok` result must satisfy the
 //! library's invariants.
 //!
-//! For a structured input (a polyline, a slicer config, and an arbitrary probe tile):
+//! For a structured input (some polylines, a slicer config, and an arbitrary probe tile):
 //!
-//! 1. **No panic, ever.** `slice` on an arbitrary (possibly extreme) tile, and `slice_all`, must
-//!    return `Ok`/`Err` — never panic or overflow. The fuzz build enables overflow checks, so any
-//!    unchecked arithmetic surfaces here as a crash.
-//! 2. When `slice_all` returns `Ok`, the results hold up:
-//!    - **Batch round-trips through single-tile:** every `(tile, piece)` equals `slice(tile)`.
-//!    - **Batch == exhaustive per-tile scan** over the reachable span (skipped when a tiny divider
-//!      makes the span too large to scan cheaply).
+//! 1. **No panic, ever.** A single-tile `SlicerOne` on an arbitrary (possibly extreme) tile, and a
+//!    `SlicerAll`, must return `Ok`/`Err` — never panic or overflow. The fuzz build enables overflow
+//!    checks, so any unchecked arithmetic surfaces here as a crash.
+//! 2. Per polyline, when `SlicerAll` accepts it, the results hold up:
+//!    - **All-tiles round-trips through single-tile:** every tile's runs equal what a `SlicerOne`
+//!      bound to that tile produces.
+//!    - **All-tiles == exhaustive per-tile scan** over the reachable span (skipped when a tiny
+//!      divider makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
-//!    - **Tile merge never panics and is order-independent:** `merge(a, b)` equals `merge(b, a)`
-//!      for every adjacent pair of output tiles.
+//! 3. Accumulating all polylines never panics, and **merge is order-independent:** `merge(a, b)`
+//!    equals `merge(b, a)` for every adjacent pair of accumulated tiles.
 //!
 //! Coordinates are `i8` (small, so slicing stays fast and the invariants get many cheap
-//! iterations); the divider/buffer range freely and the probe tile is a full `i32`, so `slice`'s
-//! tile-box overflow handling is stressed too. The oversize/too-many-tiles error paths are covered
-//! deterministically by `tests/errors.rs` rather than here.
+//! iterations); the divider/buffer range freely and the probe tile is a full `i32`, so the
+//! single-tile box-overflow handling is stressed too. The oversize/too-many-tiles error paths are
+//! covered deterministically by `tests/errors.rs` rather than here.
 
 #![no_main]
 
 use std::collections::BTreeMap;
 
 use arbitrary::Arbitrary;
-use geo_types::{Coord, Geometry, LineString, MultiLineString};
+use geo_types::Coord;
 use libfuzzer_sys::fuzz_target;
-use map_tile_toolkit::{Slicer, TileId};
+use map_tile_toolkit::{SlicerAll, SlicerOne, TileId, merge};
 
-/// Cap on tiles scanned by the exhaustive oracle per run (each scanned tile re-walks the geometry),
+/// Cap on tiles scanned by the exhaustive oracle per run (each scanned tile re-walks the polyline),
 /// so a tiny divider can't blow up time.
 const SCAN_CAP: i64 = 4_096;
 
@@ -36,134 +37,152 @@ const SCAN_CAP: i64 = 4_096;
 struct Input {
     divider: u16,
     buffer: u16,
-    /// Lines of small (`i8`) coordinates, so slicing stays fast and the invariants run cheaply.
+    /// Polylines of small (`i8`) coordinates, so slicing stays fast and the invariants run cheaply.
     lines: Vec<Vec<(i8, i8)>>,
-    /// An arbitrary tile to probe with `slice` — may be extreme, to stress the tile-box math.
+    /// An arbitrary tile to probe with a single-tile slicer — may be extreme, to stress the tile-box
+    /// math.
     probe: (i32, i32),
 }
 
-fuzz_target!(|input: Input| {
-    let Ok(slicer) = Slicer::new(u32::from(input.divider), input.buffer) else {
-        return; // divider 0 is rejected — nothing to test
-    };
+type Runs = Vec<Vec<Coord<i32>>>;
 
-    // Bound the geometry size so each run stays fast.
-    let lines: Vec<LineString<i32>> = input
+/// Flatten a `SlicerAll`'s accumulated features into `tile → combined runs`.
+fn drain_all(acc: &SlicerAll<Coord<i32>>) -> BTreeMap<TileId, Runs> {
+    acc.iter_tiles()
+        .map(|t| {
+            let runs = t
+                .iter_features()
+                .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+                .collect();
+            (t.id(), runs)
+        })
+        .collect()
+}
+
+/// Slice one polyline into all touched tiles, flattened to `tile → runs`. `None` if the slicer
+/// rejects it (oversized/overflowing — a valid outcome, not a bug).
+fn slice_all_map(divider: u32, buffer: u16, poly: &[Coord<i32>]) -> Option<BTreeMap<TileId, Runs>> {
+    let mut acc = SlicerAll::new(divider, buffer).expect("divider validated");
+    acc.add_feature(poly).ok()?;
+    Some(drain_all(&acc))
+}
+
+/// Clip one polyline to a single tile, flattened to its runs. Must succeed (callers only use tiles
+/// the all-tiles pass produced, or tiles inside the reachable span).
+fn slice_one_runs(divider: u32, buffer: u16, tile: TileId, poly: &[Coord<i32>]) -> Runs {
+    let mut one = SlicerOne::new(divider, buffer, tile).expect("divider validated");
+    one.add_feature(poly).expect("slice must succeed for an in-range tile");
+    one.iter_features()
+        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+        .collect()
+}
+
+fuzz_target!(|input: Input| {
+    let divider = u32::from(input.divider);
+    let buffer = input.buffer;
+    if SlicerAll::<Coord<i32>>::new(divider, buffer).is_err() {
+        return; // divider 0 is rejected — nothing to test
+    }
+
+    // Bound the input size so each run stays fast.
+    let polylines: Vec<Vec<Coord<i32>>> = input
         .lines
         .iter()
         .take(8)
         .map(|pts| {
-            LineString(
-                pts.iter()
-                    .take(64)
-                    .map(|&(x, y)| Coord {
-                        x: i32::from(x),
-                        y: i32::from(y),
-                    })
-                    .collect(),
-            )
+            pts.iter()
+                .take(64)
+                .map(|&(x, y)| Coord {
+                    x: i32::from(x),
+                    y: i32::from(y),
+                })
+                .collect()
         })
         .collect();
-    let geom = to_geometry(&lines);
+    let probe = TileId::new(input.probe.0, input.probe.1);
 
-    // (1) A single-tile clip on an arbitrary tile must never panic (Ok or Err both fine).
-    let _ = slicer.slice(&geom, TileId::new(input.probe.0, input.probe.1));
+    for poly in &polylines {
+        // (1) A single-tile clip on an arbitrary tile must never panic (Ok or Err both fine).
+        if let Ok(mut one) = SlicerOne::new(divider, buffer, probe) {
+            let _ = one.add_feature(poly);
+        }
 
-    // slice_all must never panic; Err is a valid outcome for oversized/overflowing input.
-    let Ok(all) = slicer.slice_all(&geom) else {
-        return;
-    };
-    let all: BTreeMap<TileId, Geometry<i32>> = all.into_iter().collect();
+        // The all-tiles pass must never panic; Err is a valid outcome for oversized/overflowing input.
+        let Some(all) = slice_all_map(divider, buffer, poly) else {
+            continue;
+        };
 
-    // (2) Every batch result round-trips through single-tile slicing (which must succeed here).
-    for (&tile, piece) in &all {
-        let one = slicer
-            .slice(&geom, tile)
-            .expect("slice must succeed for a tile slice_all produced");
-        assert_eq!(
-            one.as_ref(),
-            Some(piece),
-            "slice disagrees with slice_all at {tile:?}"
-        );
-    }
+        // (2) Every all-tiles result round-trips through single-tile slicing (which must succeed).
+        for (&tile, runs) in &all {
+            let one = slice_one_runs(divider, buffer, tile, poly);
+            assert_eq!(&one, runs, "single-tile disagrees with all-tiles at {tile:?}");
+        }
 
-    // (3) Exhaustive per-tile scan of the reachable span reproduces slice_all, when small enough.
-    if let Some((lo, hi)) = reachable_span(&lines, slicer) {
-        let area = i64::from(hi.x - lo.x + 1) * i64::from(hi.y - lo.y + 1);
-        if area <= SCAN_CAP {
-            let mut scanned = BTreeMap::new();
-            for y in lo.y..=hi.y {
-                for x in lo.x..=hi.x {
-                    let tile = TileId::new(x, y);
-                    if let Some(piece) = slicer.slice(&geom, tile).expect("slice in span") {
-                        scanned.insert(tile, piece);
+        // (3) Exhaustive per-tile scan of the reachable span reproduces the all-tiles result, when
+        // small enough.
+        if let Some((lo, hi)) = reachable_span(poly, divider, buffer) {
+            let area = i64::from(hi.x - lo.x + 1) * i64::from(hi.y - lo.y + 1);
+            if area <= SCAN_CAP {
+                let mut scanned = BTreeMap::new();
+                for y in lo.y..=hi.y {
+                    for x in lo.x..=hi.x {
+                        let tile = TileId::new(x, y);
+                        let runs = slice_one_runs(divider, buffer, tile, poly);
+                        if !runs.is_empty() {
+                            scanned.insert(tile, runs);
+                        }
                     }
                 }
+                assert_eq!(all, scanned, "all-tiles and full per-tile scan disagree");
             }
-            assert_eq!(all, scanned, "slice_all and full per-tile scan disagree");
         }
+
+        // (4) Duplicating every vertex must not change the result.
+        let duped: Vec<Coord<i32>> = poly.iter().flat_map(|&c| [c, c]).collect();
+        let all_duped = slice_all_map(divider, buffer, &duped)
+            .expect("duplicating vertices cannot make a valid polyline invalid");
+        assert_eq!(all, all_duped, "duplicating every vertex changed the result");
     }
 
-    // (4) Duplicating every vertex must not change the result.
-    let duped: Vec<LineString<i32>> = lines
-        .iter()
-        .map(|ls| LineString(ls.0.iter().flat_map(|&c| [c, c]).collect()))
-        .collect();
-    let all_duped: BTreeMap<TileId, Geometry<i32>> = slicer
-        .slice_all(&to_geometry(&duped))
-        .expect("duplicating vertices cannot make a valid geometry invalid")
-        .into_iter()
-        .collect();
-    assert_eq!(
-        all, all_duped,
-        "duplicating every vertex changed the result"
-    );
-
-    // (5) Merging neighboring tiles must never panic, and must be independent of argument order.
-    let tiles: Vec<TileId> = all.keys().copied().collect();
-    for &t in &tiles {
+    // (5) Accumulating all polylines never panics; merge is order-independent on the result.
+    let mut acc = SlicerAll::new(divider, buffer).expect("divider validated");
+    for poly in &polylines {
+        if acc.add_feature(poly).is_err() {
+            return; // oversized/overflowing — nothing more to check
+        }
+    }
+    let map = drain_all(&acc);
+    let ids: Vec<TileId> = map.keys().copied().collect();
+    for &t in &ids {
         for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
             let n = TileId::new(t.x + dx, t.y + dy);
-            let (Some(a), Some(b)) = (all.get(&t), all.get(&n)) else {
+            let (Some(a), Some(b)) = (map.get(&t), map.get(&n)) else {
                 continue;
             };
-            let ab = slicer.merge((t, a), (n, b));
-            let ba = slicer.merge((n, b), (t, a));
+            let ab = merge(divider, (t, a.as_slice()), (n, b.as_slice()));
+            let ba = merge(divider, (n, b.as_slice()), (t, a.as_slice()));
             assert_eq!(ab, ba, "merge is not order-independent for {t:?}/{n:?}");
         }
     }
 });
 
-/// One line → `LineString`; anything else → `MultiLineString` (the two kinds the slicer accepts).
-fn to_geometry(lines: &[LineString<i32>]) -> Geometry<i32> {
-    if let [only] = lines {
-        Geometry::LineString(only.clone())
-    } else {
-        Geometry::MultiLineString(MultiLineString(lines.to_vec()))
-    }
-}
-
-/// Tile span any piece can reach: every vertex's tile grown by the buffer (in tiles) plus one tile
-/// of slack. `None` if there are no vertices. A superset of what `slice_all` can return, so scanning
-/// it must reproduce `slice_all`. Coordinates are `i16`, so the `i64` math here cannot overflow.
-fn reachable_span(lines: &[LineString<i32>], slicer: Slicer) -> Option<(TileId, TileId)> {
-    let d = i64::from(slicer.divider());
-    let b = i64::from(slicer.buffer());
+/// Tile span any piece of `poly` can reach: every vertex's tile grown by the buffer (in tiles) plus
+/// one tile of slack. `None` if `poly` is empty. A superset of what the all-tiles pass can return, so
+/// scanning it must reproduce that result. Coordinates are `i8`, so the `i64` math cannot overflow.
+fn reachable_span(poly: &[Coord<i32>], divider: u32, buffer: u16) -> Option<(TileId, TileId)> {
+    let d = i64::from(divider);
+    let b = i64::from(buffer);
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    let mut seen = false;
-    for line in lines {
-        for c in &line.0 {
-            min_x = min_x.min(i64::from(c.x));
-            min_y = min_y.min(i64::from(c.y));
-            max_x = max_x.max(i64::from(c.x));
-            max_y = max_y.max(i64::from(c.y));
-            seen = true;
-        }
+    for c in poly {
+        min_x = min_x.min(i64::from(c.x));
+        min_y = min_y.min(i64::from(c.y));
+        max_x = max_x.max(i64::from(c.x));
+        max_y = max_y.max(i64::from(c.y));
     }
-    if !seen {
+    if poly.is_empty() {
         return None;
     }
-    let tile = |v: i64| i32::try_from(v.div_euclid(d)).expect("i16 coords keep tiles in i32");
+    let tile = |v: i64| i32::try_from(v.div_euclid(d)).expect("i8 coords keep tiles in i32");
     Some((
         TileId::new(tile(min_x - b) - 1, tile(min_y - b) - 1),
         TileId::new(tile(max_x + b) + 1, tile(max_y + b) + 1),

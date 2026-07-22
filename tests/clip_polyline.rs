@@ -25,7 +25,7 @@ use std::path::Path;
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::FeatureCollection;
 use insta::assert_binary_snapshot;
-use map_tile_toolkit::{Slicer, TileId};
+use map_tile_toolkit::TileId;
 use serde_json::json;
 
 mod support;
@@ -34,10 +34,12 @@ use support::{feature, load_fixture};
 /// Buffer sizes each fixture is snapshotted at, paired with the directory to write into. Buffer 0
 /// keeps the tile boxes flush with the grid; buffer 5 (a fifth of a tile) grows each box outward so
 /// near-edge vertices and crossing segments also land in the neighboring tiles.
-static SLICERS: [(Slicer, &str); 2] = [
-    (support::SLICER, "snapshots"),
-    (support::SLICER_BUFFER, "snapshots-5"),
-];
+fn slicers() -> [(support::Cfg, &'static str); 2] {
+    [
+        (support::grid(), "snapshots"),
+        (support::grid_buffered(), "snapshots-5"),
+    ]
+}
 
 mod files {
     use test_each_file::test_each_path;
@@ -172,7 +174,7 @@ fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> F
 fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
     let geom = load_fixture(path);
-    for (slicer, snapshot_dir) in &SLICERS {
+    for (slicer, snapshot_dir) in &slicers() {
         slice_at_buffer(slicer, stem, &geom, snapshot_dir);
     }
 }
@@ -199,18 +201,15 @@ fn save_big_geometry() {
 fn big_geometry_batch_matches_per_tile() {
     let geom = support::big_polyline();
 
-    for (slicer, _) in &SLICERS {
-        let all: BTreeMap<TileId, Geometry<i32>> = slicer
-            .slice_all(&geom)
-            .expect("polyline")
-            .into_iter()
-            .collect();
+    for (slicer, _) in &slicers() {
+        let all: BTreeMap<TileId, Geometry<i32>> =
+            support::slice_all_geom(slicer, &geom).into_iter().collect();
         let (lo, hi) = padded_tile_span(&geom);
         let mut one = BTreeMap::new();
         for y in lo.y..=hi.y {
             for x in lo.x..=hi.x {
                 let tile = TileId::new(x, y);
-                if let Some(piece) = slicer.slice(&geom, tile).expect("polyline") {
+                if let Some(piece) = support::slice_tile_geom(slicer, &geom, tile) {
                     one.insert(tile, piece);
                 }
             }
@@ -234,8 +233,8 @@ fn big_geometry_batch_matches_per_tile() {
 #[test]
 fn big_config_tile_counts() {
     let geom = support::big_polyline();
-    for (name, slicer) in support::BIG_CONFIGS {
-        let n = slicer.slice_all(&geom).expect("polyline").len();
+    for (name, slicer) in support::big_configs() {
+        let n = support::slice_all_geom(&slicer, &geom).len();
         match name {
             "single" => assert_eq!(n, 1, "`single` should keep the whole polyline in one tile"),
             "few" => assert_eq!(n, 4, "`few` should produce a 2×2 grid of tiles"),
@@ -247,13 +246,10 @@ fn big_config_tile_counts() {
 
 /// Run every cross-check for one fixture at one buffer size, then snapshot the result into
 /// `snapshot_dir`.
-fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_dir: &str) {
+fn slice_at_buffer(slicer: &support::Cfg, stem: &str, geom: &Geometry<i32>, snapshot_dir: &str) {
     // (1) Slice the whole geometry into every tile it touches.
-    let all: BTreeMap<TileId, Geometry<i32>> = slicer
-        .slice_all(geom)
-        .expect("polyline")
-        .into_iter()
-        .collect();
+    let all: BTreeMap<TileId, Geometry<i32>> =
+        support::slice_all_geom(slicer, geom).into_iter().collect();
 
     // (2) Independently, clip one tile at a time across the whole tile span the geometry could
     // reach (padded by one tile). Collecting every non-empty result must reproduce `all` exactly —
@@ -264,7 +260,7 @@ fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_d
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let tile = TileId::new(x, y);
-            if let Some(piece) = slicer.slice(geom, tile).expect("polyline") {
+            if let Some(piece) = support::slice_tile_geom(slicer, geom, tile) {
                 one.insert(tile, piece);
             }
         }
@@ -279,9 +275,7 @@ fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_d
     // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
     // dropped), so both paths on the duplicated input still match the original result.
     let duped = duplicate_vertices(geom);
-    let all_duped: BTreeMap<TileId, Geometry<i32>> = slicer
-        .slice_all(&duped)
-        .expect("polyline")
+    let all_duped: BTreeMap<TileId, Geometry<i32>> = support::slice_all_geom(slicer, &duped)
         .into_iter()
         .collect();
     assert_eq!(
@@ -291,12 +285,9 @@ fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_d
         slicer.buffer()
     );
     for (&tile, piece) in &all {
-        let piece_dup = slicer
-            .slice(&duped, tile)
-            .expect("polyline")
-            .unwrap_or_else(|| {
-                panic!("tile {tile:?} vanished after vertex duplication for {stem}")
-            });
+        let piece_dup = support::slice_tile_geom(slicer, &duped, tile).unwrap_or_else(|| {
+            panic!("tile {tile:?} vanished after vertex duplication for {stem}")
+        });
         assert_eq!(
             &piece_dup, piece,
             "duplicated-vertex per-tile differs at {tile:?} for {stem}"

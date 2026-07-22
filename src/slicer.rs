@@ -1,454 +1,345 @@
-//! The public slicing API.
+//! The public slicing API: [`SlicerAll`] (accumulate every tile a polyline touches) and
+//! [`SlicerOne`] (accumulate a single, fixed tile).
+//!
+//! Both wrap the same stateless [`Grid`] engine and accumulate results as **features**. A feature is
+//! a caller-defined group of polylines: begin one with [`add_feature`](SlicerAll::add_feature), then
+//! extend it with [`continue_last_feature`](SlicerAll::continue_last_feature) — so the several lines
+//! of one multi-line geometry become a single feature, while unrelated inputs become separate
+//! features. Each polyline is sliced and its per-tile runs folded into the feature it belongs to.
+//!
+//! Read the accumulated state back with iterators, never owned `Vec`s:
+//!
+//! - [`SlicerAll::iter_tiles`] → [`TileView::iter_features`] → [`FeatureView::iter_polylines`];
+//! - [`SlicerOne::iter_features`] → [`FeatureView::iter_polylines`] (one implicit tile, so no tile
+//!   level).
+//!
+//! Runs come out in each tile's **local frame**: the tile's `[0, 0]` corner is the origin, so a
+//! vertex at global `(x, y)` is `(x − tile.x·divider, y − tile.y·divider)` (in-tile vertices land in
+//! `0..divider`; buffer vertices past the low edge go negative). [`merge`](crate::merge) is the
+//! inverse, stitching a tile's pieces back together.
 
-use geo_types::{Coord, Geometry};
+use std::collections::BTreeMap;
+
+use geo_types::Coord;
 
 use crate::Error;
-use crate::clip_polyline::{assemble, clip_line, each_line, segment_intersects, to_local};
-use crate::tile::{TileId, tile_of};
+use crate::grid::Grid;
+use crate::tile::TileId;
 use crate::vertex::Vertex;
 
-/// One segment routed into one tile during [`Slicer::slice_all`], packed into 8 bytes so the sort
-/// moves little memory. `dx`/`dy` are the tile's offset from a reference tile (the first vertex's
-/// tile): a polyline is geographically local, so the offsets fit `i16` (checked up front), and their
-/// order equals absolute tile order (the reference is constant), so the derived `Ord` — `dx`, `dy`,
-/// then `line`, `i0` — groups each tile's segments in original order. `line` and `i0` are the
-/// segment's line index and its start vertex's **original** index; the end vertex is the next one
-/// distinct from the start (consecutive duplicates were skipped when routing), so it is recovered
-/// on lookup rather than stored. Within a tile a run continues only when the previous segment ended
-/// where this one starts (same line, `prev end == i0`); any gap — or a line boundary — starts a
-/// new piece.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct Hit {
-    dx: i16,
-    dy: i16,
-    line: u16,
-    i0: u16,
+/// One accumulated feature: its runs (each a vertex list) in a tile's local frame, tagged with the
+/// feature id it belongs to so [`continue_last_feature`](SlicerAll::continue_last_feature) can find
+/// the currently-open feature within a tile that may hold several.
+type FeatureRuns<V> = (u64, Vec<Vec<V>>);
+
+/// Fold `runs` into `entries` under feature `id`: extend the last feature if it is `id` (the open
+/// feature reached this tile before), otherwise start a new feature. Empty `runs` are dropped, so a
+/// feature materializes in a tile only once something of it lands there. Feature ids only ever grow,
+/// so the open feature — when present — is always the last entry, keeping `entries` in id order.
+fn absorb<V: Vertex>(entries: &mut Vec<FeatureRuns<V>>, id: u64, runs: Vec<Vec<V>>) {
+    if runs.is_empty() {
+        return;
+    }
+    match entries.last_mut() {
+        Some((last, feat)) if *last == id => feat.extend(runs),
+        _ => entries.push((id, runs)),
+    }
 }
 
-/// A line index or vertex index in `0..=u16::MAX` fits the compact [`Hit`]; a length up to this many
-/// therefore has all indices representable.
-const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
+/// A borrowed view of one tile's accumulated features, yielded by [`SlicerAll::iter_tiles`].
+pub struct TileView<'a, V: Vertex> {
+    id: TileId,
+    features: &'a [FeatureRuns<V>],
+}
 
-/// Upper bound on the candidate tiles [`Slicer::slice_all`] will examine before giving up with
-/// [`Error::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
-/// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
-/// well under a second.
-const MAX_TILE_VISITS: i64 = 1 << 25;
+impl<'a, V: Vertex> TileView<'a, V> {
+    /// The tile this view is for.
+    #[must_use]
+    pub fn id(&self) -> TileId {
+        self.id
+    }
 
-/// Per-tile output of the generic slicing API: for each tile, its runs (each run a vertex list) in
-/// that tile's local frame, ordered by [`TileId`].
-type TileRuns<V> = Vec<(TileId, Vec<Vec<V>>)>;
+    /// Iterate this tile's features, in the order they were first added.
+    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'a, V>> + use<'a, V> {
+        self.features.iter().map(|(_, runs)| FeatureView {
+            runs: runs.as_slice(),
+        })
+    }
+}
 
-/// Slices integer polylines ([`Geometry::LineString`] / [`Geometry::MultiLineString`]) into
-/// per-tile pieces on an integer grid.
+/// A borrowed view of one feature's clipped polylines within a tile, yielded by
+/// [`TileView::iter_features`] / [`SlicerOne::iter_features`].
+pub struct FeatureView<'a, V: Vertex> {
+    runs: &'a [Vec<V>],
+}
+
+impl<'a, V: Vertex> FeatureView<'a, V> {
+    /// Iterate this feature's polylines (runs) in this tile, each a vertex slice in the tile's local
+    /// frame. A feature yields several polylines where the input left the tile and re-entered.
+    pub fn iter_polylines(&self) -> impl Iterator<Item = &'a [V]> + use<'a, V> {
+        self.runs.iter().map(Vec::as_slice)
+    }
+}
+
+/// The next feature id to hand out, and the currently-open one (for `continue_last_feature`).
 ///
-/// A tile of side [`divider`](Self::divider) covers the closed square
-/// `[x·divider, x·divider + divider − 1]` on each axis. Each tile's clip box is then grown outward
-/// by [`buffer`](Self::buffer) units on every side, so geometry within `buffer` of a tile is kept
-/// in it. Clipping keeps the geometry's original vertices and includes every tile a segment passes
-/// through.
-///
-/// The slicer never panics: bad input (a non-polyline geometry, an oversized polyline, or
-/// coordinates that overflow the tile math) yields an [`Error`] instead.
+/// Shared bookkeeping between [`SlicerAll`] and [`SlicerOne`]: `add_feature` opens a fresh id;
+/// `continue_last_feature` reuses the open id, opening a fresh one if none is open yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Slicer {
-    /// Tile side length, in coordinate units (always in `1..=i32::MAX`).
-    pub(crate) divider: i32,
-    /// Margin, in coordinate units, kept around every tile (always in `0..=u16::MAX`).
-    pub(crate) buffer: i32,
+struct FeatureCounter {
+    next: u64,
+    open: Option<u64>,
 }
 
-impl Slicer {
-    /// Create a slicer with the given tile side and buffer.
+impl FeatureCounter {
+    const fn new() -> Self {
+        Self {
+            next: 0,
+            open: None,
+        }
+    }
+
+    /// Open a brand-new feature and return its id (for `add_feature`).
+    fn open_new(&mut self) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        self.open = Some(id);
+        id
+    }
+
+    /// The open feature's id, opening a new one if none is open (for `continue_last_feature`).
+    fn open_or_new(&mut self) -> u64 {
+        match self.open {
+            Some(id) => id,
+            None => self.open_new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// Slices integer polylines into per-tile pieces on an integer grid, accumulating every tile each
+/// polyline touches.
+///
+/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]), so plain coordinates or
+/// payload-carrying vertices (e.g. an M value via [`Measured`](crate::Measured)) both work; the
+/// payload rides through slicing unchanged. Build features with [`add_feature`](Self::add_feature) /
+/// [`continue_last_feature`](Self::continue_last_feature) and read them back with
+/// [`iter_tiles`](Self::iter_tiles).
+///
+/// The slicer never panics: bad input (an oversized polyline, or coordinates that overflow the tile
+/// math) yields an [`Error`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlicerAll<V: Vertex = Coord<i32>> {
+    grid: Grid,
+    features: FeatureCounter,
+    tiles: BTreeMap<TileId, Vec<FeatureRuns<V>>>,
+}
+
+impl<V: Vertex> SlicerAll<V> {
+    /// Create a slicer with the given tile side and buffer, and an empty accumulator.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    pub const fn new(divider: u32, buffer: u16) -> Result<Self, Error> {
-        if divider == 0 || divider > i32::MAX.cast_unsigned() {
-            Err(Error::InvalidDivider)
-        } else {
-            Ok(Self {
-                divider: divider.cast_signed(),
-                buffer: buffer as i32,
-            })
-        }
+    pub fn new(divider: u32, buffer: u16) -> Result<Self, Error> {
+        Ok(Self {
+            grid: Grid::new(divider, buffer)?,
+            features: FeatureCounter::new(),
+            tiles: BTreeMap::new(),
+        })
     }
 
     /// The tile side length, in coordinate units.
     #[must_use]
-    pub fn divider(self) -> u32 {
-        self.divider.cast_unsigned()
+    pub fn divider(&self) -> u32 {
+        self.grid.divider()
     }
 
     /// The buffer kept around every tile, in coordinate units.
     #[must_use]
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "buffer is always in 0..=u16::MAX (it was built from a u16)"
-    )]
-    pub fn buffer(self) -> u16 {
-        self.buffer as u16
+    pub fn buffer(&self) -> u16 {
+        self.grid.buffer()
     }
 
-    /// Clip `geom` to a single tile, keeping original vertices. Returns the same geometry kind
-    /// (`LineString` for one run, `MultiLineString` for several), or `None` when nothing of `geom`
-    /// touches the tile's (buffered) box.
+    /// Begin a new feature from `polyline`: slice it into every tile it touches and store its runs as
+    /// a fresh feature in each. Chainable.
     ///
-    /// The piece is returned in **tile-local coordinates**: the tile's `[0, 0]` corner is the
-    /// origin, so a vertex at global `(x, y)` becomes `(x − tile.x·divider, y − tile.y·divider)`.
-    /// In-tile vertices land in `0..divider`; buffer vertices past the low edge go negative.
+    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnsupportedGeometry`] if `geom` is not a polyline, or [`Error::Overflow`] if
-    /// `tile`'s (buffered) box coordinates overflow `i32` (a tile far outside the representable
-    /// coordinate range for this `divider`), or a kept vertex lies more than an `i32` span from the
-    /// tile origin so its local coordinate would not fit `i32`.
-    pub fn slice(self, geom: &Geometry<i32>, tile: TileId) -> Result<Option<Geometry<i32>>, Error> {
-        let lines = each_line(geom)?;
-        let refs: Vec<&[Coord<i32>]> = lines.iter().map(|l| l.0.as_slice()).collect();
-        Ok(assemble(self.slice_refs(&refs, tile)?))
+    /// Whatever the engine returns: [`Error::PolylineTooLarge`], [`Error::TooManyTiles`], or
+    /// [`Error::Overflow`].
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, Error> {
+        let sliced = self.grid.slice_all(polyline.as_ref())?;
+        let id = self.features.open_new();
+        for (tile, runs) in sliced {
+            absorb(self.tiles.entry(tile).or_default(), id, runs);
+        }
+        Ok(self)
     }
 
-    /// Clip generic [`Vertex`] lines to a single tile, keeping original vertices; the tile-local
-    /// analogue of [`slice`](Self::slice) for vertices carrying a payload (e.g. an M value) that
-    /// `geo-types` cannot represent.
+    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another
+    /// `polyline` — slice it and fold its per-tile runs into that same feature (so the lines of one
+    /// multi-line geometry stay a single feature). If no feature is open yet, this begins one.
+    /// Chainable.
     ///
-    /// `lines` is any slice of vertex sequences (`&[Vec<V>]`, `&[&[V]]`, …). The result is the kept
-    /// runs in the tile's local frame — empty when nothing touches the tile's (buffered) box. Each
-    /// vertex's payload is preserved verbatim; only its position is re-framed.
+    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
     ///
     /// # Errors
     ///
-    /// [`Error::Overflow`] if the tile's box coordinates overflow `i32`, or a kept vertex lies more
-    /// than an `i32` span from the tile origin.
-    pub fn slice_lines<V: Vertex, L: AsRef<[V]>>(
-        self,
-        lines: &[L],
-        tile: TileId,
-    ) -> Result<Vec<Vec<V>>, Error> {
-        let refs: Vec<&[V]> = lines.iter().map(AsRef::as_ref).collect();
-        self.slice_refs(&refs, tile)
-    }
-
-    /// Core of [`slice`](Self::slice) / [`slice_lines`](Self::slice_lines), generic over the vertex.
-    fn slice_refs<V: Vertex>(self, lines: &[&[V]], tile: TileId) -> Result<Vec<Vec<V>>, Error> {
-        let (min, max) = self.tile_bounds(tile)?;
-        // The tile origin is `min` grown back by the buffer: `tile_bounds` already proved
-        // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
-        // overflow — no need to recompute (and re-check) `tile.x·divider`.
-        let origin = Coord {
-            x: min.x + self.buffer,
-            y: min.y + self.buffer,
-        };
-        // Clip and localize in one pass: `clip_line` stores each kept vertex already offset by the
-        // tile origin, so there is no separate localization pass over the output.
-        let mut runs = Vec::with_capacity(lines.len());
-        for line in lines {
-            clip_line(line, min, max, origin, &mut runs)?;
+    /// Whatever the engine returns: [`Error::PolylineTooLarge`], [`Error::TooManyTiles`], or
+    /// [`Error::Overflow`].
+    pub fn continue_last_feature<P: AsRef<[V]>>(
+        &mut self,
+        polyline: P,
+    ) -> Result<&mut Self, Error> {
+        let sliced = self.grid.slice_all(polyline.as_ref())?;
+        let id = self.features.open_or_new();
+        for (tile, runs) in sliced {
+            absorb(self.tiles.entry(tile).or_default(), id, runs);
         }
-        Ok(runs)
+        Ok(self)
     }
 
-    /// Clip `geom` into every tile it touches, as `(tile, piece)` pairs ordered by [`TileId`]. Each
-    /// piece is in that tile's **local coordinates** (see [`slice`](Self::slice)).
-    ///
-    /// `self.slice_all(geom)` and `self.slice(geom, tile)` agree by construction: the pair for a
-    /// tile equals what `slice` returns for it.
-    ///
-    /// The geometry is walked **once**. Every segment (consecutive-duplicate vertices skipped) is
-    /// routed into each tile whose buffered box it touches, recording a compact hit (tile as an
-    /// `i16` offset from the first vertex's tile, plus the segment's line index and start vertex's
-    /// original index). Sorting the hits groups every tile's segments together in original order;
-    /// within a tile a run grows while each segment starts where the previous ended (a gap — or a
-    /// line boundary — starts a new piece), looking the endpoints back up from the input. This
-    /// yields the same runs the per-tile path produces, but without re-clipping the whole geometry
-    /// once per tile and without copying vertices.
-    ///
-    /// Vertex/tile ranges are validated up front, so the hot loop packs into `Hit` without per-item
-    /// bounds checks.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::UnsupportedGeometry`] — `geom` is not a polyline.
-    /// - [`Error::PolylineTooLarge`] — a line has more than `u16::MAX` vertices, or there are more
-    ///   than `u16::MAX` lines.
-    /// - [`Error::TooManyTiles`] — the geometry spans more than `i16::MAX` tiles on an axis, or its
-    ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
-    /// - [`Error::Overflow`] — a coordinate `± buffer` overflows `i32`, or a kept vertex lies more
-    ///   than an `i32` span from its tile origin (its local coordinate would not fit `i32`).
-    pub fn slice_all(self, geom: &Geometry<i32>) -> Result<Vec<(TileId, Geometry<i32>)>, Error> {
-        let lines = each_line(geom)?;
-        let refs: Vec<&[Coord<i32>]> = lines.iter().map(|l| l.0.as_slice()).collect();
-        Ok(self
-            .slice_all_refs(&refs)?
-            .into_iter()
-            .filter_map(|(tile, runs)| assemble(runs).map(|g| (tile, g)))
-            .collect())
-    }
-
-    /// Clip generic [`Vertex`] lines into every tile they touch; the tile-local analogue of
-    /// [`slice_all`](Self::slice_all) for vertices carrying a payload (e.g. an M value).
-    ///
-    /// `lines` is any slice of vertex sequences (`&[Vec<V>]`, `&[&[V]]`, …). Returns `(tile, runs)`
-    /// pairs ordered by [`TileId`], each run in that tile's local frame, payloads preserved.
-    /// Agrees with [`slice_lines`](Self::slice_lines) tile-by-tile, by construction.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`slice_all`](Self::slice_all): [`Error::PolylineTooLarge`], [`Error::TooManyTiles`],
-    /// or [`Error::Overflow`].
-    pub fn slice_all_lines<V: Vertex, L: AsRef<[V]>>(
-        self,
-        lines: &[L],
-    ) -> Result<TileRuns<V>, Error> {
-        let refs: Vec<&[V]> = lines.iter().map(AsRef::as_ref).collect();
-        self.slice_all_refs(&refs)
-    }
-
-    /// Core of [`slice_all`](Self::slice_all) / [`slice_all_lines`](Self::slice_all_lines), generic
-    /// over the vertex.
-    ///
-    /// The geometry is walked **once**. Every segment (consecutive same-position vertices skipped)
-    /// is routed into each tile whose buffered box it touches, recording a compact hit (tile as an
-    /// `i16` offset from the first vertex's tile, plus the segment's line index and start vertex's
-    /// original index). Sorting the hits groups every tile's segments together in original order;
-    /// within a tile a run grows while each segment starts where the previous ended (a gap — or a
-    /// line boundary — starts a new piece), looking the endpoints back up from the input. This
-    /// yields the same runs the per-tile path produces, but without re-clipping the whole geometry
-    /// once per tile.
-    ///
-    /// Vertex/tile ranges are validated up front, so the hot loop packs into `Hit` without per-item
-    /// bounds checks.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "indices and tile offsets are validated to fit u16/i16 before these casts"
-    )]
-    fn slice_all_refs<V: Vertex>(self, lines: &[&[V]]) -> Result<TileRuns<V>, Error> {
-        // Empty geometry → no tiles.
-        let Some(first) = lines.iter().find_map(|l| l.first()).map(Vertex::position) else {
-            return Ok(Vec::new());
-        };
-
-        // Up-front validation, so the hot loop can pack into `Hit` without per-item checks:
-        // (1) every line/vertex index fits u16;
-        if lines.len() > MAX_INDEXED_LEN || lines.iter().any(|l| l.len() > MAX_INDEXED_LEN) {
-            return Err(Error::PolylineTooLarge);
-        }
-        // (2) every tile offset from `reference` fits i16. The extreme tiles come from the overall
-        // coordinate bounds grown by the buffer; `?` reports coordinates too close to the i32 edge.
-        let reference = tile_of(first, self.divider);
-        let (lo_tile, hi_tile) = self.buffered_tile_bounds(lines, first)?;
-        for (tile, refc) in [
-            (lo_tile.x, reference.x),
-            (hi_tile.x, reference.x),
-            (lo_tile.y, reference.y),
-            (hi_tile.y, reference.y),
-        ] {
-            i16::try_from(i64::from(tile) - i64::from(refc)).map_err(|_| Error::TooManyTiles)?;
-        }
-
-        // Route each segment into the tiles it touches. All casts below are within the ranges just
-        // validated; all coordinate arithmetic stays inside `[lo_tile, hi_tile]`, which is in range.
-        let segments: usize = lines.iter().map(|l| l.len().saturating_sub(1)).sum();
-        let mut hits: Vec<Hit> = Vec::with_capacity(segments.saturating_mul(2));
-        // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
-        // exhaust time or memory: a geometry needing more than this is rejected rather than crashing.
-        let mut budget: i64 = MAX_TILE_VISITS;
-        for (li, line) in lines.iter().enumerate() {
-            let li = li as u16;
-            // Carry the previous vertex (index + position) so the segment start needs no re-index.
-            let mut prev: Option<(usize, Coord<i32>)> = None;
-            for (idx, v) in line.iter().enumerate() {
-                let c = v.position();
-                if let Some((p, a)) = prev {
-                    if a == c {
-                        continue; // drop a consecutive duplicate vertex (keep `prev` at `p`)
-                    }
-                    let lo = tile_of(
-                        Coord {
-                            x: a.x.min(c.x) - self.buffer,
-                            y: a.y.min(c.y) - self.buffer,
-                        },
-                        self.divider,
-                    );
-                    let hi = tile_of(
-                        Coord {
-                            x: a.x.max(c.x) + self.buffer,
-                            y: a.y.max(c.y) + self.buffer,
-                        },
-                        self.divider,
-                    );
-                    // Charge this segment's candidate-tile box (in range: lo/hi ∈ [lo_tile, hi_tile]).
-                    budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
-                        * (i64::from(hi.y) - i64::from(lo.y) + 1);
-                    if budget < 0 {
-                        return Err(Error::TooManyTiles);
-                    }
-                    for ty in lo.y..=hi.y {
-                        let dy = (ty - reference.y) as i16;
-                        for tx in lo.x..=hi.x {
-                            let tile = TileId::new(tx, ty);
-                            let (min, max) = self.tile_bounds(tile)?;
-                            if segment_intersects(a, c, min, max) {
-                                let dx = (tx - reference.x) as i16;
-                                hits.push(Hit {
-                                    dx,
-                                    dy,
-                                    line: li,
-                                    i0: p as u16,
-                                });
-                            }
-                        }
-                    }
-                }
-                prev = Some((idx, c));
-            }
-        }
-
-        self.assemble_tiles(hits, lines, reference)
-    }
-
-    /// Group sorted hits by tile and assemble each tile's runs (in that tile's local frame), looking
-    /// endpoints back up from `lines`. Split out of [`Self::slice_all`] to keep each function
-    /// focused.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Overflow`] if a kept vertex lies more than an `i32` span from its tile origin (its
-    /// local coordinate would not fit `i32`). The tile origins themselves are always in range —
-    /// every tile here already passed [`Self::tile_bounds`] while routing.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "`end` is a vertex index < line length, validated to fit u16 in slice_all"
-    )]
-    fn assemble_tiles<V: Vertex>(
-        self,
-        mut hits: Vec<Hit>,
-        lines: &[&[V]],
-        reference: TileId,
-    ) -> Result<TileRuns<V>, Error> {
-        hits.sort_unstable();
-        // Pre-alloc the output to the number of distinct tiles (one cheap pass over the sorted hits)
-        // so pushing results never reallocates.
-        let distinct = hits
-            .windows(2)
-            .filter(|w| (w[0].dx, w[0].dy) != (w[1].dx, w[1].dy))
-            .count()
-            + usize::from(!hits.is_empty());
-        let mut out: Vec<(TileId, Vec<Vec<V>>)> = Vec::with_capacity(distinct);
-
-        for group in hits.chunk_by(|a, b| (a.dx, a.dy) == (b.dx, b.dy)) {
-            let (dx, dy) = (group[0].dx, group[0].dy);
-            let tile = TileId::new(reference.x + i32::from(dx), reference.y + i32::from(dy));
-            // Origin of this tile's local frame; every kept vertex is offset by it below.
-            let origin = self.tile_origin(tile)?;
-            // Most tiles hold a single run; size for that and let it grow when a line re-enters.
-            let mut pieces: Vec<Vec<V>> = Vec::with_capacity(1);
-            let mut cur: Vec<V> = Vec::new();
-            let mut prev_end: Option<(u16, u16)> = None; // (line, end index) of the previous segment
-            for h in group {
-                let verts = lines[h.line as usize];
-                let i0 = h.i0 as usize;
-                let a = verts[i0];
-                // End vertex: the next one at a distinct position (routing skipped consecutive
-                // duplicates). A routed segment always has one; if somehow not, skip it (never
-                // panic).
-                let Some(step) = verts[i0 + 1..]
-                    .iter()
-                    .position(|v| v.position() != a.position())
-                else {
-                    continue;
-                };
-                let end = i0 + 1 + step;
-                let c = verts[end];
-                let c_local = to_local(c, origin)?;
-                if prev_end == Some((h.line, h.i0)) && !cur.is_empty() {
-                    cur.push(c_local); // segment starts where the previous ended: extend the run
-                } else {
-                    if cur.len() >= 2 {
-                        pieces.push(std::mem::take(&mut cur));
-                    }
-                    cur = vec![to_local(a, origin)?, c_local]; // start a new run
-                }
-                prev_end = Some((h.line, end as u16));
-            }
-            if cur.len() >= 2 {
-                pieces.push(cur);
-            }
-            if !pieces.is_empty() {
-                out.push((tile, pieces));
-            }
-        }
-        Ok(out)
-    }
-
-    /// The global coordinate of `tile`'s origin — its `[0, 0]` corner in tile-local space, i.e.
-    /// `(tile.x·divider, tile.y·divider)`. [`Error::Overflow`] if that product leaves `i32`.
-    fn tile_origin(self, tile: TileId) -> Result<Coord<i32>, Error> {
-        Ok(Coord {
-            x: tile.x.checked_mul(self.divider).ok_or(Error::Overflow)?,
-            y: tile.y.checked_mul(self.divider).ok_or(Error::Overflow)?,
+    /// Iterate the touched tiles, ordered by [`TileId`], borrowing so the accumulator can keep
+    /// growing afterwards. Each [`TileView`] exposes that tile's features.
+    pub fn iter_tiles(&self) -> impl Iterator<Item = TileView<'_, V>> {
+        self.tiles.iter().map(|(&id, features)| TileView {
+            id,
+            features: features.as_slice(),
         })
     }
 
-    /// The closed integer bounds `(min, max)` of `tile`'s clip box, grown by `buffer` on each side.
-    /// All arithmetic is checked; [`Error::Overflow`] means the tile lies outside the representable
-    /// coordinate range for this `divider`.
-    fn tile_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), Error> {
-        let base_x = tile.x.checked_mul(self.divider).ok_or(Error::Overflow)?;
-        let base_y = tile.y.checked_mul(self.divider).ok_or(Error::Overflow)?;
-        // Distance from the base corner to the far corner of the buffered box: divider - 1 + buffer.
-        let reach = (self.divider - 1)
-            .checked_add(self.buffer)
-            .ok_or(Error::Overflow)?;
-        Ok((
-            Coord {
-                x: base_x.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-                y: base_y.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-            },
-            Coord {
-                x: base_x.checked_add(reach).ok_or(Error::Overflow)?,
-                y: base_y.checked_add(reach).ok_or(Error::Overflow)?,
-            },
-        ))
+    /// Number of tiles the accumulator has touched.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tiles.len()
     }
 
-    /// The lowest and highest tiles any part of `lines` can reach: the coordinate bounding box grown
-    /// by `buffer`, mapped to tiles. `first` seeds the bounds. [`Error::Overflow`] if a coordinate
-    /// `± buffer` overflows `i32`.
-    fn buffered_tile_bounds<V: Vertex>(
-        self,
-        lines: &[&[V]],
-        first: Coord<i32>,
-    ) -> Result<(TileId, TileId), Error> {
-        let (mut min, mut max) = (first, first);
-        for line in lines {
-            for v in *line {
-                let c = v.position();
-                min.x = min.x.min(c.x);
-                min.y = min.y.min(c.y);
-                max.x = max.x.max(c.x);
-                max.y = max.y.max(c.y);
-            }
-        }
-        let lo = tile_of(
-            Coord {
-                x: min.x.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-                y: min.y.checked_sub(self.buffer).ok_or(Error::Overflow)?,
-            },
-            self.divider,
-        );
-        let hi = tile_of(
-            Coord {
-                x: max.x.checked_add(self.buffer).ok_or(Error::Overflow)?,
-                y: max.y.checked_add(self.buffer).ok_or(Error::Overflow)?,
-            },
-            self.divider,
-        );
-        Ok((lo, hi))
+    /// Whether nothing has been accumulated yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// Discard everything accumulated so far, keeping the divider/buffer config.
+    pub fn clear(&mut self) {
+        self.tiles.clear();
+        self.features.reset();
+    }
+}
+
+/// Slices integer polylines into pieces for **one fixed tile**, accumulating only that tile.
+///
+/// The single-tile counterpart to [`SlicerAll`]: [`add_feature`](Self::add_feature) /
+/// [`continue_last_feature`](Self::continue_last_feature) work exactly the same, but each polyline is
+/// clipped only to this slicer's [`tile`](Self::tile). Because there is a single tile, the read API
+/// skips the tile level — [`iter_features`](Self::iter_features) yields the features directly.
+///
+/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlicerOne<V: Vertex = Coord<i32>> {
+    grid: Grid,
+    tile: TileId,
+    features: FeatureCounter,
+    runs: Vec<FeatureRuns<V>>,
+}
+
+impl<V: Vertex> SlicerOne<V> {
+    /// Create a slicer bound to `tile`, with the given tile side and buffer, and an empty
+    /// accumulator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    pub fn new(divider: u32, buffer: u16, tile: TileId) -> Result<Self, Error> {
+        Ok(Self {
+            grid: Grid::new(divider, buffer)?,
+            tile,
+            features: FeatureCounter::new(),
+            runs: Vec::new(),
+        })
+    }
+
+    /// The tile side length, in coordinate units.
+    #[must_use]
+    pub fn divider(&self) -> u32 {
+        self.grid.divider()
+    }
+
+    /// The buffer kept around every tile, in coordinate units.
+    #[must_use]
+    pub fn buffer(&self) -> u16 {
+        self.grid.buffer()
+    }
+
+    /// The tile this slicer clips into.
+    #[must_use]
+    pub fn tile(&self) -> TileId {
+        self.tile
+    }
+
+    /// Begin a new feature from `polyline`, clipped to this slicer's [`tile`](Self::tile). Chainable.
+    /// A feature is recorded only if something of `polyline` lands in the tile.
+    ///
+    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, Error> {
+        let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
+        let id = self.features.open_new();
+        absorb(&mut self.runs, id, runs);
+        Ok(self)
+    }
+
+    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another
+    /// `polyline`, clipped to this slicer's [`tile`](Self::tile). If no feature is open yet, this
+    /// begins one. Chainable.
+    ///
+    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    pub fn continue_last_feature<P: AsRef<[V]>>(
+        &mut self,
+        polyline: P,
+    ) -> Result<&mut Self, Error> {
+        let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
+        let id = self.features.open_or_new();
+        absorb(&mut self.runs, id, runs);
+        Ok(self)
+    }
+
+    /// Iterate this tile's features, in the order they were first added. Each [`FeatureView`] exposes
+    /// that feature's clipped polylines.
+    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'_, V>> {
+        self.runs.iter().map(|(_, runs)| FeatureView {
+            runs: runs.as_slice(),
+        })
+    }
+
+    /// Number of features accumulated for the tile.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Whether nothing has been accumulated yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// Discard everything accumulated so far, keeping the divider/buffer/tile config.
+    pub fn clear(&mut self) {
+        self.runs.clear();
+        self.features.reset();
     }
 }

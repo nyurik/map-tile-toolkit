@@ -12,19 +12,61 @@ use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::{Feature, GeoJson, GeometryValue, JsonObject, JsonValue};
-use map_tile_toolkit::Slicer;
+use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
 
-/// `Slicer::new` for a compile-time-known-valid config (panics at compile time on a bad literal).
-const fn slicer(divider: u32, buffer: u16) -> Slicer {
-    match Slicer::new(divider, buffer) {
-        Ok(s) => s,
-        Err(_) => panic!("invalid slicer config in test support"),
+/// A slicer config (divider + buffer) shared by the tests, benches, and example. The slicers now own
+/// accumulated state, so the shared value is the *config*, from which each caller spins up a fresh
+/// [`SlicerAll`] / [`SlicerOne`].
+#[derive(Clone, Copy)]
+pub struct Cfg {
+    pub divider: u32,
+    pub buffer: u16,
+}
+
+impl Cfg {
+    /// The tile side length, in coordinate units.
+    #[must_use]
+    pub fn divider(self) -> u32 {
+        self.divider
+    }
+
+    /// The buffer kept around every tile, in coordinate units.
+    #[must_use]
+    pub fn buffer(self) -> u16 {
+        self.buffer
+    }
+
+    /// A fresh all-tiles slicer for this config (panics on a bad literal config).
+    #[must_use]
+    pub fn all(self) -> SlicerAll<Coord<i32>> {
+        SlicerAll::new(self.divider, self.buffer).expect("invalid slicer config in test support")
+    }
+
+    /// A fresh single-tile slicer bound to `tile` (panics on a bad literal config).
+    #[must_use]
+    pub fn one(self, tile: TileId) -> SlicerOne<Coord<i32>> {
+        SlicerOne::new(self.divider, self.buffer, tile)
+            .expect("invalid slicer config in test support")
     }
 }
 
+/// A config with the given divider/buffer.
+#[must_use]
+pub fn slicer(divider: u32, buffer: u16) -> Cfg {
+    Cfg { divider, buffer }
+}
+
 /// Tile divider for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
-pub const SLICER: Slicer = slicer(25, 0);
-pub const SLICER_BUFFER: Slicer = slicer(25, 5);
+#[must_use]
+pub fn grid() -> Cfg {
+    slicer(25, 0)
+}
+
+/// The grid config with a 5-unit buffer.
+#[must_use]
+pub fn grid_buffered() -> Cfg {
+    slicer(25, 5)
+}
 
 /// Slicing [`big_polyline`] with each of these yields a different number of output tiles, so the
 /// same large geometry can be benchmarked/profiled across output scales (shared by the benchmarks
@@ -32,11 +74,69 @@ pub const SLICER_BUFFER: Slicer = slicer(25, 5);
 /// - `multi` (divider 25) → hundreds of tiles;
 /// - `few` (divider 300) → a 2×2 grid of 4 tiles;
 /// - `single` (divider 1024) → the whole geometry in one tile.
-pub const BIG_CONFIGS: [(&str, Slicer); 3] = [
-    ("multi", slicer(25, 0)),
-    ("few", slicer(300, 0)),
-    ("single", slicer(1024, 0)),
-];
+#[must_use]
+pub fn big_configs() -> [(&'static str, Cfg); 3] {
+    [
+        ("multi", slicer(25, 0)),
+        ("few", slicer(300, 0)),
+        ("single", slicer(1024, 0)),
+    ]
+}
+
+/// The component polylines (vertex slices) of a polyline geometry.
+pub fn lines_of(geom: &Geometry<i32>) -> Vec<&[Coord<i32>]> {
+    match geom {
+        Geometry::LineString(ls) => vec![ls.0.as_slice()],
+        Geometry::MultiLineString(mls) => mls.0.iter().map(|ls| ls.0.as_slice()).collect(),
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
+/// Collapse per-tile runs into a geometry: `None`, one `LineString`, or a `MultiLineString`.
+pub fn assemble_runs(mut runs: Vec<Vec<Coord<i32>>>) -> Option<Geometry<i32>> {
+    match runs.len() {
+        0 => None,
+        1 => runs.pop().map(|r| Geometry::LineString(LineString(r))),
+        _ => Some(Geometry::MultiLineString(MultiLineString(
+            runs.into_iter().map(LineString).collect(),
+        ))),
+    }
+}
+
+/// Slice a whole geometry into per-tile geometries: each line becomes its own feature in a fresh
+/// [`SlicerAll`], then a tile's features are flattened back into combined runs. Geo-free (works with
+/// no cargo feature).
+pub fn slice_all_geom(cfg: &Cfg, geom: &Geometry<i32>) -> Vec<(TileId, Geometry<i32>)> {
+    let mut acc = cfg.all();
+    for line in lines_of(geom) {
+        acc.add_feature(line).expect("slice");
+    }
+    acc.iter_tiles()
+        .filter_map(|tile| assemble_runs(flatten(&tile)).map(|g| (tile.id(), g)))
+        .collect()
+}
+
+/// Clip a whole geometry to one tile → its combined geometry (or `None`), each line a feature in a
+/// fresh [`SlicerOne`], then flattened back into runs.
+pub fn slice_tile_geom(cfg: &Cfg, geom: &Geometry<i32>, tile: TileId) -> Option<Geometry<i32>> {
+    let mut acc = cfg.one(tile);
+    for line in lines_of(geom) {
+        acc.add_feature(line).expect("slice");
+    }
+    let runs: Vec<Vec<Coord<i32>>> = acc
+        .iter_features()
+        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+        .collect();
+    assemble_runs(runs)
+}
+
+/// Flatten all of a tile's features into a single run list (feature order, then run order), matching
+/// the combined per-tile output the batch/per-tile equivalence checks compare.
+fn flatten(tile: &map_tile_toolkit::TileView<'_, Coord<i32>>) -> Vec<Vec<Coord<i32>>> {
+    tile.iter_features()
+        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+        .collect()
+}
 
 /// Parse a fixture file into its (integer) polyline geometry. Fixtures are `FeatureCollection`s
 /// holding a single `LineString`/`MultiLineString` with whole-number coordinates.

@@ -14,6 +14,12 @@ rust-version = "1.88"
 name = "slicing"
 harness = false
 
+[features]
+default = ["geo"]
+# Enables the `geo-types` `Geometry` bridge (`TileAccumulator::add_geometry` / `into_geometries`).
+# The core slicing API works on plain vertex slices and does not need it.
+geo = []
+
 [dependencies]
 geo-types = "0.7.19"
 thiserror = "2"

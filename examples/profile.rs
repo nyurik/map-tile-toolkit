@@ -5,22 +5,25 @@
 //! [iterations]`.
 //!
 //! Cases (`<name>`):
-//! * `all` / `one` — [`Slicer::slice_all`] / per-tile [`Slicer::slice`] over the small fixture set.
+//! * `all` / `one` — slice the small fixture set into all tiles (one [`SlicerAll`]) / per touched
+//!   tile (a fresh [`SlicerOne`] each).
 //! * `big-all-<cfg>` / `big-one-<cfg>` — the large in-memory `big_polyline` sliced with the
-//!   [`support::BIG_CONFIGS`] `<cfg>` (`multi`, `few`, or `single` — many / a few / one output tile).
+//!   [`support::big_configs`] `<cfg>` (`multi`, `few`, or `single` — many / a few / one output tile).
 //!
 //! The second parameter is the iteration count (defaults chosen per scale). Tile ids for the `one`
-//! cases are precomputed up front, so the loop measures only clipping.
+//! cases are precomputed up front, so the loop measures only clipping/accumulation.
 
 #![allow(clippy::pedantic, reason = "profiling helper")]
 
 use std::hint::black_box;
 
-use geo_types::Geometry;
-use map_tile_toolkit::{Slicer, TileId};
+use geo_types::Coord;
+use map_tile_toolkit::TileId;
 
 #[path = "../tests/support/mod.rs"]
 mod support;
+
+use support::Cfg;
 
 /// Which operation to profile.
 enum Op {
@@ -28,42 +31,48 @@ enum Op {
     One,
 }
 
-/// A geometry paired with the tile ids it touches (precomputed, not part of the hot loop).
-type Case = (Geometry<i32>, Vec<TileId>);
+/// A polyline paired with the tile ids it touches (precomputed, not part of the hot loop).
+type Case = (Vec<Coord<i32>>, Vec<TileId>);
+
+/// The tiles a polyline touches (precomputed via a throwaway [`SlicerAll`]).
+fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
+    let mut acc = cfg.all();
+    acc.add_feature(poly).expect("polyline");
+    acc.iter_tiles().map(|t| t.id()).collect()
+}
 
 fn main() {
     let name = std::env::args()
         .nth(1)
         .expect("usage: profile <name> [iterations]");
-    let (geoms, slicer, op, default_iters) = resolve(&name);
+    let (polylines, cfg, op, default_iters) = resolve(&name);
     let iterations: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(default_iters);
 
-    // Precompute each geometry's tile ids once, outside the timed loop.
-    let cases: Vec<Case> = geoms
+    // Precompute each polyline's tile ids once, outside the timed loop.
+    let cases: Vec<Case> = polylines
         .into_iter()
-        .map(|geom| {
-            let tiles = slicer
-                .slice_all(&geom)
-                .expect("polyline")
-                .into_iter()
-                .map(|(t, _)| t)
-                .collect();
-            (geom, tiles)
+        .map(|poly| {
+            let tiles = touched_tiles(&cfg, &poly);
+            (poly, tiles)
         })
         .collect();
 
     for _ in 0..iterations {
-        for (geom, tiles) in &cases {
+        for (poly, tiles) in &cases {
             match op {
                 Op::All => {
-                    black_box(slicer.slice_all(black_box(geom)).expect("polyline"));
+                    let mut acc = cfg.all();
+                    acc.add_feature(black_box(poly)).expect("polyline");
+                    black_box(&acc);
                 }
                 Op::One => {
                     for &tile in tiles {
-                        black_box(slicer.slice(black_box(geom), tile).expect("polyline"));
+                        let mut acc = cfg.one(tile);
+                        acc.add_feature(black_box(poly)).expect("polyline");
+                        black_box(&acc);
                     }
                 }
             }
@@ -71,17 +80,25 @@ fn main() {
     }
 }
 
-/// Resolve a case name into `(geometries, slicer, operation, default iterations)`.
-fn resolve(name: &str) -> (Vec<Geometry<i32>>, Slicer, Op, u64) {
+/// The component polylines of a geometry, owned.
+fn polylines_of(geom: &geo_types::Geometry<i32>) -> Vec<Vec<Coord<i32>>> {
+    support::lines_of(geom)
+        .into_iter()
+        .map(<[_]>::to_vec)
+        .collect()
+}
+
+/// Resolve a case name into `(polylines, config, operation, default iterations)`.
+fn resolve(name: &str) -> (Vec<Vec<Coord<i32>>>, Cfg, Op, u64) {
     let small = || {
         support::load_all_fixtures()
             .into_iter()
-            .map(|(_, g)| g)
+            .flat_map(|(_, g)| polylines_of(&g))
             .collect()
     };
     match name {
-        "all" => (small(), support::SLICER, Op::All, 2_000_000),
-        "one" => (small(), support::SLICER, Op::One, 2_000_000),
+        "all" => (small(), support::grid(), Op::All, 2_000_000),
+        "one" => (small(), support::grid(), Op::One, 2_000_000),
         _ => {
             let rest = name
                 .strip_prefix("big-")
@@ -94,12 +111,12 @@ fn resolve(name: &str) -> (Vec<Geometry<i32>>, Slicer, Op, u64) {
                 "one" => Op::One,
                 _ => panic!("unknown case name: {name}"),
             };
-            let slicer = support::BIG_CONFIGS
-                .iter()
+            let slicer = support::big_configs()
+                .into_iter()
                 .find(|(c, _)| *c == cfg)
-                .map(|(_, s)| *s)
+                .map(|(_, s)| s)
                 .unwrap_or_else(|| panic!("unknown big config `{cfg}` in: {name}"));
-            (vec![support::big_polyline()], slicer, op, 3_000)
+            (polylines_of(&support::big_polyline()), slicer, op, 3_000)
         }
     }
 }
