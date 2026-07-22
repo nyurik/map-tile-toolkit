@@ -11,6 +11,8 @@
 //!    - **Batch == exhaustive per-tile scan** over the reachable span (skipped when a tiny divider
 //!      makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
+//!    - **Tile merge never panics and is order-independent:** `merge(a, b)` equals `merge(b, a)`
+//!      for every adjacent pair of output tiles.
 //!
 //! Coordinates are `i8` (small, so slicing stays fast and the invariants get many cheap
 //! iterations); the divider/buffer range freely and the probe tile is a full `i32`, so `slice`'s
@@ -116,6 +118,20 @@ fuzz_target!(|input: Input| {
         all, all_duped,
         "duplicating every vertex changed the result"
     );
+
+    // (5) Merging neighboring tiles must never panic, and must be independent of argument order.
+    let tiles: Vec<TileId> = all.keys().copied().collect();
+    for &t in &tiles {
+        for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+            let n = TileId::new(t.x + dx, t.y + dy);
+            let (Some(a), Some(b)) = (all.get(&t), all.get(&n)) else {
+                continue;
+            };
+            let ab = slicer.merge((t, a), (n, b));
+            let ba = slicer.merge((n, b), (t, a));
+            assert_eq!(ab, ba, "merge is not order-independent for {t:?}/{n:?}");
+        }
+    }
 });
 
 /// One line → `LineString`; anything else → `MultiLineString` (the two kinds the slicer accepts).

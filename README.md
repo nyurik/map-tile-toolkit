@@ -24,25 +24,67 @@ coordinates that overflow the tile math) returns a `map_tile_toolkit::Error` ins
 use geo_types::{Geometry, LineString};
 use map_tile_toolkit::{Slicer, TileId};
 
-// An integer polyline. With `divider = 25`, tiles are 25 units wide; `buffer` grows each tile's
+// An integer polyline. With `divider = 25`,
+// tiles are 25 units wide; `buffer` grows each tile's
 // clip box outward (0 = tight against the grid).
 let line = Geometry::LineString(LineString::from(vec![(5, 5), (20, 20), (60, 40)]));
 let slicer = Slicer::new(25, 0)?;
 
-// Batch: every tile the polyline touches, each piece in the input's coordinate space.
+// Batch: every tile the polyline touches.
+// Each piece is in that tile's local coordinates — the tile's [0, 0] corner
+// is the origin, so add `(tile.x, tile.y) * divider` to recover global coords.
 for (tile, piece) in slicer.slice_all(&line)? {
     let _ = (tile, piece);
 }
 
-// Single tile: clip to one tile, or `None` when the line does not touch it.
+// Single tile: clip to one tile (tile-local coords), or `None` when
+// the line does not touch it.
 if let Some(piece) = slicer.slice(&line, TileId::new(0, 0))? {
     let _ = piece;
+}
+
+// Stitch two tiles' local pieces back into one geometry (in a shared local frame).
+// `merge` folds, so you can keep merging the result with further
+// tiles to reconstruct the whole polyline.
+let tiles = slicer.slice_all(&line)?;
+if let [a, b, ..] = tiles.as_slice() {
+    let _merged = slicer.merge((a.0, &a.1), (b.0, &b.1))?;
 }
 # Ok::<(), map_tile_toolkit::Error>(())
 ```
 
 `slice_all` and `slice` agree by construction: the pair `slice_all` yields for a tile equals what
 `slice` returns for that tile.
+
+### Per-vertex payloads (M values)
+
+`geo-types` coordinates are just `x`/`y`, but the slicer is generic over a `Vertex` trait, so a
+vertex can carry any `Copy + PartialEq` payload (an M/measure value, an id, …) that rides through slicing
+and merging **unchanged** — the slicer never cuts new vertices, so there is nothing to interpolate.
+`Coord<i32>` implements `Vertex` (the `Geometry<i32>` API above), and `Measured<M>` pairs a position
+with a payload:
+
+```rust
+use map_tile_toolkit::{Measured, Slicer, TileId};
+
+let slicer = Slicer::new(25, 0)?;
+// The payload must be `Copy + PartialEq`, so use an integer id
+// or a fixed-point (e.g. millimetre) measure rather than a raw `f32`.
+let line = vec![vec![
+    Measured::new(5, 5, 1_000_u32),
+    Measured::new(20, 20, 2_500),
+    Measured::new(60, 40, 4_000),
+]];
+
+// `slice_lines` / `slice_all_lines` take any `&[impl AsRef<[V]>]` and return runs
+// of `V`, each vertex's payload preserved. `merge_lines` stitches two tiles' pieces
+// back together.
+let per_tile = slicer.slice_all_lines(&line)?;
+for (tile, runs) in per_tile {
+    let _ = (tile, runs); // runs: Vec<Vec<Measured<u32>>> in that tile's local frame
+}
+# Ok::<(), map_tile_toolkit::Error>(())
+```
 
 ## Development
 

@@ -8,6 +8,7 @@
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
 use crate::Error;
+use crate::vertex::Vertex;
 
 /// The component lines of a polyline geometry, borrowed (no allocation). Errors for any other
 /// geometry kind rather than panicking.
@@ -15,7 +16,7 @@ pub(crate) fn each_line(geom: &Geometry<i32>) -> Result<&[LineString<i32>], Erro
     match geom {
         Geometry::LineString(ls) => Ok(std::slice::from_ref(ls)),
         Geometry::MultiLineString(mls) => Ok(&mls.0),
-        other => Err(Error::UnsupportedGeometry(geometry_kind(other))),
+        other => Err(Error::UnsupportedGeometry(other.inner_type_name())),
     }
 }
 
@@ -82,33 +83,44 @@ pub(crate) fn segment_intersects(
     !(s.iter().all(|&v| v > 0) || s.iter().all(|&v| v < 0))
 }
 
-/// Clip one line to the closed integer rectangle `[min, max]`, appending each kept run to `out`.
+/// Clip one line (a slice of [`Vertex`]) to the closed integer rectangle `[min, max]`, appending
+/// each kept run to `out` in the tile-local frame whose `[0, 0]` corner is `origin` (each kept
+/// vertex is stored with its position offset by `origin`, its payload untouched, so no separate
+/// localization pass is needed).
 ///
-/// Streams the vertices with no scratch allocation: consecutive duplicates are skipped inline, and
-/// a run grows across **consecutive segments that touch the box** — both endpoints of every segment
-/// in the run. A segment that misses the box ends the current run, so a segment crossing the box
-/// with no vertex inside is still kept, while a stretch that leaves and re-enters comes back as
-/// separate pieces. Each run of ≥2 vertices is moved out as one output line (no copy).
-pub(crate) fn clip_line(
-    line: &LineString<i32>,
+/// Streams the vertices with no scratch allocation: consecutive duplicates (same position) are
+/// skipped inline, and a run grows across **consecutive segments that touch the box** — both
+/// endpoints of every segment in the run. A segment that misses the box ends the current run, so a
+/// segment crossing the box with no vertex inside is still kept, while a stretch that leaves and
+/// re-enters comes back as separate pieces. Each run of ≥2 vertices is moved out as one output run.
+///
+/// The box test uses the original (global) positions; only the stored vertices are localized.
+///
+/// # Errors
+///
+/// [`Error::Overflow`] if a kept vertex lies more than an `i32` span from `origin` (its local
+/// position would not fit `i32`).
+pub(crate) fn clip_line<V: Vertex>(
+    line: &[V],
     min: Coord<i32>,
     max: Coord<i32>,
-    out: &mut Vec<LineString<i32>>,
-) {
-    let mut prev: Option<Coord<i32>> = None;
-    let mut cur: Vec<Coord<i32>> = Vec::new();
-    for &c in &line.0 {
-        if prev == Some(c) {
-            continue; // drop a consecutive duplicate vertex
+    origin: Coord<i32>,
+    out: &mut Vec<Vec<V>>,
+) -> Result<(), Error> {
+    let mut prev: Option<V> = None;
+    let mut cur: Vec<V> = Vec::new();
+    for &c in line {
+        if prev.map(|v| v.position()) == Some(c.position()) {
+            continue; // drop a consecutive duplicate vertex (same position)
         }
         if let Some(a) = prev {
-            if segment_intersects(a, c, min, max) {
+            if segment_intersects(a.position(), c.position(), min, max) {
                 if cur.is_empty() {
-                    cur.push(a);
+                    cur.push(to_local(a, origin)?);
                 }
-                cur.push(c);
+                cur.push(to_local(c, origin)?);
             } else if cur.len() >= 2 {
-                out.push(LineString(std::mem::take(&mut cur)));
+                out.push(std::mem::take(&mut cur));
             } else {
                 cur.clear();
             }
@@ -116,15 +128,32 @@ pub(crate) fn clip_line(
         prev = Some(c);
     }
     if cur.len() >= 2 {
-        out.push(LineString(cur));
+        out.push(cur);
     }
+    Ok(())
 }
 
-/// Wrap kept runs as a single geometry: `None`, one `LineString`, or a `MultiLineString`.
-pub(crate) fn assemble(mut pieces: Vec<LineString<i32>>) -> Option<Geometry<i32>> {
-    match pieces.len() {
+/// Re-express vertex `v` in the tile-local frame whose `[0, 0]` corner is `origin`: its position
+/// becomes `position − origin`, its payload unchanged. [`Error::Overflow`] if the offset leaves the
+/// `i32` range — possible only when a far crossing-segment endpoint lies more than a full `i32` span
+/// from the tile.
+pub(crate) fn to_local<V: Vertex>(v: V, origin: Coord<i32>) -> Result<V, Error> {
+    let p = v.position();
+    Ok(v.with_position(Coord {
+        x: p.x.checked_sub(origin.x).ok_or(Error::Overflow)?,
+        y: p.y.checked_sub(origin.y).ok_or(Error::Overflow)?,
+    }))
+}
+
+/// Wrap kept runs of `Coord` as a single geometry: `None`, one `LineString`, or a
+/// `MultiLineString`. Used by the `geo-types` convenience API to turn generic runs back into a
+/// `Geometry` (the generic API returns the runs directly).
+pub(crate) fn assemble(mut runs: Vec<Vec<Coord<i32>>>) -> Option<Geometry<i32>> {
+    match runs.len() {
         0 => None,
-        1 => pieces.pop().map(Geometry::LineString),
-        _ => Some(Geometry::MultiLineString(MultiLineString(pieces))),
+        1 => runs.pop().map(|r| Geometry::LineString(LineString(r))),
+        _ => Some(Geometry::MultiLineString(MultiLineString(
+            runs.into_iter().map(LineString).collect(),
+        ))),
     }
 }

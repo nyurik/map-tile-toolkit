@@ -88,6 +88,30 @@ fn duplicate_vertices(geom: &Geometry<i32>) -> Geometry<i32> {
     }
 }
 
+/// Undo tile-local normalization: add `tile`'s origin (`tile · divider`) back to every vertex so
+/// the piece is in the input's global coordinate space for rendering. Validation happens in local
+/// coords; only the snapshot files are written globally (so they still line up on the map grid).
+fn globalize(tile: TileId, local: &Geometry<i32>, divider: i32) -> Geometry<i32> {
+    let (ox, oy) = (tile.x * divider, tile.y * divider);
+    let shift = |ls: &LineString<i32>| {
+        LineString(
+            ls.0.iter()
+                .map(|c| Coord {
+                    x: c.x + ox,
+                    y: c.y + oy,
+                })
+                .collect(),
+        )
+    };
+    match local {
+        Geometry::LineString(l) => Geometry::LineString(shift(l)),
+        Geometry::MultiLineString(m) => {
+            Geometry::MultiLineString(MultiLineString(m.0.iter().map(shift).collect()))
+        }
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
 /// Convert an integer polyline geometry back to `f64` for GeoJSON output.
 fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
     let ls = |ls: &LineString<i32>| {
@@ -279,9 +303,16 @@ fn slice_at_buffer(slicer: &Slicer, stem: &str, geom: &Geometry<i32>, snapshot_d
         );
     }
 
-    // The two snapshots must be byte identical; snapshot the (shared) result.
-    let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &all)).expect("serializes");
-    let one_bytes = serde_json::to_vec_pretty(&build_fc(geom, &one)).expect("serializes");
+    // The two snapshots must be byte identical; snapshot the (shared) result. Pieces come back in
+    // tile-local coordinates, so convert them back to the global space before rendering.
+    let divider = slicer.divider() as i32;
+    let global = |m: &BTreeMap<TileId, Geometry<i32>>| -> BTreeMap<TileId, Geometry<i32>> {
+        m.iter()
+            .map(|(&t, g)| (t, globalize(t, g, divider)))
+            .collect()
+    };
+    let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&all))).expect("serializes");
+    let one_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&one))).expect("serializes");
     assert_eq!(
         all_bytes,
         one_bytes,
