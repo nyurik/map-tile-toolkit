@@ -21,7 +21,8 @@ const SLICER: Slicer = Slicer {
 };
 
 fn main() {
-    let (iterations, cases) = get_params();
+    let iterations = get_iterations();
+    let cases = get_params();
 
     for _ in 0..iterations {
         for (geom, tiles) in &cases {
@@ -32,12 +33,16 @@ fn main() {
     }
 }
 
-fn get_params() -> (u64, Vec<(Geometry<i32>, Vec<TileId>)>) {
+fn get_iterations() -> u64 {
     let iterations: u64 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(4_000_000);
-    let cases: Vec<(Geometry<i32>, Vec<TileId>)> = support::load_all_fixtures()
+    iterations
+}
+
+fn get_params() -> Vec<(Geometry<i32>, Vec<TileId>)> {
+    support::load_all_fixtures()
         .into_iter()
         .map(|(_, geom)| {
             let tiles = SLICER
@@ -47,6 +52,5 @@ fn get_params() -> (u64, Vec<(Geometry<i32>, Vec<TileId>)>) {
                 .collect();
             (geom, tiles)
         })
-        .collect();
-    (iterations, cases)
+        .collect()
 }

@@ -85,6 +85,8 @@ pub(crate) fn clip_line(
         if let Some(a) = prev {
             if segment_intersects(a, c, min, max) {
                 if cur.is_empty() {
+                    // A run holds at most the whole line; reserve once to avoid repeated regrowth.
+                    cur.reserve(line.0.len());
                     cur.push(a);
                 }
                 cur.push(c);

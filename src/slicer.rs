@@ -1,7 +1,5 @@
 //! The public slicing API.
 
-use std::collections::BTreeSet;
-
 use geo_types::{Coord, Geometry};
 
 use crate::clip_polyline::{assemble, clip_line, each_line, segment_intersects};
@@ -45,8 +43,9 @@ impl Slicer {
     pub fn slice(self, geom: &Geometry<i32>, tile: TileId) -> Option<Geometry<i32>> {
         let (divider, buffer) = self.params();
         let (min, max) = tile_bounds(tile, divider, buffer);
-        let mut pieces = Vec::new();
-        for line in each_line(geom) {
+        let lines = each_line(geom);
+        let mut pieces = Vec::with_capacity(lines.len());
+        for line in lines {
             clip_line(line, min, max, &mut pieces);
         }
         assemble(pieces)
@@ -63,8 +62,10 @@ impl Slicer {
 
         // Candidate tiles: every tile whose buffered box a segment touches. Stream each line's
         // segments (dropping consecutive duplicates), and for each segment scan the tiles in its
-        // coordinate bounding box (grown by the buffer), keeping the ones actually hit.
-        let mut tiles = BTreeSet::new();
+        // coordinate bounding box (grown by the buffer), keeping the ones actually hit. Collect
+        // into a `Vec` (with duplicates) then sort+dedup — cheaper than a `BTreeSet` for the small
+        // tile counts here (no per-insert node allocation).
+        let mut tiles: Vec<TileId> = Vec::new();
         for line in lines {
             let mut prev: Option<Coord<i32>> = None;
             for &c in &line.0 {
@@ -91,7 +92,7 @@ impl Slicer {
                             let tile = TileId::new(tx, ty);
                             let (min, max) = tile_bounds(tile, divider, buffer);
                             if segment_intersects(a, c, min, max) {
-                                tiles.insert(tile);
+                                tiles.push(tile);
                             }
                         }
                     }
@@ -99,16 +100,17 @@ impl Slicer {
                 prev = Some(c);
             }
         }
+        tiles.sort_unstable();
+        tiles.dedup();
 
-        // Reuse one `pieces` buffer across tiles; `assemble` takes ownership of the runs.
         let mut out = Vec::with_capacity(tiles.len());
-        let mut pieces = Vec::new();
         for tile in tiles {
             let (min, max) = tile_bounds(tile, divider, buffer);
+            let mut pieces = Vec::with_capacity(lines.len());
             for line in lines {
                 clip_line(line, min, max, &mut pieces);
             }
-            if let Some(g) = assemble(std::mem::take(&mut pieces)) {
+            if let Some(g) = assemble(pieces) {
                 out.push((tile, g));
             }
         }
