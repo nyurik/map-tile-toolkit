@@ -7,21 +7,28 @@
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
-/// The component lines of a polyline geometry.
-pub(crate) fn each_line(geom: &Geometry<i32>) -> Vec<&LineString<i32>> {
+/// The component lines of a polyline geometry, borrowed (no allocation).
+pub(crate) fn each_line(geom: &Geometry<i32>) -> &[LineString<i32>] {
     match geom {
-        Geometry::LineString(ls) => vec![ls],
-        Geometry::MultiLineString(mls) => mls.0.iter().collect(),
+        Geometry::LineString(ls) => std::slice::from_ref(ls),
+        Geometry::MultiLineString(mls) => &mls.0,
         other => panic!("expected a polyline geometry, got {other:?}"),
     }
 }
 
-/// Does segment `a`–`b` touch the closed integer rectangle `[min, max]`? A Liang–Barsky parameter
-/// test with no interpolation — for lines we keep original vertices rather than cut new ones.
+/// Is coordinate `c` inside the closed rectangle `[min, max]`?
+fn inside(c: Coord<i32>, min: Coord<i32>, max: Coord<i32>) -> bool {
+    c.x >= min.x && c.x <= max.x && c.y >= min.y && c.y <= max.y
+}
+
+/// Does segment `a`–`b` touch the closed integer rectangle `[min, max]`?
+///
+/// Integer-only (no division, no floats): reject when the segment's bounding box is disjoint from
+/// the box, accept when an endpoint is inside, otherwise test whether the box straddles the
+/// segment's supporting line via i128 cross products (so full `i32` coordinates cannot overflow).
 #[allow(
     clippy::many_single_char_names,
-    clippy::float_cmp,
-    reason = "Liang–Barsky clip: conventional single-letter names and intentional exact comparisons"
+    reason = "conventional short names for a geometric predicate"
 )]
 pub(crate) fn segment_intersects(
     a: Coord<i32>,
@@ -29,81 +36,65 @@ pub(crate) fn segment_intersects(
     min: Coord<i32>,
     max: Coord<i32>,
 ) -> bool {
-    let (ax, ay) = (f64::from(a.x), f64::from(a.y));
-    let (dx, dy) = (f64::from(b.x) - ax, f64::from(b.y) - ay);
-    let p = [-dx, dx, -dy, dy];
-    let q = [
-        ax - f64::from(min.x),
-        f64::from(max.x) - ax,
-        ay - f64::from(min.y),
-        f64::from(max.y) - ay,
-    ];
-    let mut t0 = 0.0_f64;
-    let mut t1 = 1.0_f64;
-    for i in 0..4 {
-        if p[i] == 0.0 {
-            if q[i] < 0.0 {
-                return false; // parallel to this edge and outside it
-            }
-        } else {
-            let t = q[i] / p[i];
-            if p[i] < 0.0 {
-                if t > t1 {
-                    return false;
-                }
-                if t > t0 {
-                    t0 = t;
-                }
-            } else {
-                if t < t0 {
-                    return false;
-                }
-                if t < t1 {
-                    t1 = t;
-                }
-            }
-        }
+    // Quick reject: the segment's bounding box is disjoint from the tile box.
+    if a.x.min(b.x) > max.x || a.x.max(b.x) < min.x || a.y.min(b.y) > max.y || a.y.max(b.y) < min.y
+    {
+        return false;
     }
-    true
+    // Quick accept: an endpoint lies inside the (closed) box.
+    if inside(a, min, max) || inside(b, min, max) {
+        return true;
+    }
+    // Both endpoints outside and the bounding boxes overlap: the segment meets the box iff its
+    // corners are not all strictly on one side of the segment's supporting line.
+    let (dx, dy) = (
+        i128::from(b.x) - i128::from(a.x),
+        i128::from(b.y) - i128::from(a.y),
+    );
+    let side = |x: i32, y: i32| {
+        dx * (i128::from(y) - i128::from(a.y)) - dy * (i128::from(x) - i128::from(a.x))
+    };
+    let s = [
+        side(min.x, min.y),
+        side(max.x, min.y),
+        side(min.x, max.y),
+        side(max.x, max.y),
+    ];
+    !(s.iter().all(|&v| v > 0) || s.iter().all(|&v| v < 0))
 }
 
 /// Clip one line to the closed integer rectangle `[min, max]`, appending each kept run to `out`.
 ///
-/// Consecutive duplicate vertices are dropped. A run is a maximal sequence of **consecutive
-/// segments that touch the box**; its vertices (both endpoints of every segment in the run) become
-/// one output line. A segment that misses the box ends the current run, so a segment crossing the
-/// box with no vertex inside is still kept, while a stretch that leaves the box and re-enters comes
-/// back as separate pieces — the intervening outside segments are not drawn in this tile.
+/// Streams the vertices with no scratch allocation: consecutive duplicates are skipped inline, and
+/// a run grows across **consecutive segments that touch the box** — both endpoints of every segment
+/// in the run. A segment that misses the box ends the current run, so a segment crossing the box
+/// with no vertex inside is still kept, while a stretch that leaves and re-enters comes back as
+/// separate pieces. Each run of ≥2 vertices becomes one output line.
 pub(crate) fn clip_line(
     line: &LineString<i32>,
     min: Coord<i32>,
     max: Coord<i32>,
     out: &mut Vec<LineString<i32>>,
 ) {
-    // Drop consecutive duplicate vertices.
-    let mut pts: Vec<Coord<i32>> = Vec::with_capacity(line.0.len());
-    for &c in &line.0 {
-        if pts.last() != Some(&c) {
-            pts.push(c);
-        }
-    }
-    if pts.len() < 2 {
-        return;
-    }
-
-    // Grow a run across consecutive segments that touch the box; a missing segment flushes it.
+    let mut prev: Option<Coord<i32>> = None;
     let mut cur: Vec<Coord<i32>> = Vec::new();
-    for w in pts.windows(2) {
-        if segment_intersects(w[0], w[1], min, max) {
-            if cur.is_empty() {
-                cur.push(w[0]);
-            }
-            cur.push(w[1]);
-        } else if cur.len() >= 2 {
-            out.push(LineString(std::mem::take(&mut cur)));
-        } else {
-            cur.clear();
+    for &c in &line.0 {
+        if prev == Some(c) {
+            continue; // drop a consecutive duplicate vertex
         }
+        if let Some(a) = prev {
+            if segment_intersects(a, c, min, max) {
+                if cur.is_empty() {
+                    cur.push(a);
+                }
+                cur.push(c);
+            } else if cur.len() >= 2 {
+                out.push(LineString(std::mem::take(&mut cur)));
+            } else {
+                cur.clear();
+            }
+        }
+        prev = Some(c);
     }
     if cur.len() >= 2 {
         out.push(LineString(cur));

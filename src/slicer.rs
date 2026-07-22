@@ -61,52 +61,54 @@ impl Slicer {
         let (divider, buffer) = self.params();
         let lines = each_line(geom);
 
-        // Candidate tiles: every tile whose buffered box a segment touches. For each segment, scan
-        // the tiles in its coordinate bounding box (grown by the buffer) and keep the ones hit.
+        // Candidate tiles: every tile whose buffered box a segment touches. Stream each line's
+        // segments (dropping consecutive duplicates), and for each segment scan the tiles in its
+        // coordinate bounding box (grown by the buffer), keeping the ones actually hit.
         let mut tiles = BTreeSet::new();
-        for line in &lines {
-            let mut pts: Vec<Coord<i32>> = Vec::with_capacity(line.0.len());
+        for line in lines {
+            let mut prev: Option<Coord<i32>> = None;
             for &c in &line.0 {
-                if pts.last() != Some(&c) {
-                    pts.push(c);
+                if prev == Some(c) {
+                    continue;
                 }
-            }
-            for w in pts.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                let lo = tile_of(
-                    Coord {
-                        x: a.x.min(b.x) - buffer,
-                        y: a.y.min(b.y) - buffer,
-                    },
-                    divider,
-                );
-                let hi = tile_of(
-                    Coord {
-                        x: a.x.max(b.x) + buffer,
-                        y: a.y.max(b.y) + buffer,
-                    },
-                    divider,
-                );
-                for ty in lo.y..=hi.y {
-                    for tx in lo.x..=hi.x {
-                        let tile = TileId::new(tx, ty);
-                        let (min, max) = tile_bounds(tile, divider, buffer);
-                        if segment_intersects(a, b, min, max) {
-                            tiles.insert(tile);
+                if let Some(a) = prev {
+                    let lo = tile_of(
+                        Coord {
+                            x: a.x.min(c.x) - buffer,
+                            y: a.y.min(c.y) - buffer,
+                        },
+                        divider,
+                    );
+                    let hi = tile_of(
+                        Coord {
+                            x: a.x.max(c.x) + buffer,
+                            y: a.y.max(c.y) + buffer,
+                        },
+                        divider,
+                    );
+                    for ty in lo.y..=hi.y {
+                        for tx in lo.x..=hi.x {
+                            let tile = TileId::new(tx, ty);
+                            let (min, max) = tile_bounds(tile, divider, buffer);
+                            if segment_intersects(a, c, min, max) {
+                                tiles.insert(tile);
+                            }
                         }
                     }
                 }
+                prev = Some(c);
             }
         }
 
-        let mut out = Vec::new();
+        // Reuse one `pieces` buffer across tiles; `assemble` takes ownership of the runs.
+        let mut out = Vec::with_capacity(tiles.len());
+        let mut pieces = Vec::new();
         for tile in tiles {
             let (min, max) = tile_bounds(tile, divider, buffer);
-            let mut pieces = Vec::new();
-            for line in &lines {
+            for line in lines {
                 clip_line(line, min, max, &mut pieces);
             }
-            if let Some(g) = assemble(pieces) {
+            if let Some(g) = assemble(std::mem::take(&mut pieces)) {
                 out.push((tile, g));
             }
         }
