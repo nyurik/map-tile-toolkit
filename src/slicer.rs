@@ -5,22 +5,22 @@ use geo_types::{Coord, Geometry, LineString};
 use crate::clip_polyline::{assemble, clip_line, each_line, segment_intersects};
 use crate::tile::{TileId, tile_of};
 
-/// One segment routed into one tile during [`Slicer::slice_all`], packed into 10 bytes so the sort
+/// One segment routed into one tile during [`Slicer::slice_all`], packed into 8 bytes so the sort
 /// moves little memory. `dx`/`dy` are the tile's offset from a reference tile (the first vertex's
 /// tile): a polyline is geographically local, so the offsets fit `i16` with huge margin, and their
 /// order equals absolute tile order (the reference is constant), so the derived `Ord` — `dx`, `dy`,
-/// then `line`, `i0` — groups each tile's segments in original order. `line`/`i0`/`i1` are the
-/// segment's line index and its endpoints' **original** vertex indices (endpoints are looked up, no
-/// coordinate copies; consecutive-duplicate vertices simply make `i1 > i0 + 1`). Within a tile a
-/// run continues only when the previous segment ended where this one starts (`prev.i1 == i0`, same
-/// line); any gap — or a line boundary — starts a new piece.
+/// then `line`, `i0` — groups each tile's segments in original order. `line` and `i0` are the
+/// segment's line index and its start vertex's **original** index; the end vertex is the next one
+/// distinct from the start (consecutive duplicates were skipped when routing), so it is recovered
+/// on lookup rather than stored. Within a tile a run continues only when the previous segment ended
+/// where this one starts (same line, `prev end == i0`); any gap — or a line boundary — starts a
+/// new piece.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct Hit {
     dx: i16,
     dy: i16,
     line: u16,
     i0: u16,
-    i1: u16,
 }
 
 /// Slices integer polylines ([`Geometry::LineString`] / [`Geometry::MultiLineString`]) into
@@ -152,7 +152,6 @@ impl Slicer {
                                     dy,
                                     line: li,
                                     i0: p as u16,
-                                    i1: idx as u16,
                                 });
                             }
                         }
@@ -179,11 +178,21 @@ impl Slicer {
             // Most tiles hold a single run; size for that and let it grow when a line re-enters.
             let mut pieces: Vec<LineString<i32>> = Vec::with_capacity(1);
             let mut cur: Vec<Coord<i32>> = Vec::new();
-            let mut prev_end: Option<(u16, u16)> = None; // (line, i1) of the previous segment
+            let mut prev_end: Option<(u16, u16)> = None; // (line, end index) of the previous segment
             while i < hits.len() && (hits[i].dx, hits[i].dy) == (dx, dy) {
                 let h = &hits[i];
                 let verts = &lines[h.line as usize].0;
-                let (a, c) = (verts[h.i0 as usize], verts[h.i1 as usize]);
+                let i0 = h.i0 as usize;
+                let a = verts[i0];
+                // End vertex: the next one distinct from the start (routing skipped consecutive
+                // duplicates); a routed segment always has one, so `position` never fails.
+                let end = i0
+                    + 1
+                    + verts[i0 + 1..]
+                        .iter()
+                        .position(|v| *v != a)
+                        .expect("routed segment has a distinct end vertex");
+                let c = verts[end];
                 if prev_end == Some((h.line, h.i0)) && !cur.is_empty() {
                     cur.push(c); // segment starts where the previous ended: extend the open run
                 } else {
@@ -192,7 +201,7 @@ impl Slicer {
                     }
                     cur = vec![a, c]; // start a new run
                 }
-                prev_end = Some((h.line, h.i1));
+                prev_end = Some((h.line, end as u16));
                 i += 1;
             }
             if cur.len() >= 2 {
