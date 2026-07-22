@@ -39,6 +39,15 @@ _flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
     cargo flamegraph --profile profiling --example profile --output "$svg" -- {{name}} {{args}}
     echo "Wrote $svg"
 
+# Fuzz a target with cargo-fuzz (needs nightly), e.g. `just fuzz slice_equivalence -- -max_total_time=60`
+fuzz target='slice_equivalence' *args:  (cargo-install 'cargo-fuzz')
+    # Pin the gnu host: the sanitizer is incompatible with a statically linked (musl) libc.
+    cargo +nightly fuzz run --target "$(rustc -vV | sed -n 's/^host: //p')" {{target}} {{args}}
+
+# Compile-check every fuzz target (needs nightly) so they don't bit-rot
+fuzz-build:  (cargo-install 'cargo-fuzz')
+    cargo +nightly fuzz build --target "$(rustc -vV | sed -n 's/^host: //p')"
+
 # Run integration tests and save its output as the new expected output
 bless *args:  (cargo-install 'cargo-insta')
     cargo insta test --accept --include-ignored --unreferenced=delete --all-features {{args}}

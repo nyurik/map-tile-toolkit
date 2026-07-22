@@ -30,7 +30,7 @@ fn bench_all(c: &mut Criterion, id: &str, slicer: Slicer, geoms: &[Geometry<i32>
     c.bench_function(id, |b| {
         b.iter(|| {
             for geom in geoms {
-                black_box(slicer.slice_all(black_box(geom)));
+                black_box(slicer.slice_all(black_box(geom)).expect("polyline"));
             }
         });
     });
@@ -41,7 +41,12 @@ fn bench_one(c: &mut Criterion, id: &str, slicer: Slicer, geoms: &[Geometry<i32>
     let cases: Vec<(&Geometry<i32>, Vec<TileId>)> = geoms
         .iter()
         .map(|geom| {
-            let tiles = slicer.slice_all(geom).into_iter().map(|(t, _)| t).collect();
+            let tiles = slicer
+                .slice_all(geom)
+                .expect("polyline")
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect();
             (geom, tiles)
         })
         .collect();
@@ -49,7 +54,7 @@ fn bench_one(c: &mut Criterion, id: &str, slicer: Slicer, geoms: &[Geometry<i32>
         b.iter(|| {
             for (geom, tiles) in &cases {
                 for &tile in tiles {
-                    black_box(slicer.slice(black_box(geom), tile));
+                    black_box(slicer.slice(black_box(geom), tile).expect("polyline"));
                 }
             }
         });

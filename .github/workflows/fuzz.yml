@@ -1,0 +1,53 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # nightly at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: 'Max fuzzing time per target, in seconds'
+        default: '600'
+
+defaults:
+  run:
+    shell: bash
+
+# A newer nightly run supersedes an in-flight one on the same ref.
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz slice_equivalence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Fuzzing should fail only on a crash/assertion, not on nightly-only lint drift (the justfile
+    # otherwise treats warnings as errors under CI).
+    env:
+      CARGO_BUILD_WARNINGS: warn
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nightly Rust (cargo-fuzz needs it)
+        uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: nightly }
+      - uses: taiki-e/install-action@v2.83.2
+        with: { tool: 'just,cargo-binstall' }
+      # Persist the corpus across runs so each night builds on prior coverage.
+      - name: Cache fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-slice_equivalence-${{ github.run_id }}
+          restore-keys: fuzz-corpus-slice_equivalence-
+      - name: Fuzz for the configured time (fails on any crash/assertion)
+        run: just fuzz slice_equivalence -- -max_total_time=${{ github.event.inputs.max_total_time || '600' }}
+      # On a finding, cargo-fuzz drops a reproducer in fuzz/artifacts — keep it.
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

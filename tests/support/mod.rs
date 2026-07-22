@@ -14,9 +14,17 @@ use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::{Feature, GeoJson, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::Slicer;
 
+/// `Slicer::new` for a compile-time-known-valid config (panics at compile time on a bad literal).
+const fn slicer(divider: u32, buffer: u16) -> Slicer {
+    match Slicer::new(divider, buffer) {
+        Ok(s) => s,
+        Err(_) => panic!("invalid slicer config in test support"),
+    }
+}
+
 /// Tile divider for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
-pub const SLICER: Slicer = Slicer::new(25, 0).expect("valid divider");
-pub const SLICER_BUFFER: Slicer = Slicer::new(25, 5).expect("valid divider");
+pub const SLICER: Slicer = slicer(25, 0);
+pub const SLICER_BUFFER: Slicer = slicer(25, 5);
 
 /// Slicing [`big_polyline`] with each of these yields a different number of output tiles, so the
 /// same large geometry can be benchmarked/profiled across output scales (shared by the benchmarks
@@ -25,9 +33,9 @@ pub const SLICER_BUFFER: Slicer = Slicer::new(25, 5).expect("valid divider");
 /// - `few` (divider 300) → a 2×2 grid of 4 tiles;
 /// - `single` (divider 1024) → the whole geometry in one tile.
 pub const BIG_CONFIGS: [(&str, Slicer); 3] = [
-    ("multi", Slicer::new(25, 0).unwrap()),
-    ("few", Slicer::new(300, 0).unwrap()),
-    ("single", Slicer::new(1024, 0).unwrap()),
+    ("multi", slicer(25, 0)),
+    ("few", slicer(300, 0)),
+    ("single", slicer(1024, 0)),
 ];
 
 /// Parse a fixture file into its (integer) polyline geometry. Fixtures are `FeatureCollection`s

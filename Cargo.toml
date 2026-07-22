@@ -16,6 +16,7 @@ harness = false
 
 [dependencies]
 geo-types = "0.7.19"
+thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.8.2"

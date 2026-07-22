@@ -7,12 +7,31 @@
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
-/// The component lines of a polyline geometry, borrowed (no allocation).
-pub(crate) fn each_line(geom: &Geometry<i32>) -> &[LineString<i32>] {
+use crate::Error;
+
+/// The component lines of a polyline geometry, borrowed (no allocation). Errors for any other
+/// geometry kind rather than panicking.
+pub(crate) fn each_line(geom: &Geometry<i32>) -> Result<&[LineString<i32>], Error> {
     match geom {
-        Geometry::LineString(ls) => std::slice::from_ref(ls),
-        Geometry::MultiLineString(mls) => &mls.0,
-        other => panic!("expected a polyline geometry, got {other:?}"),
+        Geometry::LineString(ls) => Ok(std::slice::from_ref(ls)),
+        Geometry::MultiLineString(mls) => Ok(&mls.0),
+        other => Err(Error::UnsupportedGeometry(geometry_kind(other))),
+    }
+}
+
+/// The name of a geometry variant, for error messages.
+fn geometry_kind(geom: &Geometry<i32>) -> &'static str {
+    match geom {
+        Geometry::Point(_) => "Point",
+        Geometry::Line(_) => "Line",
+        Geometry::LineString(_) => "LineString",
+        Geometry::Polygon(_) => "Polygon",
+        Geometry::MultiPoint(_) => "MultiPoint",
+        Geometry::MultiLineString(_) => "MultiLineString",
+        Geometry::MultiPolygon(_) => "MultiPolygon",
+        Geometry::GeometryCollection(_) => "GeometryCollection",
+        Geometry::Rect(_) => "Rect",
+        Geometry::Triangle(_) => "Triangle",
     }
 }
 

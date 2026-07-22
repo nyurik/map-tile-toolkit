@@ -47,6 +47,7 @@ fn main() {
         .map(|geom| {
             let tiles = slicer
                 .slice_all(&geom)
+                .expect("polyline")
                 .into_iter()
                 .map(|(t, _)| t)
                 .collect();
@@ -58,11 +59,11 @@ fn main() {
         for (geom, tiles) in &cases {
             match op {
                 Op::All => {
-                    black_box(slicer.slice_all(black_box(geom)));
+                    black_box(slicer.slice_all(black_box(geom)).expect("polyline"));
                 }
                 Op::One => {
                     for &tile in tiles {
-                        black_box(slicer.slice(black_box(geom), tile));
+                        black_box(slicer.slice(black_box(geom), tile).expect("polyline"));
                     }
                 }
             }

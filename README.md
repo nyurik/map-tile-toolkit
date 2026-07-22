@@ -17,6 +17,9 @@ new vertices at the tile edge.
 
 ## Usage
 
+The slicer never panics: invalid input (a non-polyline geometry, an oversized polyline, or
+coordinates that overflow the tile math) returns a `map_tile_toolkit::Error` instead.
+
 ```rust
 use geo_types::{Geometry, LineString};
 use map_tile_toolkit::{Slicer, TileId};
@@ -24,17 +27,18 @@ use map_tile_toolkit::{Slicer, TileId};
 // An integer polyline. With `divider = 25`, tiles are 25 units wide; `buffer` grows each tile's
 // clip box outward (0 = tight against the grid).
 let line = Geometry::LineString(LineString::from(vec![(5, 5), (20, 20), (60, 40)]));
-let slicer = Slicer::new(25, 0).unwrap();
+let slicer = Slicer::new(25, 0)?;
 
 // Batch: every tile the polyline touches, each piece in the input's coordinate space.
-for (tile, piece) in slicer.slice_all(&line) {
+for (tile, piece) in slicer.slice_all(&line)? {
     let _ = (tile, piece);
 }
 
 // Single tile: clip to one tile, or `None` when the line does not touch it.
-if let Some(piece) = slicer.slice(&line, TileId::new(0, 0)) {
+if let Some(piece) = slicer.slice(&line, TileId::new(0, 0))? {
     let _ = piece;
 }
+# Ok::<(), map_tile_toolkit::Error>(())
 ```
 
 `slice_all` and `slice` agree by construction: the pair `slice_all` yields for a tile equals what
