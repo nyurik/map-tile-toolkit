@@ -69,7 +69,7 @@ pub(crate) fn segment_intersects(
 /// a run grows across **consecutive segments that touch the box** — both endpoints of every segment
 /// in the run. A segment that misses the box ends the current run, so a segment crossing the box
 /// with no vertex inside is still kept, while a stretch that leaves and re-enters comes back as
-/// separate pieces. Each run of ≥2 vertices becomes one output line.
+/// separate pieces. Each run of ≥2 vertices is moved out as one output line (no copy).
 pub(crate) fn clip_line(
     line: &LineString<i32>,
     min: Coord<i32>,
@@ -85,8 +85,6 @@ pub(crate) fn clip_line(
         if let Some(a) = prev {
             if segment_intersects(a, c, min, max) {
                 if cur.is_empty() {
-                    // A run holds at most the whole line; reserve once to avoid repeated regrowth.
-                    cur.reserve(line.0.len());
                     cur.push(a);
                 }
                 cur.push(c);

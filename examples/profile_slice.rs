@@ -20,6 +20,9 @@ const SLICER: Slicer = Slicer {
     buffer: 0,
 };
 
+/// A fixture geometry paired with the tile ids it touches (precomputed, not part of the hot loop).
+type Case = (Geometry<i32>, Vec<TileId>);
+
 fn main() {
     let iterations = get_iterations();
     let cases = get_params();
@@ -41,7 +44,7 @@ fn get_iterations() -> u64 {
     iterations
 }
 
-fn get_params() -> Vec<(Geometry<i32>, Vec<TileId>)> {
+fn get_params() -> Vec<Case> {
     support::load_all_fixtures()
         .into_iter()
         .map(|(_, geom)| {
