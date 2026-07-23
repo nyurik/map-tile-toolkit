@@ -14,6 +14,11 @@ pub enum SliceError {
     #[error("divider must be between 1 and {}", i32::MAX)]
     InvalidDivider,
 
+    /// The `buffer` was too large for the tile size: it must be **strictly less than half** the
+    /// `divider`, so geometry near a tile edge spills into at most one neighbouring tile per axis.
+    #[error("buffer must be strictly less than half the divider")]
+    BufferTooLarge,
+
     /// The geometry was not a `LineString` or `MultiLineString` (the only kinds the slicer clips).
     #[error("expected a LineString or MultiLineString, got a {0}")]
     UnsupportedGeometry(&'static str),

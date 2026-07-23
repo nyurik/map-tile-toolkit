@@ -17,6 +17,13 @@
 //! vertex at global `(x, y)` is `(x − tile.x·divider, y − tile.y·divider)` (in-tile vertices land in
 //! `0..divider`; buffer vertices past the low edge go negative). [`merge`](crate::merge) is the
 //! inverse, stitching a tile's pieces back together.
+//!
+//! ## Storage
+//!
+//! A tile's geometry is stored **flattened** in a [`TileBuf`]: every vertex concatenated into one
+//! `verts` arena, with run and feature boundaries kept as `u32` offset arrays rather than nested
+//! `Vec`s. [`SlicerAll`] keeps the tiles in a `Vec<TileBuf>` (stable slots) plus a `BTreeMap` from
+//! [`TileId`] to slot for find-or-insert and ordered reads; [`SlicerOne`] holds a single `TileBuf`.
 
 use std::collections::BTreeMap;
 
@@ -27,96 +34,149 @@ use crate::grid::Grid;
 use crate::tile::TileId;
 use crate::vertex::Vertex;
 
-/// One accumulated feature: its runs (each a vertex list) in a tile's local frame, tagged with the
-/// feature id it belongs to so [`continue_last_feature`](SlicerAll::continue_last_feature) can find
-/// the currently-open feature within a tile that may hold several.
-type FeatureRuns<V> = (u64, Vec<Vec<V>>);
+/// One tile's accumulated geometry, flattened: all runs' vertices concatenated into `verts`, with
+/// run and feature boundaries kept as offsets instead of nested `Vec`s.
+///
+/// - run `r` is `verts[run_ends[r-1] .. run_ends[r]]` (with `run_ends[-1] ≡ 0`);
+/// - feature `f` is the runs `run_ends[feat_ends[f-1] .. feat_ends[f]]`.
+///
+/// `last_id` is the feature id of the most-recent feature written here, so
+/// [`continue_last_feature`](SlicerAll::continue_last_feature) can tell whether the currently-open
+/// feature already reached this tile (extend it) or not (start a new one). Only non-empty features
+/// are ever recorded, so every `feat_ends` span holds at least one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TileBuf<V> {
+    tile: TileId,
+    verts: Vec<V>,
+    run_ends: Vec<u32>,
+    feat_ends: Vec<u32>,
+    last_id: u32,
+}
 
-/// Fold `runs` into `entries` under feature `id`: extend the last feature if it is `id` (the open
-/// feature reached this tile before), otherwise start a new feature. Empty `runs` are dropped, so a
-/// feature materializes in a tile only once something of it lands there. Feature ids only ever grow,
-/// so the open feature — when present — is always the last entry, keeping `entries` in id order.
-fn absorb<V: Vertex>(entries: &mut Vec<FeatureRuns<V>>, id: u64, runs: Vec<Vec<V>>) {
-    if runs.is_empty() {
-        return;
+impl<V> TileBuf<V> {
+    fn new(tile: TileId) -> Self {
+        Self {
+            tile,
+            verts: Vec::new(),
+            run_ends: Vec::new(),
+            feat_ends: Vec::new(),
+            last_id: 0,
+        }
     }
-    match entries.last_mut() {
-        Some((last, feat)) if *last == id => feat.extend(runs),
-        _ => entries.push((id, runs)),
+
+    /// Append one run's vertices to the arena and record its end offset.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a tile holds far fewer than u32::MAX vertices (a polyline is capped at u16 each)"
+    )]
+    fn push_run(&mut self, run: Vec<V>) {
+        self.verts.extend(run);
+        self.run_ends.push(self.verts.len() as u32);
+    }
+
+    /// Fold non-empty `runs` into this tile under feature `id`: extend the tile's last feature if it
+    /// is already `id` (the open feature reached this tile before), otherwise start a new feature.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "run count per tile stays far below u32::MAX"
+    )]
+    fn absorb(&mut self, id: u32, runs: Vec<Vec<V>>) {
+        debug_assert!(!runs.is_empty(), "empty features are never recorded");
+        let extend = self.last_id == id && !self.feat_ends.is_empty();
+        for run in runs {
+            self.push_run(run);
+        }
+        if extend {
+            *self
+                .feat_ends
+                .last_mut()
+                .expect("extend implies a feature exists") = self.run_ends.len() as u32;
+        } else {
+            self.feat_ends.push(self.run_ends.len() as u32);
+            self.last_id = id;
+        }
+    }
+}
+
+/// Iterate a tile's features from its flat offset arrays, reconstructing each as a [`FeatureView`].
+fn features_of<V: Vertex>(
+    buf: &TileBuf<V>,
+) -> impl Iterator<Item = FeatureView<'_, V>> + use<'_, V> {
+    let verts = buf.verts.as_slice();
+    let run_ends = buf.run_ends.as_slice();
+    let feat_ends = buf.feat_ends.as_slice();
+    (0..feat_ends.len()).map(move |f| {
+        let rs = if f == 0 { 0 } else { feat_ends[f - 1] as usize };
+        let re = feat_ends[f] as usize;
+        // Vertex offset where this feature's first run begins (end of the previous feature's run).
+        let start = if rs == 0 { 0 } else { run_ends[rs - 1] };
+        FeatureView {
+            verts,
+            run_ends: &run_ends[rs..re],
+            start,
+        }
+    })
+}
+
+/// Reserve a fresh feature id and mark it open (for [`SlicerAll::add_feature`]).
+fn begin_feature(next: &mut u32, open: &mut Option<u32>) -> u32 {
+    let id = *next;
+    // Wraps only after u32::MAX features in one slicer — astronomically beyond any real use; wrapping
+    // (rather than a debug-panic on overflow) keeps the "never panic" guarantee.
+    *next = next.wrapping_add(1);
+    *open = Some(id);
+    id
+}
+
+/// The currently-open feature id, beginning a new one if none is open (for `continue_last_feature`).
+fn resume_feature(next: &mut u32, open: &mut Option<u32>) -> u32 {
+    match *open {
+        Some(id) => id,
+        None => begin_feature(next, open),
     }
 }
 
 /// A borrowed view of one tile's accumulated features, yielded by [`SlicerAll::iter_tiles`].
 pub struct TileView<'a, V: Vertex> {
-    id: TileId,
-    features: &'a [FeatureRuns<V>],
+    buf: &'a TileBuf<V>,
 }
 
 impl<'a, V: Vertex> TileView<'a, V> {
     /// The tile this view is for.
     #[must_use]
     pub fn id(&self) -> TileId {
-        self.id
+        self.buf.tile
     }
 
     /// Iterate this tile's features, in the order they were first added.
     pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'a, V>> + use<'a, V> {
-        self.features.iter().map(|(_, runs)| FeatureView {
-            runs: runs.as_slice(),
-        })
+        features_of(self.buf)
     }
 }
 
 /// A borrowed view of one feature's clipped polylines within a tile, yielded by
 /// [`TileView::iter_features`] / [`SlicerOne::iter_features`].
 pub struct FeatureView<'a, V: Vertex> {
-    runs: &'a [Vec<V>],
+    /// The whole tile's vertex arena; polylines are subslices of it.
+    verts: &'a [V],
+    /// End offsets (into `verts`) of this feature's runs.
+    run_ends: &'a [u32],
+    /// Vertex offset where this feature's first run begins.
+    start: u32,
 }
 
 impl<'a, V: Vertex> FeatureView<'a, V> {
     /// Iterate this feature's polylines (runs) in this tile, each a vertex slice in the tile's local
     /// frame. A feature yields several polylines where the input left the tile and re-entered.
     pub fn iter_polylines(&self) -> impl Iterator<Item = &'a [V]> + use<'a, V> {
-        self.runs.iter().map(Vec::as_slice)
-    }
-}
-
-/// The next feature id to hand out, and the currently-open one (for `continue_last_feature`).
-///
-/// Shared bookkeeping between [`SlicerAll`] and [`SlicerOne`]: `add_feature` opens a fresh id;
-/// `continue_last_feature` reuses the open id, opening a fresh one if none is open yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FeatureCounter {
-    next: u64,
-    open: Option<u64>,
-}
-
-impl FeatureCounter {
-    const fn new() -> Self {
-        Self {
-            next: 0,
-            open: None,
-        }
-    }
-
-    /// Open a brand-new feature and return its id (for `add_feature`).
-    fn open_new(&mut self) -> u64 {
-        let id = self.next;
-        self.next += 1;
-        self.open = Some(id);
-        id
-    }
-
-    /// The open feature's id, opening a new one if none is open (for `continue_last_feature`).
-    fn open_or_new(&mut self) -> u64 {
-        match self.open {
-            Some(id) => id,
-            None => self.open_new(),
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
+        let verts = self.verts;
+        let mut prev = self.start as usize;
+        self.run_ends.iter().map(move |&end| {
+            let end = end as usize;
+            let run = &verts[prev..end];
+            prev = end;
+            run
+        })
     }
 }
 
@@ -134,8 +194,15 @@ impl FeatureCounter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerAll<V: Vertex = Coord<i32>> {
     grid: Grid,
-    features: FeatureCounter,
-    tiles: BTreeMap<TileId, Vec<FeatureRuns<V>>>,
+    /// Next feature id to hand out.
+    next_feature: u32,
+    /// The currently-open feature id (for `continue_last_feature`), if any.
+    open: Option<u32>,
+    /// Per-tile buffers in insertion order; slots are stable (never moved) so `index` can address
+    /// them by position.
+    tiles: Vec<TileBuf<V>>,
+    /// [`TileId`] → slot in `tiles`, ordered so reads come out by tile and find-or-insert is cheap.
+    index: BTreeMap<TileId, u32>,
 }
 
 impl<V: Vertex> SlicerAll<V> {
@@ -143,12 +210,15 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `divider`.
     pub fn new(divider: u32, buffer: u16) -> Result<Self, SliceError> {
         Ok(Self {
             grid: Grid::new(divider, buffer)?,
-            features: FeatureCounter::new(),
-            tiles: BTreeMap::new(),
+            next_feature: 0,
+            open: None,
+            tiles: Vec::new(),
+            index: BTreeMap::new(),
         })
     }
 
@@ -171,13 +241,13 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or
-    /// [`SliceError::Overflow`].
+    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`],
+    /// or [`SliceError::Overflow`].
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
         let sliced = self.grid.slice_all(polyline.as_ref())?;
-        let id = self.features.open_new();
+        let id = begin_feature(&mut self.next_feature, &mut self.open);
         for (tile, runs) in sliced {
-            absorb(self.tiles.entry(tile).or_default(), id, runs);
+            self.absorb_tile(tile, id, runs);
         }
         Ok(self)
     }
@@ -191,26 +261,44 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or
-    /// [`SliceError::Overflow`].
+    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`],
+    /// or [`SliceError::Overflow`].
     pub fn continue_last_feature<P: AsRef<[V]>>(
         &mut self,
         polyline: P,
     ) -> Result<&mut Self, SliceError> {
         let sliced = self.grid.slice_all(polyline.as_ref())?;
-        let id = self.features.open_or_new();
+        let id = resume_feature(&mut self.next_feature, &mut self.open);
         for (tile, runs) in sliced {
-            absorb(self.tiles.entry(tile).or_default(), id, runs);
+            self.absorb_tile(tile, id, runs);
         }
         Ok(self)
+    }
+
+    /// Fold `runs` (always non-empty, straight from the engine) into `tile`'s buffer under feature
+    /// `id`, creating the buffer on first touch.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "tile count stays far below u32::MAX"
+    )]
+    fn absorb_tile(&mut self, tile: TileId, id: u32, runs: Vec<Vec<V>>) {
+        let slot = if let Some(&slot) = self.index.get(&tile) {
+            slot
+        } else {
+            let slot = self.tiles.len() as u32;
+            self.tiles.push(TileBuf::new(tile));
+            self.index.insert(tile, slot);
+            slot
+        };
+        self.tiles[slot as usize].absorb(id, runs);
     }
 
     /// Iterate the touched tiles, ordered by [`TileId`], borrowing so the accumulator can keep
     /// growing afterwards. Each [`TileView`] exposes that tile's features.
     pub fn iter_tiles(&self) -> impl Iterator<Item = TileView<'_, V>> {
-        self.tiles.iter().map(|(&id, features)| TileView {
-            id,
-            features: features.as_slice(),
+        let tiles = self.tiles.as_slice();
+        self.index.values().map(move |&slot| TileView {
+            buf: &tiles[slot as usize],
         })
     }
 
@@ -229,7 +317,9 @@ impl<V: Vertex> SlicerAll<V> {
     /// Discard everything accumulated so far, keeping the divider/buffer config.
     pub fn clear(&mut self) {
         self.tiles.clear();
-        self.features.reset();
+        self.index.clear();
+        self.next_feature = 0;
+        self.open = None;
     }
 }
 
@@ -244,9 +334,9 @@ impl<V: Vertex> SlicerAll<V> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerOne<V: Vertex = Coord<i32>> {
     grid: Grid,
-    tile: TileId,
-    features: FeatureCounter,
-    runs: Vec<FeatureRuns<V>>,
+    next_feature: u32,
+    open: Option<u32>,
+    buf: TileBuf<V>,
 }
 
 impl<V: Vertex> SlicerOne<V> {
@@ -255,13 +345,14 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `divider`.
     pub fn new(divider: u32, buffer: u16, tile: TileId) -> Result<Self, SliceError> {
         Ok(Self {
             grid: Grid::new(divider, buffer)?,
-            tile,
-            features: FeatureCounter::new(),
-            runs: Vec::new(),
+            next_feature: 0,
+            open: None,
+            buf: TileBuf::new(tile),
         })
     }
 
@@ -280,7 +371,7 @@ impl<V: Vertex> SlicerOne<V> {
     /// The tile this slicer clips into.
     #[must_use]
     pub fn tile(&self) -> TileId {
-        self.tile
+        self.buf.tile
     }
 
     /// Begin a new feature from `polyline`, clipped to this slicer's [`tile`](Self::tile). Chainable.
@@ -292,9 +383,11 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
-        let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
-        let id = self.features.open_new();
-        absorb(&mut self.runs, id, runs);
+        let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
+        let id = begin_feature(&mut self.next_feature, &mut self.open);
+        if !runs.is_empty() {
+            self.buf.absorb(id, runs);
+        }
         Ok(self)
     }
 
@@ -311,35 +404,36 @@ impl<V: Vertex> SlicerOne<V> {
         &mut self,
         polyline: P,
     ) -> Result<&mut Self, SliceError> {
-        let runs = self.grid.slice_one(polyline.as_ref(), self.tile)?;
-        let id = self.features.open_or_new();
-        absorb(&mut self.runs, id, runs);
+        let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
+        let id = resume_feature(&mut self.next_feature, &mut self.open);
+        if !runs.is_empty() {
+            self.buf.absorb(id, runs);
+        }
         Ok(self)
     }
 
     /// Iterate this tile's features, in the order they were first added. Each [`FeatureView`] exposes
     /// that feature's clipped polylines.
     pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'_, V>> {
-        self.runs.iter().map(|(_, runs)| FeatureView {
-            runs: runs.as_slice(),
-        })
+        features_of(&self.buf)
     }
 
     /// Number of features accumulated for the tile.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.runs.len()
+        self.buf.feat_ends.len()
     }
 
     /// Whether nothing has been accumulated yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.runs.is_empty()
+        self.buf.feat_ends.is_empty()
     }
 
     /// Discard everything accumulated so far, keeping the divider/buffer/tile config.
     pub fn clear(&mut self) {
-        self.runs.clear();
-        self.features.reset();
+        self.buf = TileBuf::new(self.buf.tile);
+        self.next_feature = 0;
+        self.open = None;
     }
 }

@@ -21,14 +21,14 @@ The core API works on a plain **polyline** — anything sliceable to `[Coord]` (
 an array). Two slicers accumulate the results: `SlicerAll` keeps every tile a polyline touches, and
 `SlicerOne` keeps a single, fixed tile. Each polyline is added as (part of) a **feature** and read
 back with iterators — never owned `Vec`s. The slicer never panics: bad input (an oversized polyline,
-or coordinates that overflow the tile math) returns a `map_tile_toolkit::Error` instead.
+or coordinates that overflow the tile math) returns a `map_tile_toolkit::SliceError` instead.
 
 ```rust
 use geo_types::Coord;
 use map_tile_toolkit::{SlicerAll, TileId};
 
-// An integer polyline. `divider = 25` → 25-unit tiles; `buffer` grows each
-// tile's clip box outward (0 = tight against the grid).
+// An integer polyline. `divider = 25` → 25-unit tiles; `buffer` grows each tile's clip box
+// outward (0 = tight against the grid; must be strictly less than half the divider).
 let line = [Coord { x: 5, y: 5 }, Coord { x: 20, y: 20 }, Coord { x: 60, y: 40 }];
 
 let mut slicer = SlicerAll::new(25, 0)?;
@@ -45,7 +45,7 @@ for tile in slicer.iter_tiles() {
         }
     }
 }
-# Ok::<(), map_tile_toolkit::Error>(())
+# Ok::<(), map_tile_toolkit::SliceError>(())
 ```
 
 For a single tile, `SlicerOne` skips the tile level — `iter_features` yields the features directly:
@@ -63,7 +63,7 @@ for feature in tile.iter_features() {
         let _ = polyline; // clipped to tile (0, 0), in its local frame
     }
 }
-# Ok::<(), map_tile_toolkit::Error>(())
+# Ok::<(), map_tile_toolkit::SliceError>(())
 ```
 
 `SlicerAll` and `SlicerOne` agree by construction: the polylines `SlicerAll` yields for a tile equal
@@ -99,7 +99,7 @@ let tiles: Vec<(TileId, Vec<&[Coord<i32>]>)> = slicer
 if let [(ta, ra), (tb, rb), ..] = tiles.as_slice() {
     let _merged = merge(slicer.divider(), (*ta, ra.as_slice()), (*tb, rb.as_slice()))?;
 }
-# Ok::<(), map_tile_toolkit::Error>(())
+# Ok::<(), map_tile_toolkit::SliceError>(())
 ```
 
 ### Per-vertex payloads (M values)
@@ -127,7 +127,7 @@ for tile in slicer.iter_tiles() {
         }
     }
 }
-# Ok::<(), map_tile_toolkit::Error>(())
+# Ok::<(), map_tile_toolkit::SliceError>(())
 ```
 
 ### `geo-types` geometries
@@ -148,7 +148,7 @@ for (tile, piece) in slicer.iter_geometries() {
     let _ = (tile, piece); // piece: LineString or MultiLineString in the tile's local frame
 }
 # }
-# Ok::<(), map_tile_toolkit::Error>(())
+# Ok::<(), map_tile_toolkit::SliceError>(())
 ```
 
 ## Development

@@ -66,16 +66,22 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// Returns [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::BufferTooLarge`] if `2 * buffer >= divider` — the buffer must stay under half
+    ///   a tile, so a vertex near an edge spills into at most one neighbour per axis and the
+    ///   tile-minus-buffer inner box stays non-empty (both relied on by the routing).
     pub(crate) const fn new(divider: u32, buffer: u16) -> Result<Self, SliceError> {
         if divider == 0 || divider > i32::MAX.cast_unsigned() {
-            Err(SliceError::InvalidDivider)
-        } else {
-            Ok(Self {
-                divider: divider.cast_signed(),
-                buffer: buffer as i32,
-            })
+            return Err(SliceError::InvalidDivider);
         }
+        // `2 * buffer` cannot overflow: `buffer <= u16::MAX`, so the product fits `u32`.
+        if 2 * (buffer as u32) >= divider {
+            return Err(SliceError::BufferTooLarge);
+        }
+        Ok(Self {
+            divider: divider.cast_signed(),
+            buffer: buffer as i32,
+        })
     }
 
     /// The tile side length, in coordinate units.

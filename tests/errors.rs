@@ -31,6 +31,22 @@ fn invalid_divider() {
     );
 }
 
+#[test]
+fn buffer_too_large() {
+    // `buffer` must be strictly less than half the `divider` (i.e. `2*buffer < divider`).
+    assert_eq!(all(10, 5).err(), Some(SliceError::BufferTooLarge)); // 2*5 == 10, not < 10
+    assert_eq!(all(10, 6).err(), Some(SliceError::BufferTooLarge));
+    assert!(all(10, 4).is_ok()); // 2*4 == 8 < 10
+    // With divider 1 only a zero buffer is allowed.
+    assert!(all(1, 0).is_ok());
+    assert_eq!(all(2, 1).err(), Some(SliceError::BufferTooLarge));
+    // Both slicers validate the buffer the same way.
+    assert_eq!(
+        SlicerOne::<Coord<i32>>::new(10, 5, TileId::new(0, 0)).err(),
+        Some(SliceError::BufferTooLarge)
+    );
+}
+
 #[cfg(feature = "geo")]
 #[test]
 fn non_polyline_geometry_errors() {
