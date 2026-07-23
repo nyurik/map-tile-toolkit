@@ -32,11 +32,11 @@ jobs:
       - name: Install nightly Rust (cargo-fuzz needs it)
         uses: dtolnay/rust-toolchain@stable
         with: { toolchain: nightly }
-      - uses: taiki-e/install-action@v2.83.2
+      - uses: taiki-e/install-action@v2.83.3
         with: { tool: 'just,cargo-binstall' }
       # Persist the corpus across runs so each night builds on prior coverage.
       - name: Cache fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-slice_equivalence-${{ github.run_id }}
@@ -46,7 +46,7 @@ jobs:
       # On a finding, cargo-fuzz drops a reproducer in fuzz/artifacts — keep it.
       - name: Upload crash reproducers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
