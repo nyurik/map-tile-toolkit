@@ -42,6 +42,43 @@ const MAX_TILE_VISITS: i64 = 1 << 25;
 /// frame, ordered by [`TileId`].
 pub(crate) type TileRuns<V> = Vec<(TileId, Vec<Vec<V>>)>;
 
+/// A vertex's owner tile with its core cell and inner box precomputed in **global** coordinates, so
+/// membership tests are plain comparisons with no division. [`Grid::slice_all`] caches the last one
+/// across the vertex walk: consecutive vertices in the same tile reuse it, and a segment whose two
+/// endpoints both lie in the inner box touches only that one tile.
+///
+/// - the **core cell** `[base, base + divider − 1]` is the tile's own cell (owning `base = owner ·
+///   divider`); a coordinate here has this tile as its owner.
+/// - the **inner box** `[base + buffer, base + divider − 1 − buffer]` is the core shrunk by the
+///   buffer; a segment with both endpoints inside it stays ≥ `buffer` from every edge, so it cannot
+///   reach any neighbouring tile's buffered box.
+#[derive(Clone, Copy)]
+struct Located {
+    owner: TileId,
+    core_lo: Coord<i32>,
+    core_hi: Coord<i32>,
+    inner_lo: Coord<i32>,
+    inner_hi: Coord<i32>,
+}
+
+impl Located {
+    /// Does `c`'s owner tile equal this one (is `c` in the core cell)?
+    fn contains_core(&self, c: Coord<i32>) -> bool {
+        c.x >= self.core_lo.x
+            && c.x <= self.core_hi.x
+            && c.y >= self.core_lo.y
+            && c.y <= self.core_hi.y
+    }
+
+    /// Is `c` in the inner box (≥ `buffer` from every cell edge)?
+    fn contains_inner(&self, c: Coord<i32>) -> bool {
+        c.x >= self.inner_lo.x
+            && c.x <= self.inner_hi.x
+            && c.y >= self.inner_lo.y
+            && c.y <= self.inner_hi.y
+    }
+}
+
 /// The tile geometry a slicer clips against: a tile side and a buffer, plus the clipping engine.
 ///
 /// A tile of side [`divider`](Self::divider) covers the closed square
@@ -146,7 +183,11 @@ impl Grid {
     /// without re-clipping the whole polyline once per tile.
     ///
     /// Vertex/tile ranges are validated up front, so the hot loop packs into `Hit` without per-item
-    /// bounds checks.
+    /// bounds checks. As a fast path, a segment whose two endpoints both lie in one tile's inner box
+    /// (≥ `buffer` from every edge) is routed straight to that single tile — the common case for a
+    /// dense polyline — skipping the per-corner `tile_of` and the per-candidate geometry test. The
+    /// owning tile is cached across the walk (see [`Located`]), so division happens only when the
+    /// polyline crosses into a new tile.
     ///
     /// # Errors
     ///
@@ -193,48 +234,82 @@ impl Grid {
         // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
         // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.
         let mut budget: i64 = MAX_TILE_VISITS;
-        // Carry the previous vertex (index + position) so the segment start needs no re-index.
+        // Carry the previous vertex (index + position) and its located tile, so a segment whose two
+        // endpoints share one tile's inner box needs no division or geometry test at all.
         let mut prev: Option<(usize, Coord<i32>)> = None;
+        let mut prev_loc: Option<Located> = None;
         for (idx, v) in poly.iter().enumerate() {
             let c = v.position();
             if let Some((p, a)) = prev {
                 if a == c {
-                    continue; // drop a consecutive duplicate vertex (keep `prev` at `p`)
+                    continue; // drop a consecutive duplicate vertex (keep `prev`/`prev_loc` at `p`)
                 }
-                let lo = tile_of(
-                    Coord {
-                        x: a.x.min(c.x) - self.buffer,
-                        y: a.y.min(c.y) - self.buffer,
-                    },
-                    self.divider,
-                );
-                let hi = tile_of(
-                    Coord {
-                        x: a.x.max(c.x) + self.buffer,
-                        y: a.y.max(c.y) + self.buffer,
-                    },
-                    self.divider,
-                );
-                // Charge this segment's candidate-tile box (in range: lo/hi ∈ [lo_tile, hi_tile]).
-                budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
-                    * (i64::from(hi.y) - i64::from(lo.y) + 1);
-                if budget < 0 {
-                    return Err(SliceError::TooManyTiles);
-                }
-                for ty in lo.y..=hi.y {
-                    let dy = (ty - reference.y) as i16;
-                    for tx in lo.x..=hi.x {
-                        let tile = TileId::new(tx, ty);
-                        let (min, max) = self.tile_bounds(tile)?;
-                        if segment_intersects(a, c, min, max) {
-                            let dx = (tx - reference.x) as i16;
-                            hits.push(Hit {
-                                dx,
-                                dy,
-                                i0: p as u16,
-                            });
+                // `a`'s tile: carried from the previous step, or located now for the first segment.
+                let la = match prev_loc {
+                    Some(l) => l,
+                    None => self.locate(a)?,
+                };
+                if la.contains_inner(a) && la.contains_inner(c) {
+                    // Fast path: the whole segment lies in `la`'s inner box, so it touches only that
+                    // tile. This is exactly what the scan below would produce — `lo == hi ==
+                    // la.owner`, and both endpoints are inside, so `segment_intersects` is trivially
+                    // true — but with no `tile_of`, `tile_bounds`, or geometry test.
+                    budget -= 1;
+                    if budget < 0 {
+                        return Err(SliceError::TooManyTiles);
+                    }
+                    let dx = (la.owner.x - reference.x) as i16;
+                    let dy = (la.owner.y - reference.y) as i16;
+                    hits.push(Hit {
+                        dx,
+                        dy,
+                        i0: p as u16,
+                    });
+                    prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
+                } else {
+                    // Slow path: route the segment through every candidate tile it might touch.
+                    let lo = tile_of(
+                        Coord {
+                            x: a.x.min(c.x) - self.buffer,
+                            y: a.y.min(c.y) - self.buffer,
+                        },
+                        self.divider,
+                    );
+                    let hi = tile_of(
+                        Coord {
+                            x: a.x.max(c.x) + self.buffer,
+                            y: a.y.max(c.y) + self.buffer,
+                        },
+                        self.divider,
+                    );
+                    // Charge this segment's candidate-tile box (in range: lo/hi ∈ [lo_tile, hi_tile]).
+                    budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
+                        * (i64::from(hi.y) - i64::from(lo.y) + 1);
+                    if budget < 0 {
+                        return Err(SliceError::TooManyTiles);
+                    }
+                    for ty in lo.y..=hi.y {
+                        let dy = (ty - reference.y) as i16;
+                        for tx in lo.x..=hi.x {
+                            let tile = TileId::new(tx, ty);
+                            let (min, max) = self.tile_bounds(tile)?;
+                            if segment_intersects(a, c, min, max) {
+                                let dx = (tx - reference.x) as i16;
+                                hits.push(Hit {
+                                    dx,
+                                    dy,
+                                    i0: p as u16,
+                                });
+                            }
                         }
                     }
+                    // `c`'s tile for the next step: reuse `la` if `c` shares its core, else locate it
+                    // (its box was just validated in the scan above, so this cannot newly error).
+                    prev_loc = Some(if la.contains_core(c) {
+                        la
+                    } else {
+                        self.locate(c)?
+                    });
                 }
             }
             prev = Some((idx, c));
@@ -360,6 +435,35 @@ impl Grid {
                 y: base_y.checked_add(reach).ok_or(SliceError::Overflow)?,
             },
         ))
+    }
+
+    /// Locate the tile owning `c`, with its core and inner boxes precomputed (see [`Located`]). Built
+    /// on [`Self::tile_bounds`], so it reports [`SliceError::Overflow`] for exactly the tiles the
+    /// routing scan would — `min = base − buffer` and `max = base + divider − 1 + buffer`, from which
+    /// the core (`base .. base + divider − 1`) and inner (`base + buffer .. max − 2·buffer`) follow by
+    /// `± buffer` (all within `[min, max]`, so no further overflow).
+    fn locate(self, c: Coord<i32>) -> Result<Located, SliceError> {
+        let owner = tile_of(c, self.divider);
+        let (min, max) = self.tile_bounds(owner)?;
+        Ok(Located {
+            owner,
+            core_lo: Coord {
+                x: min.x + self.buffer,
+                y: min.y + self.buffer,
+            },
+            core_hi: Coord {
+                x: max.x - self.buffer,
+                y: max.y - self.buffer,
+            },
+            inner_lo: Coord {
+                x: min.x + 2 * self.buffer,
+                y: min.y + 2 * self.buffer,
+            },
+            inner_hi: Coord {
+                x: max.x - 2 * self.buffer,
+                y: max.y - 2 * self.buffer,
+            },
+        })
     }
 
     /// The lowest and highest tiles any part of `poly` can reach: the coordinate bounding box grown by

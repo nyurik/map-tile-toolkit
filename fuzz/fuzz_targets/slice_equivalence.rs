@@ -13,7 +13,8 @@
 //!      divider makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
 //! 3. Accumulating all polylines never panics, and **merge is order-independent:** `merge(a, b)`
-//!    equals `merge(b, a)` for every adjacent pair of accumulated tiles.
+//!    reconstructs the same connectivity (directed-edge set) as `merge(b, a)` for every adjacent
+//!    pair of accumulated tiles. (The *order* of the returned runs is unspecified.)
 //!
 //! Coordinates are `i8` (small, so slicing stays fast and the invariants get many cheap
 //! iterations); the divider/buffer range freely and the probe tile is a full `i32`, so the
@@ -22,7 +23,7 @@
 
 #![no_main]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use arbitrary::Arbitrary;
 use geo_types::Coord;
@@ -144,7 +145,8 @@ fuzz_target!(|input: Input| {
         assert_eq!(all, all_duped, "duplicating every vertex changed the result");
     }
 
-    // (5) Accumulating all polylines never panics; merge is order-independent on the result.
+    // (5) Accumulating all polylines never panics; merge reconstructs the same connectivity on the
+    // result regardless of the order its two tiles are passed.
     let mut acc = SlicerAll::new(divider, buffer).expect("divider validated");
     for poly in &polylines {
         if acc.add_feature(poly).is_err() {
@@ -161,10 +163,38 @@ fuzz_target!(|input: Input| {
             };
             let ab = merge(divider, (t, a.as_slice()), (n, b.as_slice()));
             let ba = merge(divider, (n, b.as_slice()), (t, a.as_slice()));
-            assert_eq!(ab, ba, "merge is not order-independent for {t:?}/{n:?}");
+            // `merge` reconstructs the same *connectivity* regardless of input order; the *order* of
+            // the returned runs is unspecified (disconnected components come out first-seen), so
+            // compare directed-edge sets, not the run vectors — same contract as `tests/merge.rs`.
+            match (ab, ba) {
+                (Ok(ab), Ok(ba)) => assert_eq!(
+                    edge_set(&ab),
+                    edge_set(&ba),
+                    "merge connectivity differs by input order for {t:?}/{n:?}"
+                ),
+                (ab, ba) => assert_eq!(
+                    ab.is_ok(),
+                    ba.is_ok(),
+                    "merge succeeds in only one input order for {t:?}/{n:?}"
+                ),
+            }
         }
     }
 });
+
+/// Directed-edge set of a run list, skipping zero-length edges — the connectivity `merge` must
+/// preserve regardless of the order its two inputs are given. Mirrors the `tests/merge.rs` oracle.
+fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
+    let mut set = HashSet::new();
+    for run in runs {
+        for w in run.windows(2) {
+            if w[0] != w[1] {
+                set.insert((w[0], w[1]));
+            }
+        }
+    }
+    set
+}
 
 /// Tile span any piece of `poly` can reach: every vertex's tile grown by the buffer (in tiles) plus
 /// one tile of slack. `None` if `poly` is empty. A superset of what the all-tiles pass can return, so
