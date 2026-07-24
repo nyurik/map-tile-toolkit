@@ -1,11 +1,12 @@
 //! [`Mosaic`] reassembles sliced tiles back into whole features.
 //!
-//! The headline test is data-driven: for every fixture it slices the input into tiles, then for
-//! **every permutation** of the tile-insertion order builds a fresh mosaic, checks every `add`
+//! One data-driven test loads **every** fixture (sorted), slices them all into one set of tiles, then
+//! for **every permutation** of the tile-insertion order builds a fresh mosaic, checks every `add`
 //! succeeds (a slicer's own tiles are self-consistent, so none ever conflict), and checks the
-//! reassembled geometry equals the original input's — proving order-independence. Buffer 0 keeps the
-//! tile count small enough to enumerate all permutations (the largest fixture touches 6 tiles → 720
-//! orders); an assertion trips loudly if a future fixture grows past a safe bound.
+//! reassembled geometry equals the combined input's — proving order-independence over all fixtures at
+//! once. The extent is chosen coarse enough that the whole fixture set lands in a handful of tiles, so
+//! all permutations stay enumerable while the geometry itself is unchanged; an assertion trips loudly
+//! if that count grows past a safe bound.
 //!
 //! Reassembly is compared by **directed-edge set**: the mosaic re-chains the geometry by connectivity,
 //! so a self-touching path or a shared junction may come back split/joined differently than the input
@@ -14,12 +15,36 @@
 #![allow(clippy::pedantic, reason = "test tool")]
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use geo_types::Coord;
 use map_tile_toolkit::{Mosaic, TileId};
 
 mod support;
+
+/// Extent for the combined test: coarse enough that all fixtures together land in a small number of
+/// tiles (5 at the time of writing → `5! = 120` orders), keeping every permutation cheap to enumerate.
+/// The geometry is unchanged — only the grid is coarser than the 25-unit fixture grid.
+const EXTENT: u32 = 50;
+
+/// The most tiles the combined fixtures may touch before permutations get expensive (`7! = 5040`).
+const MAX_TILES: usize = 7;
+
+/// Every fixture's polylines, files sorted for a stable order.
+fn all_fixture_polylines() -> Vec<Vec<Coord<i32>>> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("fixtures dir exists")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("geojson"))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "no fixtures found");
+    paths
+        .iter()
+        .flat_map(|p| support::load_fixture(p))
+        .collect()
+}
 
 /// Directed-edge set of a run list, skipping zero-length edges (slicing drops consecutive dups).
 fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
@@ -34,7 +59,7 @@ fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
     set
 }
 
-/// Every permutation of `0..n` (n is small — a fixture touches at most a handful of tiles).
+/// Every permutation of `0..n`.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
     assert!(n < 10, "permutations of {n} is too many to enumerate");
 
@@ -55,32 +80,23 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
-mod files {
-    use test_each_file::test_each_path;
+#[test]
+fn every_permutation_reassembles_all_fixtures() {
+    let cfg = support::slicer(EXTENT, 0);
+    let polylines = all_fixture_polylines();
 
-    use super::reassemble_one_fixture;
-
-    // Generate one test per input fixture.
-    test_each_path! { for ["geojson"] in "./tests/fixtures" => reassemble_one_fixture }
-}
-
-fn reassemble_one_fixture([path]: [&Path; 1]) {
-    let cfg = support::grid();
-    let extent = cfg.extent();
-    let polylines = support::load_fixture(path);
-
-    // Slice into per-tile (local-frame) runs, exactly what a caller would feed back to a mosaic.
+    // Slice the whole fixture set into per-tile (local-frame) runs — exactly what a caller feeds back.
     let tiles = support::slice_all_runs(&cfg, &polylines);
-    assert!(!tiles.is_empty(), "fixture produced no tiles");
+    assert!(!tiles.is_empty(), "fixtures produced no tiles");
     assert!(
-        tiles.len() <= 8,
-        "fixture touches {} tiles — too many to enumerate all permutations; add a sampling cap",
+        tiles.len() <= MAX_TILES,
+        "combined fixtures touch {} tiles — raise EXTENT to keep permutations feasible",
         tiles.len()
     );
 
     let want = edge_set(&polylines);
     for order in permutations(tiles.len()) {
-        let mut mosaic = Mosaic::new(extent).expect("valid config");
+        let mut mosaic = Mosaic::new(EXTENT).expect("valid config");
         for &i in &order {
             let (tile, runs) = &tiles[i];
             mosaic
@@ -94,7 +110,7 @@ fn reassemble_one_fixture([path]: [&Path; 1]) {
         assert_eq!(
             edge_set(&features),
             want,
-            "insertion order {order:?} did not reconstruct the original geometry"
+            "insertion order {order:?} did not reconstruct the combined geometry"
         );
     }
 }
