@@ -226,18 +226,56 @@ impl<V: Vertex> SlicerAll<V> {
     /// Add `polyline` as an independent feature: slice it into every tile it touches, storing its runs
     /// as a fresh feature in each. Chainable.
     ///
-    /// Not atomic: pieces are written into the per-tile buffers as the polyline is walked, so on error
-    /// the accumulator may hold a partial result — discard it or [`clear`](Self::clear) after an error.
-    /// (Errors only arise for pathological input: an oversized polyline, an adversarially wide spread,
-    /// or coordinates near the `i32` limits.)
+    /// **Atomic:** the polyline is streamed straight into the per-tile buffers, but on error every
+    /// piece written for it is rolled back, so a failed polyline contributes nothing and the
+    /// accumulator stays exactly as usable as before the call — safe to skip the offending input and
+    /// keep adding. (Errors only arise for pathological input: an oversized polyline, an adversarially
+    /// wide spread, or coordinates near the `i32` limits.) An unobservable internal step counter still
+    /// advances; use [`clear`](Self::clear) to reset the accumulator entirely.
     ///
     /// # Errors
     ///
     /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
         let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
-        grid.route(polyline.as_ref(), self)?;
+        // Savepoint for rollback: how many tiles existed, and the last step used, before this feature.
+        // Every piece this feature writes lands in a tile created after `tiles_before`, or bumps an
+        // existing tile's `open_step` past `step_before` — so the two mark exactly what to undo.
+        let tiles_before = self.tiles.len();
+        let step_before = self.step;
+        if let Err(err) = grid.route(polyline.as_ref(), self) {
+            self.rollback_feature(tiles_before, step_before);
+            return Err(err);
+        }
         Ok(self)
+    }
+
+    /// Undo a partially-written feature after [`add_feature`](Self::add_feature) errored mid-walk,
+    /// restoring the observable state (tiles and their features) to the savepoint. Only ever runs on
+    /// the rare error path, so an `O(tiles)` scan is fine.
+    fn rollback_feature(&mut self, tiles_before: usize, step_before: u64) {
+        // Tiles that already existed but this feature appended to (`open_step` moved past the
+        // savepoint): drop the single feature span it added, and the runs/vertices behind it.
+        for buf in &mut self.tiles[..tiles_before] {
+            if buf.open_step > step_before {
+                buf.feat_ends.pop();
+                let runs_keep = buf.feat_ends.last().copied().unwrap_or(0) as usize;
+                let verts_keep = if runs_keep == 0 {
+                    0
+                } else {
+                    buf.run_ends[runs_keep - 1] as usize
+                };
+                buf.run_ends.truncate(runs_keep);
+                buf.verts.truncate(verts_keep);
+            }
+        }
+        // Tiles created during this feature are contiguous at the end: drop them and their index
+        // entries. (Their stale `open_step` on kept tiles is harmless — the step counter only climbs,
+        // so a later feature's start still outranks it and reads it as a fresh, separate feature.)
+        for buf in self.tiles.drain(tiles_before..) {
+            self.index.remove(&buf.tile);
+        }
+        self.last_slot = None;
     }
 
     /// The slot of `tile`'s buffer, creating it on first touch. A one-entry cache skips the `index`

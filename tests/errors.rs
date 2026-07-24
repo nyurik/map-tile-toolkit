@@ -18,6 +18,32 @@ fn one(extent: u32, buffer: u16, tile: TileId) -> SlicerOne<Coord<i32>> {
     SlicerOne::new(extent, buffer, tile).expect("valid config")
 }
 
+/// The observable state of an all-tiles slicer: every tile's runs, ordered by tile then feature.
+fn snapshot(s: &SlicerAll<Coord<i32>>) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
+    s.iter_tiles()
+        .map(|t| {
+            let runs = t
+                .iter_features()
+                .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+                .collect();
+            (t.id(), runs)
+        })
+        .collect()
+}
+
+/// A polyline that starts cleanly in a tile near `i32::MIN` (which the slicer emits into) and then
+/// runs to a vertex whose tile's buffered box underflows `i32` — so `add_feature` errors *mid-walk*,
+/// after it has already written pieces. `extent = 4096`, `buffer = 8`: the low vertex is `i32::MIN+8`
+/// (itself within buffer of the edge, so the up-front bounds check passes) but its tile's base minus
+/// the buffer underflows.
+fn errors_after_emitting() -> Vec<Coord<i32>> {
+    line(vec![
+        (i32::MIN + 8200, 0), // tile −524286 (base i32::MIN+8192): clean, gets emitted
+        (i32::MIN + 8250, 0),
+        (i32::MIN + 8, 0), // tile −524288 (base i32::MIN): base − buffer underflows → Overflow
+    ])
+}
+
 #[test]
 fn invalid_extent() {
     assert_eq!(all(0, 0).err(), Some(SliceError::InvalidExtent));
@@ -111,6 +137,75 @@ fn too_many_vertices_errors() {
         s.add_feature(&coords).err(),
         Some(SliceError::PolylineTooLarge)
     );
+}
+
+#[test]
+fn add_feature_is_atomic_on_error() {
+    // The crafted polyline really does fail after emitting (otherwise this proves nothing).
+    let mut probe = all(4096, 8).expect("valid config");
+    probe
+        .add_feature(errors_after_emitting())
+        .expect_err("must error mid-walk");
+    assert!(
+        probe.is_empty(),
+        "a feature that errors before any other data must leave the slicer empty"
+    );
+
+    // A clean feature that shares a tile with the failing one, so rollback must *truncate* an existing
+    // tile (not just drop freshly-created ones).
+    let mut s = all(4096, 8).expect("valid config");
+    s.add_feature(line(vec![(i32::MIN + 8200, 0), (i32::MIN + 8300, 0)]))
+        .expect("clean feature");
+    let before = snapshot(&s);
+
+    // The failing feature must leave no trace — the accumulator is byte-for-byte what it was.
+    assert_eq!(
+        s.add_feature(errors_after_emitting()).err(),
+        Some(SliceError::Overflow)
+    );
+    assert_eq!(snapshot(&s), before, "errored feature must roll back fully");
+
+    // And the slicer stays usable: skipping the bad input and adding more works, and matches a run
+    // that never saw the bad input at all.
+    s.add_feature(line(vec![(i32::MIN + 8210, 0), (i32::MIN + 8260, 0)]))
+        .expect("still usable after a rolled-back error");
+    let mut clean = all(4096, 8).expect("valid config");
+    clean
+        .add_feature(line(vec![(i32::MIN + 8200, 0), (i32::MIN + 8300, 0)]))
+        .expect("clean feature");
+    clean
+        .add_feature(line(vec![(i32::MIN + 8210, 0), (i32::MIN + 8260, 0)]))
+        .expect("clean feature");
+    assert_eq!(
+        snapshot(&s),
+        snapshot(&clean),
+        "skipping a failed feature matches never adding it"
+    );
+}
+
+#[test]
+fn clear_resets_for_reuse() {
+    let mut s = all(25, 0).expect("valid config");
+    s.add_feature(line(vec![(5, 5), (60, 40)])).expect("slice");
+    assert!(!s.is_empty());
+    s.clear();
+    assert!(s.is_empty());
+    assert_eq!(s.len(), 0);
+    // After clear the slicer behaves exactly like a fresh one.
+    let mut fresh = all(25, 0).expect("valid config");
+    s.add_feature(line(vec![(1, 1), (30, 30)])).expect("slice");
+    fresh
+        .add_feature(line(vec![(1, 1), (30, 30)]))
+        .expect("slice");
+    assert_eq!(snapshot(&s), snapshot(&fresh));
+
+    // SlicerOne clears too.
+    let mut o = one(25, 0, TileId::new(0, 0));
+    o.add_feature(line(vec![(5, 5), (20, 20)])).expect("slice");
+    assert!(!o.is_empty());
+    o.clear();
+    assert!(o.is_empty());
+    assert_eq!(o.tile(), TileId::new(0, 0), "clear keeps the bound tile");
 }
 
 #[test]
