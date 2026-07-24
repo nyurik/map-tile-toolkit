@@ -23,6 +23,16 @@ const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 /// well under a second.
 const MAX_TILE_VISITS: i64 = 1 << 25;
 
+/// `c` shifted by `d` on both axes. Used for the `± buffer` corner offsets, where the caller has
+/// already proved the result stays in `i32` (so no checked arithmetic).
+#[inline]
+const fn shift(c: Coord<i32>, d: i32) -> Coord<i32> {
+    Coord {
+        x: c.x + d,
+        y: c.y + d,
+    }
+}
+
 /// Sink for [`Grid::route`]: receives every `(tile, segment)` the routing produces and decides how to
 /// store it. [`SlicerAll`](crate::SlicerAll) implements it to append clipped vertices straight into
 /// its per-tile buffers, with no intermediate hit list, sort, or copy.
@@ -153,13 +163,10 @@ impl Grid {
     ) -> Result<Vec<Vec<V>>, SliceError> {
         let poly = polyline;
         let (min, max) = self.tile_buffered_bounds(tile)?;
-        // The tile origin is `min` grown back by the buffer: `tile_bounds` already proved
+        // The tile origin is `min` grown back by the buffer: `tile_buffered_bounds` already proved
         // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
         // overflow — no need to recompute (and re-check) `tile · extent`.
-        let origin = Coord {
-            x: min.x + self.buffer,
-            y: min.y + self.buffer,
-        };
+        let origin = shift(min, self.buffer);
         // Clip and localize in one pass: store each kept vertex already offset by the
         // tile origin, so there is no separate localization pass over the output.
         let mut runs = Vec::new();
@@ -303,11 +310,7 @@ impl Grid {
                             let (min, max) = self.tile_buffered_bounds(tile)?;
                             if segment_intersects(a_pos, c, min, max) {
                                 // Tile origin = base = min + buffer.
-                                let origin = Coord {
-                                    x: min.x + self.buffer,
-                                    y: min.y + self.buffer,
-                                };
-                                sink.emit(tile, origin, a, *v)?;
+                                sink.emit(tile, shift(min, self.buffer), a, *v)?;
                             }
                         }
                     }
@@ -367,22 +370,10 @@ impl Grid {
         let (min, max) = self.tile_buffered_bounds(owner)?;
         Ok(Located {
             owner,
-            core_lo: Coord {
-                x: min.x + self.buffer,
-                y: min.y + self.buffer,
-            },
-            core_hi: Coord {
-                x: max.x - self.buffer,
-                y: max.y - self.buffer,
-            },
-            inner_lo: Coord {
-                x: min.x + 2 * self.buffer,
-                y: min.y + 2 * self.buffer,
-            },
-            inner_hi: Coord {
-                x: max.x - 2 * self.buffer,
-                y: max.y - 2 * self.buffer,
-            },
+            core_lo: shift(min, self.buffer),
+            core_hi: shift(max, -self.buffer),
+            inner_lo: shift(min, 2 * self.buffer),
+            inner_hi: shift(max, -2 * self.buffer),
         })
     }
 
