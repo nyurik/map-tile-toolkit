@@ -1,11 +1,10 @@
 //! The public slicing API: [`SlicerAll`] (accumulate every tile a polyline touches) and
 //! [`SlicerOne`] (accumulate a single, fixed tile).
 //!
-//! Both wrap the same stateless [`Grid`] engine and accumulate results as **features**. A feature is
-//! a caller-defined group of polylines: begin one with [`add_feature`](SlicerAll::add_feature), then
-//! extend it with [`continue_last_feature`](SlicerAll::continue_last_feature) — so the several lines
-//! of one multi-line geometry become a single feature, while unrelated inputs become separate
-//! features. Each polyline is sliced and its per-tile runs folded into the feature it belongs to.
+//! Both wrap the same stateless [`Grid`] engine and accumulate results as **features**. Each polyline
+//! added with [`add_feature`](SlicerAll::add_feature) is an independent feature; it is sliced and its
+//! per-tile runs recorded under that feature. A single polyline can still yield several runs in one
+//! tile (it left the tile and re-entered), and those runs stay grouped as that tile's feature.
 //!
 //! Read the accumulated state back with iterators, never owned `Vec`s:
 //!
@@ -41,20 +40,18 @@ use crate::vertex::Vertex;
 /// - run `r` is `verts[run_ends[r-1] .. run_ends[r]]` (with `run_ends[-1] ≡ 0`);
 /// - feature `f` is the runs `run_ends[feat_ends[f-1] .. feat_ends[f]]`.
 ///
-/// `last_id` is the feature id of the most-recent feature written here, so a continuation can tell
-/// whether the currently-open feature already reached this tile (extend it) or not (start a new one).
 /// Only non-empty features are ever recorded, so every `feat_ends` span holds at least one run.
 ///
-/// `open_step` is the [`SlicerAll`] segment step at which this tile's current run was last extended;
-/// [`SlicerAll`]'s direct-build compares it to the current step to decide whether a segment continues
-/// the open run or starts a new one. It is unused by [`SlicerOne`] (which builds whole runs at once).
+/// `open_step` is the [`SlicerAll`] segment step at which this tile was last written; its direct-build
+/// compares it to the current step (run continuity) and to the feature's start step (whether this
+/// tile already belongs to the feature being added). It is unused by [`SlicerOne`], which builds whole
+/// features at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TileBuf<V> {
     tile: TileId,
     verts: Vec<V>,
     run_ends: Vec<u32>,
     feat_ends: Vec<u32>,
-    last_id: u32,
     open_step: u64,
 }
 
@@ -65,7 +62,6 @@ impl<V> TileBuf<V> {
             verts: Vec::new(),
             run_ends: Vec::new(),
             feat_ends: Vec::new(),
-            last_id: 0,
             open_step: 0,
         }
     }
@@ -80,27 +76,17 @@ impl<V> TileBuf<V> {
         self.run_ends.push(self.verts.len() as u32);
     }
 
-    /// Fold non-empty `runs` into this tile under feature `id`: extend the tile's last feature if it
-    /// is already `id` (the open feature reached this tile before), otherwise start a new feature.
+    /// Record non-empty `runs` as one new feature in this tile (each added polyline is independent).
     #[allow(
         clippy::cast_possible_truncation,
         reason = "run count per tile stays far below u32::MAX"
     )]
-    fn absorb(&mut self, id: u32, runs: Vec<Vec<V>>) {
+    fn absorb(&mut self, runs: Vec<Vec<V>>) {
         debug_assert!(!runs.is_empty(), "empty features are never recorded");
-        let extend = self.last_id == id && !self.feat_ends.is_empty();
         for run in runs {
             self.push_run(run);
         }
-        if extend {
-            *self
-                .feat_ends
-                .last_mut()
-                .expect("extend implies a feature exists") = self.run_ends.len() as u32;
-        } else {
-            self.feat_ends.push(self.run_ends.len() as u32);
-            self.last_id = id;
-        }
+        self.feat_ends.push(self.run_ends.len() as u32);
     }
 }
 
@@ -122,24 +108,6 @@ fn features_of<V: Vertex>(
             start,
         }
     })
-}
-
-/// Reserve a fresh feature id and mark it open (for [`SlicerAll::add_feature`]).
-fn begin_feature(next: &mut u32, open: &mut Option<u32>) -> u32 {
-    let id = *next;
-    // Wraps only after u32::MAX features in one slicer — astronomically beyond any real use; wrapping
-    // (rather than a debug-panic on overflow) keeps the "never panic" guarantee.
-    *next = next.wrapping_add(1);
-    *open = Some(id);
-    id
-}
-
-/// The currently-open feature id, beginning a new one if none is open (for `continue_last_feature`).
-fn resume_feature(next: &mut u32, open: &mut Option<u32>) -> u32 {
-    match *open {
-        Some(id) => id,
-        None => begin_feature(next, open),
-    }
 }
 
 /// A borrowed view of one tile's accumulated features, yielded by [`SlicerAll::iter_tiles`].
@@ -191,19 +159,14 @@ impl<'a, V: Vertex> FeatureView<'a, V> {
 ///
 /// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]), so plain coordinates or
 /// payload-carrying vertices (e.g. an M value via [`Measured`](crate::Measured)) both work; the
-/// payload rides through slicing unchanged. Build features with [`add_feature`](Self::add_feature) /
-/// [`continue_last_feature`](Self::continue_last_feature) and read them back with
-/// [`iter_tiles`](Self::iter_tiles).
+/// payload rides through slicing unchanged. Add each polyline as an independent feature with
+/// [`add_feature`](Self::add_feature) and read them back with [`iter_tiles`](Self::iter_tiles).
 ///
 /// The slicer never panics: bad input (an oversized polyline, or coordinates that overflow the tile
 /// math) yields an [`SliceError`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerAll<V: Vertex = Coord<i32>> {
     grid: Grid,
-    /// Next feature id to hand out.
-    next_feature: u32,
-    /// The currently-open feature id (for `continue_last_feature`), if any.
-    open: Option<u32>,
     /// Per-tile buffers in insertion order; slots are stable (never moved) so `index` can address
     /// them by position.
     tiles: Vec<TileBuf<V>>,
@@ -212,6 +175,10 @@ pub struct SlicerAll<V: Vertex = Coord<i32>> {
     /// Monotonic segment counter for the direct-build run continuity (see [`RouteSink::emit`]). A gap
     /// is inserted at each polyline boundary so a run never continues across separate polylines.
     step: u64,
+    /// The `step` value at the start of the feature currently being added (set in
+    /// [`begin_polyline`](RouteSink::begin_polyline)). A tile whose `open_step` predates it has not yet
+    /// been touched by this feature, so the next run there opens a new feature rather than extending.
+    feature_start: u64,
     /// Most-recently resolved `(tile, slot)`, so consecutive writes to the same tile — the common
     /// case for a dense polyline — skip the `index` lookup entirely. Slots are stable, so this never
     /// goes stale; [`clear`](Self::clear) resets it.
@@ -222,11 +189,10 @@ impl<V: Vertex> SlicerAll<V> {
     fn from_grid(grid: Grid) -> Self {
         Self {
             grid,
-            next_feature: 0,
-            open: None,
             tiles: Vec::new(),
             index: BTreeMap::new(),
             step: 0,
+            feature_start: 0,
             last_slot: None,
         }
     }
@@ -257,8 +223,8 @@ impl<V: Vertex> SlicerAll<V> {
         self.grid.buffer()
     }
 
-    /// Begin a new feature from `polyline`: slice it into every tile it touches, storing its runs as a
-    /// fresh feature in each. Chainable.
+    /// Add `polyline` as an independent feature: slice it into every tile it touches, storing its runs
+    /// as a fresh feature in each. Chainable.
     ///
     /// Not atomic: pieces are written into the per-tile buffers as the polyline is walked, so on error
     /// the accumulator may hold a partial result — discard it or [`clear`](Self::clear) after an error.
@@ -269,28 +235,7 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
-        begin_feature(&mut self.next_feature, &mut self.open);
         let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
-        grid.route(polyline.as_ref(), self)?;
-        Ok(self)
-    }
-
-    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another `polyline`
-    /// — slice it and fold its per-tile runs into that same feature (so the lines of one multi-line
-    /// geometry stay a single feature, as separate runs). If no feature is open yet, this begins one.
-    /// Chainable.
-    ///
-    /// Not atomic (see [`add_feature`](Self::add_feature)).
-    ///
-    /// # Errors
-    ///
-    /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
-    pub fn continue_last_feature<P: AsRef<[V]>>(
-        &mut self,
-        polyline: P,
-    ) -> Result<&mut Self, SliceError> {
-        resume_feature(&mut self.next_feature, &mut self.open);
-        let grid = self.grid;
         grid.route(polyline.as_ref(), self)?;
         Ok(self)
     }
@@ -344,18 +289,19 @@ impl<V: Vertex> SlicerAll<V> {
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.index.clear();
-        self.next_feature = 0;
-        self.open = None;
         self.step = 0;
+        self.feature_start = 0;
         self.last_slot = None;
     }
 }
 
 impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
     /// A polyline boundary: burn one step so the first segment of this polyline cannot continue a run
-    /// left open by the previous polyline (its runs stay separate, even in a shared tile).
+    /// left open by the previous polyline (its runs stay separate, even in a shared tile), and record
+    /// that step as this feature's start so `emit` knows which tiles it has already reached.
     fn begin_polyline(&mut self) {
         self.step = self.step.wrapping_add(1);
+        self.feature_start = self.step;
     }
 
     /// Advance to the next segment.
@@ -364,15 +310,15 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
     }
 
     /// Append segment `a`–`c` to `tile`'s buffer (localized by `origin`), extending the tile's open
-    /// run if the immediately preceding segment also landed here (same feature), else starting a new
-    /// run. The current feature is [`self.open`](Self::open) (set before routing).
+    /// run if the immediately preceding segment also landed here, else starting a new run — and, when
+    /// a new run, opening a new feature unless this feature already reached the tile (a re-entry).
     #[allow(
         clippy::cast_possible_truncation,
         reason = "run/vertex counts per tile stay far below u32::MAX"
     )]
     fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), SliceError> {
-        let fid = self.open.expect("a feature is open while routing");
         let step = self.step;
+        let feature_start = self.feature_start;
         let slot = self.tile_slot(tile);
         let buf = &mut self.tiles[slot];
         // Continue the open run iff the previous segment (step − 1) also landed in this tile. The
@@ -390,13 +336,16 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
             buf.verts.push(a_local);
             buf.verts.push(c_local);
             buf.run_ends.push(buf.verts.len() as u32);
-            if buf.last_id == fid && buf.feat_ends.last().is_some() {
-                // Another run in the feature already present here: extend its run span.
-                *buf.feat_ends.last_mut().expect("feature present") = buf.run_ends.len() as u32;
-            } else {
-                // First run of this feature in this tile.
+            // Every step of this feature is ≥ `feature_start`, so an earlier `open_step` means this
+            // tile has not yet been touched by the current feature → open a new one. Otherwise the
+            // feature already has a run here (it left and re-entered) → extend that run span.
+            if buf.open_step < feature_start {
                 buf.feat_ends.push(buf.run_ends.len() as u32);
-                buf.last_id = fid;
+            } else {
+                *buf.feat_ends
+                    .last_mut()
+                    .expect("a prior run this feature implies a feature span") =
+                    buf.run_ends.len() as u32;
             }
         }
         buf.open_step = step;
@@ -406,17 +355,15 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
 
 /// Slices integer polylines into pieces for **one fixed tile**, accumulating only that tile.
 ///
-/// The single-tile counterpart to [`SlicerAll`]: [`add_feature`](Self::add_feature) /
-/// [`continue_last_feature`](Self::continue_last_feature) work exactly the same, but each polyline is
-/// clipped only to this slicer's [`tile`](Self::tile). Because there is a single tile, the read API
-/// skips the tile level — [`iter_features`](Self::iter_features) yields the features directly.
+/// The single-tile counterpart to [`SlicerAll`]: [`add_feature`](Self::add_feature) works exactly the
+/// same, but each polyline is clipped only to this slicer's [`tile`](Self::tile). Because there is a
+/// single tile, the read API skips the tile level — [`iter_features`](Self::iter_features) yields the
+/// features directly.
 ///
 /// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerOne<V: Vertex = Coord<i32>> {
     grid: Grid,
-    next_feature: u32,
-    open: Option<u32>,
     buf: TileBuf<V>,
 }
 
@@ -424,8 +371,6 @@ impl<V: Vertex> SlicerOne<V> {
     fn from_grid(grid: Grid, tile: TileId) -> Self {
         Self {
             grid,
-            next_feature: 0,
-            open: None,
             buf: TileBuf::new(tile),
         }
     }
@@ -459,8 +404,8 @@ impl<V: Vertex> SlicerOne<V> {
         self.buf.tile
     }
 
-    /// Begin a new feature from `polyline`, clipped to this slicer's [`tile`](Self::tile). Chainable.
-    /// A feature is recorded only if something of `polyline` lands in the tile.
+    /// Add `polyline` as an independent feature, clipped to this slicer's [`tile`](Self::tile).
+    /// Chainable. A feature is recorded only if something of `polyline` lands in the tile.
     ///
     /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
     ///
@@ -469,30 +414,8 @@ impl<V: Vertex> SlicerOne<V> {
     /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
-        let id = begin_feature(&mut self.next_feature, &mut self.open);
         if !runs.is_empty() {
-            self.buf.absorb(id, runs);
-        }
-        Ok(self)
-    }
-
-    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another
-    /// `polyline`, clipped to this slicer's [`tile`](Self::tile). If no feature is open yet, this
-    /// begins one. Chainable.
-    ///
-    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
-    ///
-    /// # Errors
-    ///
-    /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
-    pub fn continue_last_feature<P: AsRef<[V]>>(
-        &mut self,
-        polyline: P,
-    ) -> Result<&mut Self, SliceError> {
-        let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
-        let id = resume_feature(&mut self.next_feature, &mut self.open);
-        if !runs.is_empty() {
-            self.buf.absorb(id, runs);
+            self.buf.absorb(runs);
         }
         Ok(self)
     }
@@ -518,7 +441,5 @@ impl<V: Vertex> SlicerOne<V> {
     /// Discard everything accumulated so far, keeping the extent/buffer/tile config.
     pub fn clear(&mut self) {
         self.buf = TileBuf::new(self.buf.tile);
-        self.next_feature = 0;
-        self.open = None;
     }
 }

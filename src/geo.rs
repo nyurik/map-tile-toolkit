@@ -5,9 +5,8 @@
 //! callers already working with `geo-types`. It is only available for `Coord<i32>` vertices, since
 //! `geo-types` cannot carry a payload.
 //!
-//! A whole geometry becomes **one feature**: a `LineString` is a single-line feature, and a
-//! `MultiLineString` groups all its lines into one feature (the first line opens it, the rest
-//! continue it). Reading back yields one `Geometry` per feature per tile.
+//! Each line becomes **one feature**: a `LineString` is a single feature, and a `MultiLineString`'s
+//! lines are added as independent features. Reading back yields one `Geometry` per feature per tile.
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
 
@@ -51,9 +50,8 @@ fn assemble(runs: impl Iterator<Item = Vec<Coord<i32>>>) -> Option<Geometry<i32>
 }
 
 impl SlicerAll<Coord<i32>> {
-    /// Add a polyline `geom` (a `LineString` or `MultiLineString`) as a single feature, slicing it
-    /// into every tile it touches. A `MultiLineString`'s lines are grouped into one feature.
-    /// Chainable.
+    /// Add a polyline `geom` (a `LineString` or `MultiLineString`), slicing it into every tile it
+    /// touches. Each line is an independent feature (a `MultiLineString` adds one per line). Chainable.
     ///
     /// # Errors
     ///
@@ -61,12 +59,8 @@ impl SlicerAll<Coord<i32>> {
     /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`SliceError::PolylineTooLarge`],
     ///   [`SliceError::TooManyTiles`], [`SliceError::Overflow`]).
     pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, SliceError> {
-        for (i, line) in each_line(geom)?.iter().enumerate() {
-            if i == 0 {
-                self.add_feature(line.0.as_slice())?;
-            } else {
-                self.continue_last_feature(line.0.as_slice())?;
-            }
+        for line in each_line(geom)? {
+            self.add_feature(line.0.as_slice())?;
         }
         Ok(self)
     }
@@ -85,20 +79,16 @@ impl SlicerAll<Coord<i32>> {
 }
 
 impl SlicerOne<Coord<i32>> {
-    /// Add a polyline `geom` (a `LineString` or `MultiLineString`) as a single feature, clipped to
-    /// this slicer's tile. A `MultiLineString`'s lines are grouped into one feature. Chainable.
+    /// Add a polyline `geom` (a `LineString` or `MultiLineString`), clipped to this slicer's tile.
+    /// Each line is an independent feature (a `MultiLineString` adds one per line). Chainable.
     ///
     /// # Errors
     ///
     /// - [`SliceError::UnsupportedGeometry`] — `geom` is not a `LineString` / `MultiLineString`.
     /// - Otherwise whatever [`add_feature`](Self::add_feature) returns ([`SliceError::Overflow`]).
     pub fn add_geometry(&mut self, geom: &Geometry<i32>) -> Result<&mut Self, SliceError> {
-        for (i, line) in each_line(geom)?.iter().enumerate() {
-            if i == 0 {
-                self.add_feature(line.0.as_slice())?;
-            } else {
-                self.continue_last_feature(line.0.as_slice())?;
-            }
+        for line in each_line(geom)? {
+            self.add_feature(line.0.as_slice())?;
         }
         Ok(self)
     }

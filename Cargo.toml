@@ -14,9 +14,14 @@ rust-version = "1.88"
 name = "slicing"
 harness = false
 
+# Uses the `geo` bridge (`add_geometry` / `iter_geometries`), so it is skipped without that feature.
+[[example]]
+name = "simplify_slice"
+required-features = ["geo"]
+
 [features]
 default = ["geo"]
-# Enables the `geo-types` `Geometry` bridge (`TileAccumulator::add_geometry` / `into_geometries`).
+# Enables the `geo-types` `Geometry` bridge (`add_geometry` / `iter_geometries` on both slicers).
 # The core slicing API works on plain vertex slices and does not need it.
 geo = []
 
@@ -26,10 +31,12 @@ thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.8.2"
+geo = "0.30"
 geojson = { version = "1.0.0", features = ["geo-types"] }
 insta = "1"
 serde_json = "1"
 test_each_file = "0.3.7"
+wkt = "0.14"
 
 # Release build with debug symbols, used by `just flamegraph-*` for readable profiles.
 [profile.profiling]

@@ -19,7 +19,7 @@ new vertices at the tile edge.
 
 The core API works on a plain **polyline** — anything sliceable to `[Coord]` (`&[Coord]`, `&Vec<Coord>`,
 an array). Two slicers accumulate the results: `SlicerAll` keeps every tile a polyline touches, and
-`SlicerOne` keeps a single, fixed tile. Each polyline is added as (part of) a **feature** and read
+`SlicerOne` keeps a single, fixed tile. Each polyline is added as an independent **feature** and read
 back with iterators — never owned `Vec`s. The slicer never panics: bad input (an oversized polyline,
 or coordinates that overflow the tile math) returns a `map_tile_toolkit::SliceError` instead.
 
@@ -71,9 +71,9 @@ what a `SlicerOne` bound to that tile yields.
 
 ### Features, and merging tiles back
 
-`add_feature` begins a feature; `continue_last_feature` extends the one it opened — so the several
-lines of one multi-line geometry become a single feature, while unrelated inputs become separate
-features. `merge` is the inverse of slicing.
+Each `add_feature` adds one independent feature. A single input line can still yield several polylines
+in a tile (it left the tile and re-entered); those stay grouped as that tile's feature. `merge` is the
+inverse of slicing.
 
 ```rust
 use geo_types::Coord;
@@ -81,12 +81,8 @@ use map_tile_toolkit::{SlicerAll, TileId, merge};
 
 let mut slicer = SlicerAll::new(25, 0)?;
 
-// One multi-line feature: the first line opens it, each further line extends the same feature.
-let part_a = [Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }];
-let part_b = [Coord { x: 8, y: 8 }, Coord { x: 8, y: 70 }];
-slicer.add_feature(&part_a)?.continue_last_feature(&part_b)?;
-
-// A separate, unrelated feature.
+// Two independent features, added one at a time.
+slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }])?;
 slicer.add_feature([Coord { x: 40, y: 5 }, Coord { x: 45, y: 90 }])?;
 
 // `merge` stitches two tiles' runs back into a shared local frame; non-adjacent tiles simply stay
@@ -117,7 +113,6 @@ where each tile is `extent` wide. Then slice with `SlicerAll::new(extent, buffer
 `0..2^z` and coordinates `0..extent`.
 
 Pass the same `extent` (from `slicer.extent()`) to `merge`, since it reconstructs in output units.
-`with_extent(d, d, b)` is exactly `new(d, b)`.
 
 ### Per-vertex payloads (M values)
 
@@ -150,7 +145,7 @@ for tile in slicer.iter_tiles() {
 ### `geo-types` geometries
 
 With the default `geo` feature, the slicers bridge to `geo-types`: feed a `LineString` /
-`MultiLineString` `Geometry` (as one feature) and read `Geometry` pieces back out.
+`MultiLineString` `Geometry` (each line an independent feature) and read `Geometry` pieces back out.
 
 ```rust
 # #[cfg(feature = "geo")] {
