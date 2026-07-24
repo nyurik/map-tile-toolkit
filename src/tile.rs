@@ -1,9 +1,9 @@
 //! Tile addressing on the integer grid.
 //!
-//! A tile of side `divider` covers the closed integer square `[x·divider, x·divider + divider − 1]`
-//! on each axis, so the boundary between tiles `k−1` and `k` sits at `k·divider − 0.5` (between two
-//! integer coordinates). Integer vertices therefore never land exactly on a tile edge — every
-//! vertex belongs to exactly one tile.
+//! A tile of side `extent` covers the closed integer square `[x·extent, x·extent + extent − 1]` on
+//! each axis, so the boundary between tiles `k−1` and `k` sits at `k·extent − 0.5` (between two
+//! integer coordinates). Integer vertices therefore never land exactly on a tile edge — every vertex
+//! belongs to exactly one tile.
 
 use geo_types::Coord;
 
@@ -27,7 +27,7 @@ impl From<(i32, i32)> for TileId {
     }
 }
 
-/// The tile that owns coordinate `c` for the given tile side `divider`.
-pub(crate) fn tile_of(c: Coord<i32>, divider: i32) -> TileId {
-    TileId::new(c.x.div_euclid(divider), c.y.div_euclid(divider))
+/// The tile that owns coordinate `c` for the given tile side `extent`.
+pub(crate) fn tile_of(c: Coord<i32>, extent: i32) -> TileId {
+    TileId::new(c.x.div_euclid(extent), c.y.div_euclid(extent))
 }

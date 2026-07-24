@@ -2,7 +2,7 @@
 //! whole input set, not one benchmark per file). Fixture loading/parsing and the slicer configs are
 //! shared with the tests/example via `tests/support/mod.rs`.
 //!
-//! Small-fixture set (`tests/fixtures/*.geojson`, divider 25), each fixture flattened to its
+//! Small-fixture set (`tests/fixtures/*.geojson`, extent 25), each fixture flattened to its
 //! component polylines:
 //! * `all` — [`SlicerAll::add_feature`] on each polyline into one accumulator.
 //! * `one` — a fresh [`SlicerOne`] per touched tile (tile ids computed up front, outside the timed

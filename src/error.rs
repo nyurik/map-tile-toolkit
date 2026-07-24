@@ -10,13 +10,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SliceError {
-    /// The tile side (`divider`) was zero, or larger than `i32::MAX`.
-    #[error("divider must be between 1 and {}", i32::MAX)]
-    InvalidDivider,
+    /// The per-tile output resolution / tile side (`extent`) was zero, or larger than `i32::MAX`.
+    #[error("extent must be between 1 and {}", i32::MAX)]
+    InvalidExtent,
 
     /// The `buffer` was too large for the tile size: it must be **strictly less than half** the
-    /// `divider`, so geometry near a tile edge spills into at most one neighbouring tile per axis.
-    #[error("buffer must be strictly less than half the divider")]
+    /// `extent`, so geometry near a tile edge spills into at most one neighbouring tile per axis.
+    #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
     /// The geometry was not a `LineString` or `MultiLineString` (the only kinds the slicer clips).
@@ -38,7 +38,7 @@ pub enum SliceError {
     TooManyTiles,
 
     /// Coordinate arithmetic overflowed `i32` — a coordinate or tile lies too close to the limits of
-    /// the representable range for the given `divider`/`buffer`.
+    /// the representable range for the given `extent`/`buffer`.
     #[error("coordinate arithmetic overflowed the i32 range")]
     Overflow,
 }

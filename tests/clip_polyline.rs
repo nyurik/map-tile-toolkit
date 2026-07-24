@@ -90,11 +90,11 @@ fn duplicate_vertices(geom: &Geometry<i32>) -> Geometry<i32> {
     }
 }
 
-/// Undo tile-local normalization: add `tile`'s origin (`tile · divider`) back to every vertex so
+/// Undo tile-local normalization: add `tile`'s origin (`tile · extent`) back to every vertex so
 /// the piece is in the input's global coordinate space for rendering. Validation happens in local
 /// coords; only the snapshot files are written globally (so they still line up on the map grid).
-fn globalize(tile: TileId, local: &Geometry<i32>, divider: i32) -> Geometry<i32> {
-    let (ox, oy) = (tile.x * divider, tile.y * divider);
+fn globalize(tile: TileId, local: &Geometry<i32>, extent: i32) -> Geometry<i32> {
+    let (ox, oy) = (tile.x * extent, tile.y * extent);
     let shift = |ls: &LineString<i32>| {
         LineString(
             ls.0.iter()
@@ -228,7 +228,7 @@ fn big_geometry_batch_matches_per_tile() {
 }
 
 /// The shared `BIG_CONFIGS` slicers must slice the big polyline into the documented number of
-/// tiles: `single` → one, `few` → a 2×2 grid of four, `multi` → many. Guards the divider choices
+/// tiles: `single` → one, `few` → a 2×2 grid of four, `multi` → many. Guards the extent choices
 /// the benchmarks and the `profile` example rely on.
 #[test]
 fn big_config_tile_counts() {
@@ -296,10 +296,10 @@ fn slice_at_buffer(slicer: &support::Cfg, stem: &str, geom: &Geometry<i32>, snap
 
     // The two snapshots must be byte identical; snapshot the (shared) result. Pieces come back in
     // tile-local coordinates, so convert them back to the global space before rendering.
-    let divider = slicer.divider() as i32;
+    let extent = slicer.extent() as i32;
     let global = |m: &BTreeMap<TileId, Geometry<i32>>| -> BTreeMap<TileId, Geometry<i32>> {
         m.iter()
-            .map(|(&t, g)| (t, globalize(t, g, divider)))
+            .map(|(&t, g)| (t, globalize(t, g, extent)))
             .collect()
     };
     let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&all))).expect("serializes");

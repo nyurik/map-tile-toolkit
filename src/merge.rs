@@ -7,14 +7,17 @@ use crate::{SliceError, TileId};
 
 /// Reconstruct the combined pieces of two tiles from their tile-local runs — the inverse of slicing.
 /// Stateless: it takes the runs explicitly (not a slicer's accumulated state), so it works for any
-/// two tiles sliced at the same `divider`. The tiles need not be adjacent, so this folds: merge two
+/// two tiles sliced at the same `extent`. The tiles need not be adjacent, so this folds: merge two
 /// tiles, then merge the result (treated as a piece at the lower-left tile) with a third, and so on.
+///
+/// `extent` is the per-tile output resolution / tile side the runs were sliced at (from
+/// [`SlicerAll::extent`](crate::SlicerAll::extent)).
 ///
 /// `a` and `b` are `(tile, runs)` pairs as produced by the slicers, each set of runs in its own
 /// tile-local frame. `runs` is anything sliceable to `[V]` (e.g. `&[Vec<V>]`, or `&[&[V]]` collected
 /// from a [`FeatureView`](crate::FeatureView)). The result is expressed in a **shared tile-local
 /// frame** anchored at the lower-left of the two tiles (its origin is the component-wise-minimum
-/// tile's `[0, 0]` corner), so adding that origin (`min(a.tile, b.tile) · divider`) recovers global
+/// tile's `[0, 0]` corner), so adding that origin (`min(a.tile, b.tile) · extent`) recovers global
 /// coordinates. Fold with that min tile as the running anchor.
 ///
 /// Because slicing keeps original vertices, a segment crossing a shared border is present in *both*
@@ -24,16 +27,16 @@ use crate::{SliceError, TileId};
 ///
 /// # Errors
 ///
-/// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
+/// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
 /// - [`SliceError::Overflow`] if rebasing a coordinate into the shared frame overflows `i32` (the two
 ///   tiles lie too far apart to share one `i32` local frame).
 pub fn merge<V: Vertex, L: AsRef<[V]>>(
-    divider: u32,
+    extent: u32,
     a: (TileId, &[L]),
     b: (TileId, &[L]),
 ) -> Result<Vec<Vec<V>>, SliceError> {
-    if divider == 0 || divider > i32::MAX.cast_unsigned() {
-        return Err(SliceError::InvalidDivider);
+    if extent == 0 || extent > i32::MAX.cast_unsigned() {
+        return Err(SliceError::InvalidExtent);
     }
     let (ta, runs_a) = a;
     let (tb, runs_b) = b;
@@ -41,10 +44,10 @@ pub fn merge<V: Vertex, L: AsRef<[V]>>(
     let (sx, sy) = (ta.x.min(tb.x), ta.y.min(tb.y));
     let mut runs: Vec<Vec<V>> = Vec::new();
     for (tile, tile_runs) in [(ta, runs_a), (tb, runs_b)] {
-        // Offset from this tile's local frame into the shared frame: `(tile − shared) · divider`.
+        // Offset from this tile's local frame into the shared frame: `(tile − shared) · extent`.
         // Done in i128 so distant tiles (allowed) can't overflow the offset itself — only the final
         // per-vertex position is range-checked back into `i32`.
-        let d = i128::from(divider);
+        let d = i128::from(extent);
         let off_x = (i128::from(tile.x) - i128::from(sx)) * d;
         let off_y = (i128::from(tile.y) - i128::from(sy)) * d;
         for run in tile_runs {

@@ -9,35 +9,35 @@ fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
 }
 
 /// A fresh all-tiles slicer over `Coord` (the config validation is what these tests probe).
-fn all(divider: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, SliceError> {
-    SlicerAll::new(divider, buffer)
+fn all(extent: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, SliceError> {
+    SlicerAll::new(extent, buffer)
 }
 
 /// A fresh single-tile slicer over `Coord`, bound to `tile`.
-fn one(divider: u32, buffer: u16, tile: TileId) -> SlicerOne<Coord<i32>> {
-    SlicerOne::new(divider, buffer, tile).expect("valid config")
+fn one(extent: u32, buffer: u16, tile: TileId) -> SlicerOne<Coord<i32>> {
+    SlicerOne::new(extent, buffer, tile).expect("valid config")
 }
 
 #[test]
-fn invalid_divider() {
-    assert_eq!(all(0, 0).err(), Some(SliceError::InvalidDivider));
-    assert_eq!(all(u32::MAX, 0).err(), Some(SliceError::InvalidDivider));
+fn invalid_extent() {
+    assert_eq!(all(0, 0).err(), Some(SliceError::InvalidExtent));
+    assert_eq!(all(u32::MAX, 0).err(), Some(SliceError::InvalidExtent));
     assert!(all(1, 0).is_ok());
     assert!(all(i32::MAX as u32, u16::MAX).is_ok());
-    // Both slicers validate the divider the same way.
+    // Both slicers validate the extent the same way.
     assert_eq!(
         SlicerOne::<Coord<i32>>::new(0, 0, TileId::new(0, 0)).err(),
-        Some(SliceError::InvalidDivider)
+        Some(SliceError::InvalidExtent)
     );
 }
 
 #[test]
 fn buffer_too_large() {
-    // `buffer` must be strictly less than half the `divider` (i.e. `2*buffer < divider`).
+    // `buffer` must be strictly less than half the `extent` (i.e. `2*buffer < extent`).
     assert_eq!(all(10, 5).err(), Some(SliceError::BufferTooLarge)); // 2*5 == 10, not < 10
     assert_eq!(all(10, 6).err(), Some(SliceError::BufferTooLarge));
     assert!(all(10, 4).is_ok()); // 2*4 == 8 < 10
-    // With divider 1 only a zero buffer is allowed.
+    // With extent 1 only a zero buffer is allowed.
     assert!(all(1, 0).is_ok());
     assert_eq!(all(2, 1).err(), Some(SliceError::BufferTooLarge));
     // Both slicers validate the buffer the same way.
@@ -102,7 +102,7 @@ fn coordinate_overflow_errors() {
 
 #[test]
 fn too_many_vertices_errors() {
-    // Huge divider → everything in one tile, so only the vertex-count limit can trip.
+    // Huge extent → everything in one tile, so only the vertex-count limit can trip.
     let mut s = all(1_000_000, 0).expect("valid config");
     let coords: Vec<Coord<i32>> = (0..=(i32::from(u16::MAX) + 1))
         .map(|i| Coord { x: i % 8, y: 0 })

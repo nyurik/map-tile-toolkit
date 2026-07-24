@@ -14,20 +14,20 @@ use geo_types::{Coord, Geometry, LineString, MultiLineString};
 use geojson::{Feature, GeoJson, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
 
-/// A slicer config (divider + buffer) shared by the tests, benches, and example. The slicers now own
+/// A slicer config (extent + buffer) shared by the tests, benches, and example. The slicers now own
 /// accumulated state, so the shared value is the *config*, from which each caller spins up a fresh
 /// [`SlicerAll`] / [`SlicerOne`].
 #[derive(Clone, Copy)]
 pub struct Cfg {
-    pub divider: u32,
+    pub extent: u32,
     pub buffer: u16,
 }
 
 impl Cfg {
-    /// The tile side length, in coordinate units.
+    /// The tile side / output resolution, in coordinate units.
     #[must_use]
-    pub fn divider(self) -> u32 {
-        self.divider
+    pub fn extent(self) -> u32 {
+        self.extent
     }
 
     /// The buffer kept around every tile, in coordinate units.
@@ -39,24 +39,24 @@ impl Cfg {
     /// A fresh all-tiles slicer for this config (panics on a bad literal config).
     #[must_use]
     pub fn all(self) -> SlicerAll<Coord<i32>> {
-        SlicerAll::new(self.divider, self.buffer).expect("invalid slicer config in test support")
+        SlicerAll::new(self.extent, self.buffer).expect("invalid slicer config in test support")
     }
 
     /// A fresh single-tile slicer bound to `tile` (panics on a bad literal config).
     #[must_use]
     pub fn one(self, tile: TileId) -> SlicerOne<Coord<i32>> {
-        SlicerOne::new(self.divider, self.buffer, tile)
+        SlicerOne::new(self.extent, self.buffer, tile)
             .expect("invalid slicer config in test support")
     }
 }
 
-/// A config with the given divider/buffer.
+/// A config with the given extent/buffer.
 #[must_use]
-pub fn slicer(divider: u32, buffer: u16) -> Cfg {
-    Cfg { divider, buffer }
+pub fn slicer(extent: u32, buffer: u16) -> Cfg {
+    Cfg { extent, buffer }
 }
 
-/// Tile divider for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
+/// Tile extent for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
 #[must_use]
 pub fn grid() -> Cfg {
     slicer(25, 0)
@@ -71,9 +71,9 @@ pub fn grid_buffered() -> Cfg {
 /// Slicing [`big_polyline`] with each of these yields a different number of output tiles, so the
 /// same large geometry can be benchmarked/profiled across output scales (shared by the benchmarks
 /// and the `profile` example so both agree). The big polyline spans roughly `[0,420] × [0,535]`:
-/// - `multi` (divider 25) → hundreds of tiles;
-/// - `few` (divider 300) → a 2×2 grid of 4 tiles;
-/// - `single` (divider 1024) → the whole geometry in one tile.
+/// - `multi` (extent 25) → hundreds of tiles;
+/// - `few` (extent 300) → a 2×2 grid of 4 tiles;
+/// - `single` (extent 1024) → the whole geometry in one tile.
 #[must_use]
 pub fn big_configs() -> [(&'static str, Cfg); 3] {
     [

@@ -16,9 +16,9 @@ use map_tile_toolkit::{TileId, merge};
 mod support;
 use support::Cfg;
 
-/// A config with the given divider/buffer.
-fn slicer(divider: u32, buffer: u16) -> Cfg {
-    support::slicer(divider, buffer)
+/// A config with the given extent/buffer.
+fn slicer(extent: u32, buffer: u16) -> Cfg {
+    support::slicer(extent, buffer)
 }
 
 /// A polyline as `Vec<Coord<i32>>`.
@@ -34,9 +34,9 @@ fn runs_of(g: &Geometry<i32>) -> Vec<Vec<Coord<i32>>> {
         .collect()
 }
 
-/// Add `tile`'s origin (`tile · divider`) back to shared-frame runs, recovering global coordinates.
-fn globalize(tile: TileId, runs: &[Vec<Coord<i32>>], divider: i32) -> Vec<Vec<Coord<i32>>> {
-    let (ox, oy) = (tile.x * divider, tile.y * divider);
+/// Add `tile`'s origin (`tile · extent`) back to shared-frame runs, recovering global coordinates.
+fn globalize(tile: TileId, runs: &[Vec<Coord<i32>>], extent: i32) -> Vec<Vec<Coord<i32>>> {
+    let (ox, oy) = (tile.x * extent, tile.y * extent);
     runs.iter()
         .map(|r| {
             r.iter()
@@ -142,7 +142,7 @@ fn fold_merge(
     for &i in &order[1..] {
         let (tile, runs) = &tiles[i];
         acc = merge(
-            cfg.divider(),
+            cfg.extent(),
             (anchor, acc.as_slice()),
             (*tile, runs.as_slice()),
         )
@@ -155,7 +155,7 @@ fn fold_merge(
 #[test]
 fn every_permutation_reconstructs_each_fixture() {
     let s = support::grid();
-    let divider = s.divider() as i32;
+    let extent = s.extent() as i32;
     for (name, geom) in support::load_all_fixtures() {
         let tiles = tiles_of(&s, &geom);
         assert!(!tiles.is_empty(), "{name}: fixture produced no tiles");
@@ -163,7 +163,7 @@ fn every_permutation_reconstructs_each_fixture() {
 
         for order in permutations(tiles.len()) {
             let (anchor, merged) = fold_merge(&s, &tiles, &order);
-            let got = edge_set(&globalize(anchor, &merged, divider));
+            let got = edge_set(&globalize(anchor, &merged, extent));
             assert_eq!(
                 got, want,
                 "{name}: merging tiles in order {order:?} did not reconstruct the original"
@@ -182,7 +182,7 @@ fn merge_shared_frame_anchor() {
     let tiles = all_tile_runs(&s, &coords(vec![(5, 5), (5, 15), (5, 25)]));
 
     let merged = merge(
-        s.divider(),
+        s.extent(),
         (TileId::new(0, 1), tiles[&TileId::new(0, 1)].as_slice()),
         (TileId::new(0, 2), tiles[&TileId::new(0, 2)].as_slice()),
     )
@@ -204,7 +204,7 @@ fn merge_non_adjacent_stays_disconnected() {
     let a = one_tile_runs(&s, &coords(vec![(2, 2), (7, 7)]), TileId::new(0, 0));
     let b = one_tile_runs(&s, &coords(vec![(52, 2), (57, 7)]), TileId::new(5, 0));
     let merged = merge(
-        s.divider(),
+        s.extent(),
         (TileId::new(0, 0), a.as_slice()),
         (TileId::new(5, 0), b.as_slice()),
     )

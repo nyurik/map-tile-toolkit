@@ -14,8 +14,8 @@
 //!   level).
 //!
 //! Runs come out in each tile's **local frame**: the tile's `[0, 0]` corner is the origin, so a
-//! vertex at global `(x, y)` is `(x − tile.x·divider, y − tile.y·divider)` (in-tile vertices land in
-//! `0..divider`; buffer vertices past the low edge go negative). [`merge`](crate::merge) is the
+//! vertex at global `(x, y)` is `(x − tile.x·extent, y − tile.y·extent)` (in-tile vertices land in
+//! `0..extent`; buffer vertices past the low edge go negative). [`merge`](crate::merge) is the
 //! inverse, stitching a tile's pieces back together.
 //!
 //! ## Storage
@@ -212,33 +212,46 @@ pub struct SlicerAll<V: Vertex = Coord<i32>> {
     /// Monotonic segment counter for the direct-build run continuity (see [`RouteSink::emit`]). A gap
     /// is inserted at each polyline boundary so a run never continues across separate polylines.
     step: u64,
+    /// Most-recently resolved `(tile, slot)`, so consecutive writes to the same tile — the common
+    /// case for a dense polyline — skip the `index` lookup entirely. Slots are stable, so this never
+    /// goes stale; [`clear`](Self::clear) resets it.
+    last_slot: Option<(TileId, u32)>,
 }
 
 impl<V: Vertex> SlicerAll<V> {
-    /// Create a slicer with the given tile side and buffer, and an empty accumulator.
-    ///
-    /// # Errors
-    ///
-    /// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `divider`.
-    pub fn new(divider: u32, buffer: u16) -> Result<Self, SliceError> {
-        Ok(Self {
-            grid: Grid::new(divider, buffer)?,
+    fn from_grid(grid: Grid) -> Self {
+        Self {
+            grid,
             next_feature: 0,
             open: None,
             tiles: Vec::new(),
             index: BTreeMap::new(),
             step: 0,
-        })
+            last_slot: None,
+        }
     }
 
-    /// The tile side length, in coordinate units.
+    /// Create a slicer with the given tile side / per-tile output resolution `extent` and `buffer`.
+    ///
+    /// Coordinates are integers in tile space: a vertex belongs to tile `x.div_euclid(extent)` and is
+    /// emitted at `x − tile·extent ∈ [0, extent)`. Project / simplify / affine-scale float source data
+    /// into this space (e.g. with `geo`) before slicing.
+    ///
+    /// # Errors
+    ///
+    /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
+    pub fn new(extent: u32, buffer: u16) -> Result<Self, SliceError> {
+        Ok(Self::from_grid(Grid::new(extent, buffer)?))
+    }
+
+    /// The tile side / per-tile output resolution: kept vertices land in `0..extent`.
     #[must_use]
-    pub fn divider(&self) -> u32 {
-        self.grid.divider()
+    pub fn extent(&self) -> u32 {
+        self.grid.extent()
     }
 
-    /// The buffer kept around every tile, in coordinate units.
+    /// The buffer kept around every tile, in tile-space units.
     #[must_use]
     pub fn buffer(&self) -> u16 {
         self.grid.buffer()
@@ -282,20 +295,28 @@ impl<V: Vertex> SlicerAll<V> {
         Ok(self)
     }
 
-    /// The slot of `tile`'s buffer, creating it on first touch.
+    /// The slot of `tile`'s buffer, creating it on first touch. A one-entry cache skips the `index`
+    /// lookup when the same tile was just written (consecutive segments in a tile — the common case).
     #[allow(
         clippy::cast_possible_truncation,
         reason = "tile count stays far below u32::MAX"
     )]
     fn tile_slot(&mut self, tile: TileId) -> usize {
-        if let Some(&slot) = self.index.get(&tile) {
-            slot as usize
+        if let Some((last, slot)) = self.last_slot
+            && last == tile
+        {
+            return slot as usize;
+        }
+        let slot = if let Some(&slot) = self.index.get(&tile) {
+            slot
         } else {
             let slot = self.tiles.len() as u32;
             self.tiles.push(TileBuf::new(tile));
             self.index.insert(tile, slot);
-            slot as usize
-        }
+            slot
+        };
+        self.last_slot = Some((tile, slot));
+        slot as usize
     }
 
     /// Iterate the touched tiles, ordered by [`TileId`], borrowing so the accumulator can keep
@@ -319,13 +340,14 @@ impl<V: Vertex> SlicerAll<V> {
         self.tiles.is_empty()
     }
 
-    /// Discard everything accumulated so far, keeping the divider/buffer config.
+    /// Discard everything accumulated so far, keeping the extent/buffer config.
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.index.clear();
         self.next_feature = 0;
         self.open = None;
         self.step = 0;
+        self.last_slot = None;
     }
 }
 
@@ -399,29 +421,33 @@ pub struct SlicerOne<V: Vertex = Coord<i32>> {
 }
 
 impl<V: Vertex> SlicerOne<V> {
-    /// Create a slicer bound to `tile`, with the given tile side and buffer, and an empty
-    /// accumulator.
-    ///
-    /// # Errors
-    ///
-    /// - [`SliceError::InvalidDivider`] if `divider` is `0` or greater than `i32::MAX`.
-    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `divider`.
-    pub fn new(divider: u32, buffer: u16, tile: TileId) -> Result<Self, SliceError> {
-        Ok(Self {
-            grid: Grid::new(divider, buffer)?,
+    fn from_grid(grid: Grid, tile: TileId) -> Self {
+        Self {
+            grid,
             next_feature: 0,
             open: None,
             buf: TileBuf::new(tile),
-        })
+        }
     }
 
-    /// The tile side length, in coordinate units.
+    /// Create a slicer bound to `tile`, with the given tile side / per-tile output resolution `extent`
+    /// and `buffer` (see [`SlicerAll::new`](crate::SlicerAll::new) for the coordinate model).
+    ///
+    /// # Errors
+    ///
+    /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
+    pub fn new(extent: u32, buffer: u16, tile: TileId) -> Result<Self, SliceError> {
+        Ok(Self::from_grid(Grid::new(extent, buffer)?, tile))
+    }
+
+    /// The tile side / per-tile output resolution: kept vertices land in `0..extent`.
     #[must_use]
-    pub fn divider(&self) -> u32 {
-        self.grid.divider()
+    pub fn extent(&self) -> u32 {
+        self.grid.extent()
     }
 
-    /// The buffer kept around every tile, in coordinate units.
+    /// The buffer kept around every tile, in tile-space units.
     #[must_use]
     pub fn buffer(&self) -> u16 {
         self.grid.buffer()
@@ -489,7 +515,7 @@ impl<V: Vertex> SlicerOne<V> {
         self.buf.feat_ends.is_empty()
     }
 
-    /// Discard everything accumulated so far, keeping the divider/buffer/tile config.
+    /// Discard everything accumulated so far, keeping the extent/buffer/tile config.
     pub fn clear(&mut self) {
         self.buf = TileBuf::new(self.buf.tile);
         self.next_feature = 0;

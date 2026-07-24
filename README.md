@@ -27,15 +27,15 @@ or coordinates that overflow the tile math) returns a `map_tile_toolkit::SliceEr
 use geo_types::Coord;
 use map_tile_toolkit::{SlicerAll, TileId};
 
-// An integer polyline. `divider = 25` → 25-unit tiles; `buffer` grows each tile's clip box
-// outward (0 = tight against the grid; must be strictly less than half the divider).
+// An integer polyline. `extent = 25` → 25-unit tiles (also each tile's output resolution);
+// `buffer` grows each tile's clip box outward (0 = tight; must be strictly less than half the extent).
 let line = [Coord { x: 5, y: 5 }, Coord { x: 20, y: 20 }, Coord { x: 60, y: 40 }];
 
 let mut slicer = SlicerAll::new(25, 0)?;
 slicer.add_feature(&line)?;
 
 // Read back: tiles → features → polylines. Polylines are in that tile's local coordinates — the
-// tile's [0, 0] corner is the origin, so add `(tile.x, tile.y) * divider` to recover global
+// tile's [0, 0] corner is the origin, so add `(tile.x, tile.y) * extent` to recover global
 // coords. A feature can yield several polylines in a tile (leave + re-enter).
 for tile in slicer.iter_tiles() {
     let id: TileId = tile.id();
@@ -90,17 +90,34 @@ slicer.add_feature(&part_a)?.continue_last_feature(&part_b)?;
 slicer.add_feature([Coord { x: 40, y: 5 }, Coord { x: 45, y: 90 }])?;
 
 // `merge` stitches two tiles' runs back into a shared local frame; non-adjacent tiles simply stay
-// disconnected until a connecting tile is merged in. It is stateless — pass the divider and each
+// disconnected until a connecting tile is merged in. It is stateless — pass the extent and each
 // tile's runs explicitly (here, every polyline of every feature in the tile).
 let tiles: Vec<(TileId, Vec<&[Coord<i32>]>)> = slicer
     .iter_tiles()
     .map(|t| (t.id(), t.iter_features().flat_map(|f| f.iter_polylines()).collect()))
     .collect();
 if let [(ta, ra), (tb, rb), ..] = tiles.as_slice() {
-    let _merged = merge(slicer.divider(), (*ta, ra.as_slice()), (*tb, rb.as_slice()))?;
+    let _merged = merge(slicer.extent(), (*ta, ra.as_slice()), (*tb, rb.as_slice()))?;
 }
 # Ok::<(), map_tile_toolkit::SliceError>(())
 ```
+
+### Coordinate space (preparing projected data)
+
+The slicer is deliberately integer-only and dimensionless: `extent` is a tile's side **and** its
+output resolution (the number of integers across a tile — the vector-tile `extent`), a vertex belongs
+to tile `x.div_euclid(extent)`, and it is emitted at `x − tile·extent ∈ [0, extent)`. All the
+float/projection work stays in your pipeline (e.g. [`geo`](https://docs.rs/geo)), which keeps this
+crate small and fast and lets you reuse standard projection, simplification, and affine transforms.
+
+For web-mercator data at zoom `z` with tile resolution `extent`, project and simplify in float, then
+apply one affine — scale `s = 2^z · extent / circumference` (pixels per meter), translate the
+top-left corner to the origin, flip `y` — and round to `i32`, so the data lands in `[0, 2^z · extent)`
+where each tile is `extent` wide. Then slice with `SlicerAll::new(extent, buffer)`; tiles come out
+`0..2^z` and coordinates `0..extent`.
+
+Pass the same `extent` (from `slicer.extent()`) to `merge`, since it reconstructs in output units.
+`with_extent(d, d, b)` is exactly `new(d, b)`.
 
 ### Per-vertex payloads (M values)
 
