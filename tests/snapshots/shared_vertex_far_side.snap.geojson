@@ -67,27 +67,36 @@
     {
       "type": "Feature",
       "geometry": {
-        "type": "MultiLineString",
+        "type": "LineString",
         "coordinates": [
           [
-            [
-              25.0,
-              10.0
-            ],
-            [
-              20.0,
-              10.0
-            ]
+            25.0,
+            10.0
           ],
           [
-            [
-              25.0,
-              10.0
-            ],
-            [
-              40.0,
-              20.0
-            ]
+            20.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
+        "stroke": "#ff7f0e",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            25.0,
+            10.0
+          ],
+          [
+            40.0,
+            20.0
           ]
         ]
       },

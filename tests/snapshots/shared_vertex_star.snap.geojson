@@ -67,37 +67,57 @@
     {
       "type": "Feature",
       "geometry": {
-        "type": "MultiLineString",
+        "type": "LineString",
         "coordinates": [
           [
-            [
-              24.0,
-              10.0
-            ],
-            [
-              30.0,
-              10.0
-            ]
+            24.0,
+            10.0
           ],
           [
-            [
-              24.0,
-              10.0
-            ],
-            [
-              10.0,
-              10.0
-            ]
+            30.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/0",
+        "stroke": "#1f77b4",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            24.0,
+            10.0
           ],
           [
-            [
-              24.0,
-              10.0
-            ],
-            [
-              24.0,
-              30.0
-            ]
+            10.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/0",
+        "stroke": "#1f77b4",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            24.0,
+            10.0
+          ],
+          [
+            24.0,
+            30.0
           ]
         ]
       },

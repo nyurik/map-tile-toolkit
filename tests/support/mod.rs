@@ -102,46 +102,38 @@ pub fn polylines_of(geom: &Geometry<i32>) -> Polylines {
     lines_of(geom).into_iter().map(<[_]>::to_vec).collect()
 }
 
-/// Collapse per-tile runs into a geometry: `None`, one `LineString`, or a `MultiLineString`.
-pub fn assemble_runs(mut runs: Vec<Vec<Coord<i32>>>) -> Option<Geometry<i32>> {
-    match runs.len() {
-        0 => None,
-        1 => runs.pop().map(|r| Geometry::LineString(LineString(r))),
-        _ => Some(Geometry::MultiLineString(MultiLineString(
-            runs.into_iter().map(LineString).collect(),
-        ))),
-    }
-}
-
-/// Slice a set of polylines into per-tile geometries: each polyline becomes its own feature in a
-/// fresh [`SlicerAll`], then a tile's features are flattened back into combined runs. Geo-free
+/// Slice a set of polylines into per-tile runs: each polyline becomes its own feature in a fresh
+/// [`SlicerAll`], then a tile's features are flattened into their runs (feature order, then run
+/// order). Each run is a plain polyline — runs are never assembled into a `MultiLineString`. Geo-free
 /// (works with no cargo feature).
-pub fn slice_all_geom(cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) -> Vec<(TileId, Geometry<i32>)> {
+pub fn slice_all_runs(
+    cfg: &Cfg,
+    polylines: &[Vec<Coord<i32>>],
+) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
     let mut acc = cfg.all();
     for line in polylines {
         acc.add_feature(line.as_slice()).expect("slice");
     }
     acc.iter_tiles()
-        .filter_map(|tile| assemble_runs(flatten(&tile)).map(|g| (tile.id(), g)))
+        .map(|tile| (tile.id(), flatten(&tile)))
+        .filter(|(_, runs)| !runs.is_empty())
         .collect()
 }
 
-/// Clip a set of polylines to one tile → its combined geometry (or `None`), each polyline a feature
-/// in a fresh [`SlicerOne`], then flattened back into runs.
-pub fn slice_tile_geom(
+/// Clip a set of polylines to one tile → its runs (empty if nothing lands there), each polyline a
+/// feature in a fresh [`SlicerOne`], then flattened into runs.
+pub fn slice_tile_runs(
     cfg: &Cfg,
     polylines: &[Vec<Coord<i32>>],
     tile: TileId,
-) -> Option<Geometry<i32>> {
+) -> Vec<Vec<Coord<i32>>> {
     let mut acc = cfg.one(tile);
     for line in polylines {
         acc.add_feature(line.as_slice()).expect("slice");
     }
-    let runs: Vec<Vec<Coord<i32>>> = acc
-        .iter_features()
+    acc.iter_features()
         .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
-        .collect();
-    assemble_runs(runs)
+        .collect()
 }
 
 /// Flatten all of a tile's features into a single run list (feature order, then run order), matching

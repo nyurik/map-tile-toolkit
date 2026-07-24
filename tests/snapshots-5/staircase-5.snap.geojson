@@ -166,31 +166,40 @@
     {
       "type": "Feature",
       "geometry": {
-        "type": "MultiLineString",
+        "type": "LineString",
         "coordinates": [
           [
-            [
-              5.0,
-              20.0
-            ],
-            [
-              45.0,
-              4.0
-            ]
+            5.0,
+            20.0
           ],
           [
-            [
-              55.0,
-              22.0
-            ],
-            [
-              10.0,
-              40.0
-            ],
-            [
-              45.0,
-              55.0
-            ]
+            45.0,
+            4.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/1",
+        "stroke": "#ff7f0e",
+        "stroke-width": 3
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            55.0,
+            22.0
+          ],
+          [
+            10.0,
+            40.0
+          ],
+          [
+            45.0,
+            55.0
           ]
         ]
       },

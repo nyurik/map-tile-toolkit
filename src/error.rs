@@ -19,7 +19,7 @@ pub enum SliceError {
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
-    /// The geometry was not a `LineString` or `MultiLineString` (the only kinds the slicer clips).
+    /// The geometry was not a `LineString` (the only kinds the slicer clips).
     #[error("expected a LineString or MultiLineString, got a {0}")]
     UnsupportedGeometry(&'static str),
 
