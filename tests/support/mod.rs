@@ -83,6 +83,10 @@ pub fn big_configs() -> [(&'static str, Cfg); 3] {
     ]
 }
 
+/// A set of independent polylines — the fixture representation. Each is added as its own feature;
+/// this replaces the old single-`Geometry` (possibly `MultiLineString`) input.
+pub type Polylines = Vec<Vec<Coord<i32>>>;
+
 /// The component polylines (vertex slices) of a polyline geometry.
 pub fn lines_of(geom: &Geometry<i32>) -> Vec<&[Coord<i32>]> {
     match geom {
@@ -90,6 +94,12 @@ pub fn lines_of(geom: &Geometry<i32>) -> Vec<&[Coord<i32>]> {
         Geometry::MultiLineString(mls) => mls.0.iter().map(|ls| ls.0.as_slice()).collect(),
         other => panic!("expected a polyline geometry, got {other:?}"),
     }
+}
+
+/// The component polylines of a geometry, owned.
+#[must_use]
+pub fn polylines_of(geom: &Geometry<i32>) -> Polylines {
+    lines_of(geom).into_iter().map(<[_]>::to_vec).collect()
 }
 
 /// Collapse per-tile runs into a geometry: `None`, one `LineString`, or a `MultiLineString`.
@@ -103,25 +113,29 @@ pub fn assemble_runs(mut runs: Vec<Vec<Coord<i32>>>) -> Option<Geometry<i32>> {
     }
 }
 
-/// Slice a whole geometry into per-tile geometries: each line becomes its own feature in a fresh
-/// [`SlicerAll`], then a tile's features are flattened back into combined runs. Geo-free (works with
-/// no cargo feature).
-pub fn slice_all_geom(cfg: &Cfg, geom: &Geometry<i32>) -> Vec<(TileId, Geometry<i32>)> {
+/// Slice a set of polylines into per-tile geometries: each polyline becomes its own feature in a
+/// fresh [`SlicerAll`], then a tile's features are flattened back into combined runs. Geo-free
+/// (works with no cargo feature).
+pub fn slice_all_geom(cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) -> Vec<(TileId, Geometry<i32>)> {
     let mut acc = cfg.all();
-    for line in lines_of(geom) {
-        acc.add_feature(line).expect("slice");
+    for line in polylines {
+        acc.add_feature(line.as_slice()).expect("slice");
     }
     acc.iter_tiles()
         .filter_map(|tile| assemble_runs(flatten(&tile)).map(|g| (tile.id(), g)))
         .collect()
 }
 
-/// Clip a whole geometry to one tile → its combined geometry (or `None`), each line a feature in a
-/// fresh [`SlicerOne`], then flattened back into runs.
-pub fn slice_tile_geom(cfg: &Cfg, geom: &Geometry<i32>, tile: TileId) -> Option<Geometry<i32>> {
+/// Clip a set of polylines to one tile → its combined geometry (or `None`), each polyline a feature
+/// in a fresh [`SlicerOne`], then flattened back into runs.
+pub fn slice_tile_geom(
+    cfg: &Cfg,
+    polylines: &[Vec<Coord<i32>>],
+    tile: TileId,
+) -> Option<Geometry<i32>> {
     let mut acc = cfg.one(tile);
-    for line in lines_of(geom) {
-        acc.add_feature(line).expect("slice");
+    for line in polylines {
+        acc.add_feature(line.as_slice()).expect("slice");
     }
     let runs: Vec<Vec<Coord<i32>>> = acc
         .iter_features()
@@ -138,26 +152,43 @@ fn flatten(tile: &map_tile_toolkit::TileView<'_, Coord<i32>>) -> Vec<Vec<Coord<i
         .collect()
 }
 
-/// Parse a fixture file into its (integer) polyline geometry. Fixtures are `FeatureCollection`s
-/// holding a single `LineString`/`MultiLineString` with whole-number coordinates.
-pub fn load_fixture(path: &Path) -> Geometry<i32> {
+/// Parse a fixture file into its (integer) polylines. Fixtures are `FeatureCollection`s holding one
+/// or more `LineString` features (whole-number coordinates); each feature is an independent
+/// polyline. `MultiLineString` is intentionally rejected — express several polylines as several
+/// features instead.
+pub fn load_fixture(path: &Path) -> Polylines {
     let text = fs::read_to_string(path).expect("readable fixture");
     let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
         panic!("fixture must be a FeatureCollection: {}", path.display());
     };
-    let geom = fc
+    let polys: Polylines = fc
         .features
         .into_iter()
-        .find_map(|f| f.geometry)
-        .map(|g| Geometry::<f64>::try_from(g).expect("geometry converts"))
-        .expect("fixture has a geometry");
-    to_i32(&geom)
+        .filter_map(|f| f.geometry)
+        .map(|g| {
+            let geom = Geometry::<f64>::try_from(g).expect("geometry converts");
+            match to_i32(&geom) {
+                Geometry::LineString(ls) => ls.0,
+                other => panic!(
+                    "fixtures must use LineString features, not {other:?} ({}): express multiple \
+                     polylines as multiple features",
+                    path.display()
+                ),
+            }
+        })
+        .collect();
+    assert!(
+        !polys.is_empty(),
+        "fixture has no polyline features: {}",
+        path.display()
+    );
+    polys
 }
 
-/// Every `tests/fixtures/*.geojson` as `(name, geometry)`, sorted by name for stable ordering.
-pub fn load_all_fixtures() -> Vec<(String, Geometry<i32>)> {
+/// Every `tests/fixtures/*.geojson` as `(name, polylines)`, sorted by name for stable ordering.
+pub fn load_all_fixtures() -> Vec<(String, Polylines)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let mut out: Vec<(String, Geometry<i32>)> = fs::read_dir(&dir)
+    let mut out: Vec<(String, Polylines)> = fs::read_dir(&dir)
         .expect("fixtures dir exists")
         .filter_map(Result::ok)
         .map(|e| e.path())

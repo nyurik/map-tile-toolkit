@@ -4,13 +4,19 @@
     {
       "type": "Feature",
       "properties": {},
+      "geometry": {"type": "LineString", "coordinates": [[5, 10], [70, 10]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {},
+      "geometry": {"type": "LineString", "coordinates": [[8, 40], [18, 45]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {},
       "geometry": {
-        "type": "MultiLineString",
-        "coordinates": [
-          [[5, 10], [70, 10]],
-          [[8, 40], [18, 45]],
-          [[10, 60], [40, 52], [12, 72]]
-        ]
+        "type": "LineString",
+        "coordinates": [[10, 60], [40, 52], [12, 72]]
       }
     }
   ]

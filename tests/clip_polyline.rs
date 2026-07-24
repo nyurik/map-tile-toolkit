@@ -1,9 +1,9 @@
 //! Insta GeoJSON snapshots for the integer polyline slicer.
 //!
-//! Each fixture in `tests/fixtures/inputs/*.geojson` is a `FeatureCollection` with one `LineString`
-//! or `MultiLineString` feature (whole-number coordinates in valid lon/lat range so the fixtures
-//! and snapshots render on a map). Every fixture is sliced two ways and the two must be **byte
-//! identical**:
+//! Each fixture in `tests/fixtures/*.geojson` is a `FeatureCollection` with one or more `LineString`
+//! features (whole-number coordinates in valid lon/lat range so the fixtures and snapshots render on
+//! a map); each feature is an independent polyline. Every fixture is sliced two ways and the two
+//! must be **byte identical**:
 //!
 //! 1. `slice_all_tiles` — the whole geometry into every tile it touches, in one pass.
 //! 2. For each tile that (1) produced, `slice_tile` re-clips that single tile.
@@ -50,22 +50,13 @@ mod files {
     test_each_path! { for ["geojson"] in "./tests/fixtures" => slice_one_fixture }
 }
 
-/// The component lines of a polyline geometry.
-fn each_line(geom: &Geometry<i32>) -> Vec<&LineString<i32>> {
-    match geom {
-        Geometry::LineString(ls) => vec![ls],
-        Geometry::MultiLineString(mls) => mls.0.iter().collect(),
-        other => panic!("expected a polyline geometry, got {other:?}"),
-    }
-}
-
-/// Inclusive tile-coordinate bounds covering every vertex of `geom`, padded by one tile so the
+/// Inclusive tile-coordinate bounds covering every vertex of `polylines`, padded by one tile so the
 /// per-tile scan also checks the empty tiles just outside the geometry.
-fn padded_tile_span(geom: &Geometry<i32>) -> (TileId, TileId) {
+fn padded_tile_span(polylines: &[Vec<Coord<i32>>]) -> (TileId, TileId) {
     let mut lo = TileId::new(i32::MAX, i32::MAX);
     let mut hi = TileId::new(i32::MIN, i32::MIN);
-    for line in each_line(geom) {
-        for &c in &line.0 {
+    for line in polylines {
+        for &c in line {
             let (tx, ty) = (c.x.div_euclid(25), c.y.div_euclid(25));
             lo = TileId::new(lo.x.min(tx), lo.y.min(ty));
             hi = TileId::new(hi.x.max(tx), hi.y.max(ty));
@@ -77,17 +68,13 @@ fn padded_tile_span(geom: &Geometry<i32>) -> (TileId, TileId) {
     )
 }
 
-/// A copy of `geom` with every vertex repeated once — consecutive duplicates the slicers must
+/// A copy of `polylines` with every vertex repeated once — consecutive duplicates the slicers must
 /// transparently drop, so clipping the copy yields the same result as the original.
-fn duplicate_vertices(geom: &Geometry<i32>) -> Geometry<i32> {
-    let dup = |ls: &LineString<i32>| LineString(ls.0.iter().flat_map(|&c| [c, c]).collect());
-    match geom {
-        Geometry::LineString(l) => Geometry::LineString(dup(l)),
-        Geometry::MultiLineString(m) => {
-            Geometry::MultiLineString(MultiLineString(m.0.iter().map(dup).collect()))
-        }
-        other => panic!("expected a polyline geometry, got {other:?}"),
-    }
+fn duplicate_vertices(polylines: &[Vec<Coord<i32>>]) -> Vec<Vec<Coord<i32>>> {
+    polylines
+        .iter()
+        .map(|line| line.iter().flat_map(|&c| [c, c]).collect())
+        .collect()
 }
 
 /// Undo tile-local normalization: add `tile`'s origin (`tile · extent`) back to every vertex so
@@ -135,17 +122,26 @@ fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
     }
 }
 
-/// Build the snapshot `FeatureCollection`: the original polyline first, then one feature per
-/// per-tile piece (colored by tile parity so neighbors contrast, tagged with the tile).
-fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> FeatureCollection {
-    let mut features = vec![feature(
-        &to_f64(input),
-        vec![
-            ("role", json!("input")),
-            ("stroke", json!("#888888")),
-            ("stroke-width", json!(1)),
-        ],
-    )];
+/// Build the snapshot `FeatureCollection`: the input polylines first (one feature each), then one
+/// feature per per-tile piece (colored by tile parity so neighbors contrast, tagged with the tile).
+fn build_fc(
+    input: &[Vec<Coord<i32>>],
+    tiles: &BTreeMap<TileId, Geometry<i32>>,
+) -> FeatureCollection {
+    let mut features: Vec<_> = input
+        .iter()
+        .map(|line| {
+            let geom = Geometry::LineString(LineString(line.clone()));
+            feature(
+                &to_f64(&geom),
+                vec![
+                    ("role", json!("input")),
+                    ("stroke", json!("#888888")),
+                    ("stroke-width", json!(1)),
+                ],
+            )
+        })
+        .collect();
     let mut tiles = tiles.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
     tiles.sort_unstable_by_key(|(k, _)| (k.y, k.x));
     for (tile, piece) in tiles {
@@ -173,9 +169,9 @@ fn build_fc(input: &Geometry<i32>, tiles: &BTreeMap<TileId, Geometry<i32>>) -> F
 
 fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
-    let geom = load_fixture(path);
+    let polylines = load_fixture(path);
     for (slicer, snapshot_dir) in &slicers() {
-        slice_at_buffer(slicer, stem, &geom, snapshot_dir);
+        slice_at_buffer(slicer, stem, &polylines, snapshot_dir);
     }
 }
 
@@ -199,7 +195,7 @@ fn save_big_geometry() {
 /// this only guards the batch/per-tile equivalence at scale, at both buffer sizes.
 #[test]
 fn big_geometry_batch_matches_per_tile() {
-    let geom = support::big_polyline();
+    let geom = support::polylines_of(&support::big_polyline());
 
     for (slicer, _) in &slicers() {
         let all: BTreeMap<TileId, Geometry<i32>> =
@@ -232,7 +228,7 @@ fn big_geometry_batch_matches_per_tile() {
 /// the benchmarks and the `profile` example rely on.
 #[test]
 fn big_config_tile_counts() {
-    let geom = support::big_polyline();
+    let geom = support::polylines_of(&support::big_polyline());
     for (name, slicer) in support::big_configs() {
         let n = support::slice_all_geom(&slicer, &geom).len();
         match name {
@@ -246,7 +242,12 @@ fn big_config_tile_counts() {
 
 /// Run every cross-check for one fixture at one buffer size, then snapshot the result into
 /// `snapshot_dir`.
-fn slice_at_buffer(slicer: &support::Cfg, stem: &str, geom: &Geometry<i32>, snapshot_dir: &str) {
+fn slice_at_buffer(
+    slicer: &support::Cfg,
+    stem: &str,
+    geom: &[Vec<Coord<i32>>],
+    snapshot_dir: &str,
+) {
     // (1) Slice the whole geometry into every tile it touches.
     let all: BTreeMap<TileId, Geometry<i32>> =
         support::slice_all_geom(slicer, geom).into_iter().collect();

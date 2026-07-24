@@ -79,7 +79,7 @@ fn benches(c: &mut Criterion) {
     // Small fixtures, flattened to polylines, sliced on the test grid.
     let small: Vec<Vec<Coord<i32>>> = support::load_all_fixtures()
         .into_iter()
-        .flat_map(|(_, g)| polylines_of(&g))
+        .flat_map(|(_, polys)| polys)
         .collect();
     bench_all(c, "all", &support::grid(), &small);
     bench_one(c, "one", &support::grid(), &small);

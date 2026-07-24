@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use geo_types::{Coord, Geometry};
+use geo_types::Coord;
 use map_tile_toolkit::{TileId, merge};
 
 mod support;
@@ -24,14 +24,6 @@ fn slicer(extent: u32, buffer: u16) -> Cfg {
 /// A polyline as `Vec<Coord<i32>>`.
 fn coords(v: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
     v.into_iter().map(|(x, y)| Coord { x, y }).collect()
-}
-
-/// The runs of a polyline geometry (fixtures load as `geo-types` `Geometry`).
-fn runs_of(g: &Geometry<i32>) -> Vec<Vec<Coord<i32>>> {
-    support::lines_of(g)
-        .into_iter()
-        .map(<[_]>::to_vec)
-        .collect()
 }
 
 /// Add `tile`'s origin (`tile · extent`) back to shared-frame runs, recovering global coordinates.
@@ -89,10 +81,10 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 /// All tiles a fixture geometry touches, each tile's features flattened into combined runs (each line
 /// is added as its own feature, then flattened — the merge inputs treat a tile's whole content as
 /// one bag of runs).
-fn tiles_of(cfg: &Cfg, geom: &Geometry<i32>) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
+fn tiles_of(cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
     let mut acc = cfg.all();
-    for line in support::lines_of(geom) {
-        acc.add_feature(line).expect("slice");
+    for line in polylines {
+        acc.add_feature(line.as_slice()).expect("slice");
     }
     acc.iter_tiles()
         .map(|t| {
@@ -156,10 +148,10 @@ fn fold_merge(
 fn every_permutation_reconstructs_each_fixture() {
     let s = support::grid();
     let extent = s.extent() as i32;
-    for (name, geom) in support::load_all_fixtures() {
-        let tiles = tiles_of(&s, &geom);
+    for (name, polylines) in support::load_all_fixtures() {
+        let tiles = tiles_of(&s, &polylines);
         assert!(!tiles.is_empty(), "{name}: fixture produced no tiles");
-        let want = edge_set(&runs_of(&geom));
+        let want = edge_set(&polylines);
 
         for order in permutations(tiles.len()) {
             let (anchor, merged) = fold_merge(&s, &tiles, &order);

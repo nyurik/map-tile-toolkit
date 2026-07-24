@@ -93,7 +93,7 @@ fn resolve(name: &str) -> (Vec<Vec<Coord<i32>>>, Cfg, Op, u64) {
     let small = || {
         support::load_all_fixtures()
             .into_iter()
-            .flat_map(|(_, g)| polylines_of(&g))
+            .flat_map(|(_, polys)| polys)
             .collect()
     };
     match name {
