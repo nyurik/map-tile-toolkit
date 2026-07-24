@@ -67,7 +67,7 @@ impl<V> TileBuf<V> {
     }
 
     /// Append one run's vertices to the arena and record its end offset.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "a tile holds far fewer than u32::MAX vertices (a polyline is capped at u16 each)"
     )]
@@ -77,7 +77,7 @@ impl<V> TileBuf<V> {
     }
 
     /// Record non-empty `runs` as one new feature in this tile (each added polyline is independent).
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "run count per tile stays far below u32::MAX"
     )]
@@ -280,7 +280,7 @@ impl<V: Vertex> SlicerAll<V> {
 
     /// The slot of `tile`'s buffer, creating it on first touch. A one-entry cache skips the `index`
     /// lookup when the same tile was just written (consecutive segments in a tile — the common case).
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "tile count stays far below u32::MAX"
     )]
@@ -350,7 +350,7 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
     /// Append segment `a`–`c` to `tile`'s buffer (localized by `origin`), extending the tile's open
     /// run if the immediately preceding segment also landed here, else starting a new run — and, when
     /// a new run, opening a new feature unless this feature already reached the tile (a re-entry).
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "run/vertex counts per tile stay far below u32::MAX"
     )]

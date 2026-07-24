@@ -134,7 +134,7 @@ impl Grid {
     }
 
     /// The buffer kept around every tile, in tile-space units.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "buffer is always in 0..=u16::MAX (it was built from a u16)"

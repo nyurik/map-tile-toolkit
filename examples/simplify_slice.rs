@@ -72,7 +72,7 @@ fn main() {
     let geoms: Vec<Geometry<i32>> = lines
         .iter()
         .map(|ls| {
-            let simplified = ls.simplify(&epsilon);
+            let simplified = ls.simplify(epsilon);
             let coords: Vec<Coord<i32>> = simplified
                 .0
                 .iter()
