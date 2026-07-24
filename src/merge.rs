@@ -5,25 +5,20 @@ use geo_types::Coord;
 use crate::vertex::Vertex;
 use crate::{SliceError, TileId};
 
-/// Reconstruct the combined pieces of two tiles from their tile-local runs — the inverse of slicing.
-/// Stateless: it takes the runs explicitly (not a slicer's accumulated state), so it works for any
-/// two tiles sliced at the same `extent`. The tiles need not be adjacent, so this folds: merge two
-/// tiles, then merge the result (treated as a piece at the lower-left tile) with a third, and so on.
+/// Reconstruct the combined pieces of two tiles from their tile-local runs — the stateless inverse of
+/// slicing. Works for any two tiles sliced at the same `extent` (from
+/// [`SlicerAll::extent`](crate::SlicerAll::extent)); they need not be adjacent, so it folds: merge
+/// two, then merge the result (a piece at the lower-left tile) with a third, and so on.
 ///
-/// `extent` is the per-tile output resolution / tile side the runs were sliced at (from
-/// [`SlicerAll::extent`](crate::SlicerAll::extent)).
+/// `a` and `b` are `(tile, runs)` pairs, each set of runs in its own tile-local frame; `runs` is
+/// anything sliceable to `[V]` (e.g. `&[Vec<V>]`, or `&[&[V]]` from a
+/// [`FeatureView`](crate::FeatureView)). The result is in a shared frame anchored at the lower-left
+/// tile (origin `min(a.tile, b.tile) · extent`, recovering global coords); fold with that min tile as
+/// the running anchor.
 ///
-/// `a` and `b` are `(tile, runs)` pairs as produced by the slicers, each set of runs in its own
-/// tile-local frame. `runs` is anything sliceable to `[V]` (e.g. `&[Vec<V>]`, or `&[&[V]]` collected
-/// from a [`FeatureView`](crate::FeatureView)). The result is expressed in a **shared tile-local
-/// frame** anchored at the lower-left of the two tiles (its origin is the component-wise-minimum
-/// tile's `[0, 0]` corner), so adding that origin (`min(a.tile, b.tile) · extent`) recovers global
-/// coordinates. Fold with that min tile as the running anchor.
-///
-/// Because slicing keeps original vertices, a segment crossing a shared border is present in *both*
-/// tiles. Merging rebases both into the shared frame, collects their **distinct** directed edges (so
-/// every duplicated border segment collapses to one), and re-chains those edges into maximal runs.
-/// Parts that don't (yet) connect stay separate runs.
+/// Since slicing keeps original vertices, a segment crossing a shared border appears in both tiles.
+/// Merging rebases both into the shared frame, keeps the **distinct** directed edges (collapsing each
+/// duplicate), and re-chains them into maximal runs; parts that don't connect stay separate.
 ///
 /// # Errors
 ///
@@ -69,18 +64,13 @@ pub fn merge<V: Vertex, L: AsRef<[V]>>(
     Ok(stitch(&runs))
 }
 
-/// Rejoin overlapping runs into maximal polylines by working on their **directed edges** (consecutive
-/// vertex pairs, keyed by position). A segment crossing a shared border is the *same* directed edge
-/// in both tiles, so collecting the **distinct** edges drops every such duplicate — whether the
-/// overlap is a shared endpoint, a shared segment, or one tile's whole run sitting inside the other's.
-/// The distinct edges are then chained back into maximal runs by following each vertex to its
-/// outgoing edge.
+/// Rejoin overlapping runs into maximal polylines via their **directed edges** (consecutive vertex
+/// pairs, keyed by position): a border-crossing segment is the same edge in both tiles, so keeping the
+/// distinct edges drops every duplicate, and following each vertex to its outgoing edge re-chains them.
 ///
-/// Order-independent and deterministic: edges and positions keep first-seen order, and outgoing edges
-/// are followed first-seen first. For a simple (non-self-touching) polyline every interior position
-/// has one in- and one out-edge, so the reconstruction is exact; where the geometry genuinely
-/// revisits a position, any covering chain is produced (deterministic but arbitrary). Every input run
-/// has ≥2 vertices, so each contributes at least one edge.
+/// Order-independent and deterministic (edges/positions keep first-seen order). A simple polyline
+/// reconstructs exactly; where the geometry revisits a position, some covering chain is produced
+/// (deterministic but arbitrary).
 fn stitch<V: Vertex>(runs: &[Vec<V>]) -> Vec<Vec<V>> {
     // Distinct directed edges, in first-seen order (dedup by endpoint positions).
     let mut seen: HashSet<(Coord<i32>, Coord<i32>)> = HashSet::new();

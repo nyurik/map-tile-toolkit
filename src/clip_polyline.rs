@@ -53,56 +53,6 @@ pub(crate) fn segment_intersects(
     !(s.iter().all(|&v| v > 0) || s.iter().all(|&v| v < 0))
 }
 
-/// Clip one line (a slice of [`Vertex`]) to the closed integer rectangle `[min, max]`, appending
-/// each kept run to `out` in the tile-local frame whose `[0, 0]` corner is `origin` (each kept
-/// vertex is stored with its position offset by `origin`, its payload untouched, so no separate
-/// localization pass is needed).
-///
-/// Streams the vertices with no scratch allocation: consecutive duplicates (same position) are
-/// skipped inline, and a run grows across **consecutive segments that touch the box** — both
-/// endpoints of every segment in the run. A segment that misses the box ends the current run, so a
-/// segment crossing the box with no vertex inside is still kept, while a stretch that leaves and
-/// re-enters comes back as separate pieces. Each run of ≥2 vertices is moved out as one output run.
-///
-/// The box test uses the original (global) positions; only the stored vertices are localized.
-///
-/// # Errors
-///
-/// [`SliceError::Overflow`] if a kept vertex lies more than an `i32` span from `origin` (its local
-/// position would not fit `i32`).
-pub(crate) fn clip_line<V: Vertex>(
-    line: &[V],
-    min: Coord<i32>,
-    max: Coord<i32>,
-    origin: Coord<i32>,
-    out: &mut Vec<Vec<V>>,
-) -> Result<(), SliceError> {
-    let mut prev: Option<V> = None;
-    let mut cur: Vec<V> = Vec::new();
-    for &c in line {
-        if prev.map(|v| v.position()) == Some(c.position()) {
-            continue; // drop a consecutive duplicate vertex (same position)
-        }
-        if let Some(a) = prev {
-            if segment_intersects(a.position(), c.position(), min, max) {
-                if cur.is_empty() {
-                    cur.push(to_local(a, origin)?);
-                }
-                cur.push(to_local(c, origin)?);
-            } else if cur.len() >= 2 {
-                out.push(std::mem::take(&mut cur));
-            } else {
-                cur.clear();
-            }
-        }
-        prev = Some(c);
-    }
-    if cur.len() >= 2 {
-        out.push(cur);
-    }
-    Ok(())
-}
-
 /// Re-express vertex `v` in the tile-local frame whose `[0, 0]` corner is `origin`: its position
 /// becomes `position − origin`, its payload unchanged. [`SliceError::Overflow`] if the offset leaves the
 /// `i32` range — possible only when a far crossing-segment endpoint lies more than a full `i32` span

@@ -1,28 +1,16 @@
-//! The public slicing API: [`SlicerAll`] (accumulate every tile a polyline touches) and
-//! [`SlicerOne`] (accumulate a single, fixed tile).
+//! The public slicing API: [`SlicerAll`] (every tile a polyline touches) and [`SlicerOne`] (one fixed
+//! tile), both over the stateless [`Grid`] engine.
 //!
-//! Both wrap the same stateless [`Grid`] engine and accumulate results as **features**. Each polyline
-//! added with [`add_feature`](SlicerAll::add_feature) is an independent feature; it is sliced and its
-//! per-tile runs recorded under that feature. A single polyline can still yield several runs in one
-//! tile (it left the tile and re-entered), and those runs stay grouped as that tile's feature.
+//! Each polyline added with [`add_feature`](SlicerAll::add_feature) is an independent **feature**,
+//! sliced and recorded per tile; one polyline can yield several runs in a tile (it left and
+//! re-entered), which stay grouped as that tile's feature. Read back with borrowed iterators:
+//! [`SlicerAll::iter_tiles`] → [`TileView::iter_features`] → [`FeatureView::iter_polylines`], or
+//! [`SlicerOne::iter_features`] directly. Runs are in each tile's local frame (origin at the tile's
+//! `[0, 0]` corner, so in-tile vertices land in `0..extent`); [`merge`](crate::merge) is the inverse.
 //!
-//! Read the accumulated state back with iterators, never owned `Vec`s:
-//!
-//! - [`SlicerAll::iter_tiles`] → [`TileView::iter_features`] → [`FeatureView::iter_polylines`];
-//! - [`SlicerOne::iter_features`] → [`FeatureView::iter_polylines`] (one implicit tile, so no tile
-//!   level).
-//!
-//! Runs come out in each tile's **local frame**: the tile's `[0, 0]` corner is the origin, so a
-//! vertex at global `(x, y)` is `(x − tile.x·extent, y − tile.y·extent)` (in-tile vertices land in
-//! `0..extent`; buffer vertices past the low edge go negative). [`merge`](crate::merge) is the
-//! inverse, stitching a tile's pieces back together.
-//!
-//! ## Storage
-//!
-//! A tile's geometry is stored **flattened** in a [`TileBuf`]: every vertex concatenated into one
-//! `verts` arena, with run and feature boundaries kept as `u32` offset arrays rather than nested
-//! `Vec`s. [`SlicerAll`] keeps the tiles in a `Vec<TileBuf>` (stable slots) plus a `BTreeMap` from
-//! [`TileId`] to slot for find-or-insert and ordered reads; [`SlicerOne`] holds a single `TileBuf`.
+//! Storage: each tile is a flattened [`TileBuf`] — one `verts` arena with `u32` run/feature boundary
+//! offsets, not nested `Vec`s. [`SlicerAll`] holds `Vec<TileBuf>` (stable slots) plus a `BTreeMap`
+//! from [`TileId`] to slot for find-or-insert and ordered reads; [`SlicerOne`] holds one `TileBuf`.
 
 use std::collections::BTreeMap;
 
@@ -34,18 +22,15 @@ use crate::grid::{Grid, RouteSink};
 use crate::tile::TileId;
 use crate::vertex::Vertex;
 
-/// One tile's accumulated geometry, flattened: all runs' vertices concatenated into `verts`, with
-/// run and feature boundaries kept as offsets instead of nested `Vec`s.
+/// One tile's accumulated geometry, flattened: all runs' vertices concatenated into `verts`, with run
+/// and feature boundaries as `u32` offsets instead of nested `Vec`s.
 ///
 /// - run `r` is `verts[run_ends[r-1] .. run_ends[r]]` (with `run_ends[-1] ≡ 0`);
 /// - feature `f` is the runs `run_ends[feat_ends[f-1] .. feat_ends[f]]`.
 ///
-/// Only non-empty features are ever recorded, so every `feat_ends` span holds at least one run.
-///
-/// `open_step` is the [`SlicerAll`] segment step at which this tile was last written; its direct-build
-/// compares it to the current step (run continuity) and to the feature's start step (whether this
-/// tile already belongs to the feature being added). It is unused by [`SlicerOne`], which builds whole
-/// features at once.
+/// Only non-empty features are recorded, so every `feat_ends` span holds ≥1 run. `open_step` is the
+/// [`SlicerAll`] step at which this tile was last written, compared against the current step (run
+/// continuity) and the feature's start (new feature vs. re-entry). Unused by [`SlicerOne`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TileBuf<V> {
     tile: TileId,
@@ -226,12 +211,10 @@ impl<V: Vertex> SlicerAll<V> {
     /// Add `polyline` as an independent feature: slice it into every tile it touches, storing its runs
     /// as a fresh feature in each. Chainable.
     ///
-    /// **Atomic:** the polyline is streamed straight into the per-tile buffers, but on error every
-    /// piece written for it is rolled back, so a failed polyline contributes nothing and the
-    /// accumulator stays exactly as usable as before the call — safe to skip the offending input and
-    /// keep adding. (Errors only arise for pathological input: an oversized polyline, an adversarially
-    /// wide spread, or coordinates near the `i32` limits.) An unobservable internal step counter still
-    /// advances; use [`clear`](Self::clear) to reset the accumulator entirely.
+    /// **Atomic:** on error the pieces written so far are rolled back, so a failed polyline leaves the
+    /// accumulator unchanged and usable — safe to skip the offending input and keep adding. (Errors
+    /// only arise for pathological input: an oversized polyline, an adversarial spread, or coordinates
+    /// near the `i32` limits.)
     ///
     /// # Errors
     ///

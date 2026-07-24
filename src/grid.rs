@@ -9,7 +9,7 @@
 use geo_types::Coord;
 
 use crate::SliceError;
-use crate::clip_polyline::{clip_line, segment_intersects};
+use crate::clip_polyline::{segment_intersects, to_local};
 use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
@@ -84,19 +84,11 @@ impl Located {
 /// The tile geometry a slicer clips against: the tile side ([`extent`](Self::extent)) and a
 /// [`buffer`](Self::buffer), plus the clipping engine.
 ///
-/// Coordinates are integers in a pre-scaled **tile space**: a coordinate `x` belongs to tile
-/// `x.div_euclid(extent)`, and a vertex kept in tile `t` is emitted at `x − t·extent ∈ [0, extent)`.
-/// So `extent` is both the tile side and each tile's output resolution — the number of integers
-/// across a tile. Each tile's clip box is grown outward by `buffer` units on every side.
-///
-/// The library owns no float/projection math: callers project, simplify, and affine-scale their data
-/// into this integer tile space up front (e.g. with `geo`), so `Grid` stays dimensionless.
-///
-/// Clipping keeps the polyline's original vertices and includes every tile a segment passes through.
-/// Output pieces are **tile-local runs** — the tile's `[0, 0]` corner is the origin.
-///
-/// The engine never panics: bad input (an oversized polyline, or coordinates that overflow the tile
-/// math) yields an [`SliceError`] instead.
+/// Integers in pre-scaled tile space: `x` belongs to tile `x.div_euclid(extent)` and is emitted at
+/// `x − tile·extent ∈ [0, extent)`, so `extent` is both the tile side and its output resolution; each
+/// clip box grows `buffer` on every side. The library owns no float/projection math (callers scale
+/// into this space up front), keeps original vertices, and never panics — bad input yields a
+/// [`SliceError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Grid {
     /// Tile side length in tile space, i.e. the per-tile output resolution (always in `1..=i32::MAX`).
@@ -160,7 +152,7 @@ impl Grid {
         tile: TileId,
     ) -> Result<Vec<Vec<V>>, SliceError> {
         let poly = polyline;
-        let (min, max) = self.tile_bounds(tile)?;
+        let (min, max) = self.tile_buffered_bounds(tile)?;
         // The tile origin is `min` grown back by the buffer: `tile_bounds` already proved
         // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
         // overflow — no need to recompute (and re-check) `tile · extent`.
@@ -168,29 +160,50 @@ impl Grid {
             x: min.x + self.buffer,
             y: min.y + self.buffer,
         };
-        // Clip and localize in one pass: `clip_line` stores each kept vertex already offset by the
+        // Clip and localize in one pass: store each kept vertex already offset by the
         // tile origin, so there is no separate localization pass over the output.
         let mut runs = Vec::new();
-        clip_line(poly, min, max, origin, &mut runs)?;
+        let mut prev: Option<V> = None;
+        let mut cur: Vec<V> = Vec::new();
+        for &c in poly {
+            if prev.map(|v| v.position()) == Some(c.position()) {
+                continue; // drop a consecutive duplicate vertex (same position)
+            }
+            if let Some(a) = prev {
+                if segment_intersects(a.position(), c.position(), min, max) {
+                    if cur.is_empty() {
+                        cur.push(to_local(a, origin)?);
+                    }
+                    cur.push(to_local(c, origin)?);
+                } else if cur.len() >= 2 {
+                    runs.push(std::mem::take(&mut cur));
+                } else {
+                    cur.clear();
+                }
+            }
+            prev = Some(c);
+        }
+        if cur.len() >= 2 {
+            runs.push(cur);
+        }
+
         Ok(runs)
     }
 
-    /// Walk one `polyline` once and drive `sink` with every `(tile, segment)` it produces — the same
-    /// routing the per-tile clip agrees with, but streamed into the sink instead of collected into a
-    /// hit list. [`SlicerAll`](crate::SlicerAll) uses this to write clipped vertices straight into its
-    /// per-tile buffers, with no intermediate allocation, sort, or copy.
+    /// Walk one `polyline` once, driving `sink` with every `(tile, segment)` it produces — the same
+    /// routing the per-tile clip agrees with, streamed instead of collected into a hit list, so
+    /// [`SlicerAll`](crate::SlicerAll) writes clipped vertices straight into its buffers with no
+    /// intermediate allocation, sort, or copy.
     ///
-    /// Every segment (consecutive same-position vertices skipped) is routed into each tile whose
-    /// buffered box it touches, in walk order. As a fast path, a segment whose two endpoints both lie
-    /// in one tile's inner box (≥ `buffer` from every edge) — the common case for a dense polyline —
-    /// is routed straight to that single tile, skipping the per-corner `tile_of` and the per-candidate
-    /// geometry test; the owning tile is cached across the walk (see [`Located`]), so division happens
-    /// only when the polyline crosses into a new tile. The sink sees, per touched tile, the tile id,
-    /// its local-frame origin, and the segment's two **original** vertices (localization is its job).
+    /// Each segment (skipping consecutive duplicate positions) is routed into every tile whose
+    /// buffered box it touches, in walk order. Fast path: a segment lying entirely within one tile's
+    /// inner box (≥ `buffer` from every edge — the common case) goes straight to that tile, skipping
+    /// `tile_of` and the geometry test; the owning tile is cached across the walk (see [`Located`]).
+    /// The sink gets each touched tile's id, local-frame origin, and the segment's two **original**
+    /// vertices (it localizes).
     ///
-    /// `sink.begin_polyline` is called once, then `sink.begin_segment` before each segment's `emit`s,
-    /// so the sink can track run continuity (a run grows only across segments one tile sees back to
-    /// back).
+    /// `begin_polyline` is called once, then `begin_segment` before each segment's `emit`s, so the
+    /// sink can track run continuity.
     ///
     /// # Errors
     ///
@@ -287,7 +300,7 @@ impl Grid {
                     for ty in lo.y..=hi.y {
                         for tx in lo.x..=hi.x {
                             let tile = TileId::new(tx, ty);
-                            let (min, max) = self.tile_bounds(tile)?;
+                            let (min, max) = self.tile_buffered_bounds(tile)?;
                             if segment_intersects(a_pos, c, min, max) {
                                 // Tile origin = base = min + buffer.
                                 let origin = Coord {
@@ -315,7 +328,7 @@ impl Grid {
     /// The closed integer bounds `(min, max)` of `tile`'s clip box (in output space), grown by
     /// `buffer` on each side. All arithmetic is checked; [`SliceError::Overflow`] means the tile lies
     /// outside the representable range for this `extent`.
-    fn tile_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), SliceError> {
+    fn tile_buffered_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), SliceError> {
         let base_x = tile
             .x
             .checked_mul(self.extent)
@@ -345,13 +358,13 @@ impl Grid {
     }
 
     /// Locate the tile owning `c` (in output space), with its core and inner boxes precomputed (see
-    /// [`Located`]). Built on [`Self::tile_bounds`], so it reports [`SliceError::Overflow`] for exactly
+    /// [`Located`]). Built on [`Self::tile_buffered_bounds`], so it reports [`SliceError::Overflow`] for exactly
     /// the tiles the routing scan would — `min = base − buffer` and `max = base + extent − 1 + buffer`,
     /// from which the core (`base .. base + extent − 1`) and inner (`base + buffer .. max − 2·buffer`)
     /// follow by `± buffer` (all within `[min, max]`, so no further overflow).
     fn locate(self, c: Coord<i32>) -> Result<Located, SliceError> {
         let owner = tile_of(c, self.extent);
-        let (min, max) = self.tile_bounds(owner)?;
+        let (min, max) = self.tile_buffered_bounds(owner)?;
         Ok(Located {
             owner,
             core_lo: Coord {
