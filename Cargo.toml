@@ -10,14 +10,14 @@ keywords = ["mvt", "tile", "geo", "polyline", "clip"]
 categories = ["science::geo"]
 rust-version = "1.88"
 
-[[bench]]
-name = "slicing"
-harness = false
-
 # Uses the `geo` bridge (`add_geometry` / `iter_geometries`), so it is skipped without that feature.
 [[example]]
 name = "simplify_slice"
 required-features = ["geo"]
+
+[[bench]]
+name = "slicing"
+harness = false
 
 [features]
 default = ["geo"]
