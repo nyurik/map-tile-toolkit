@@ -13,8 +13,8 @@
 //! * **project** — one tile at `<zoom>` spans `divisor = EARTH_CIRCUMFERENCE / 2^zoom` metres, cut
 //!   into `EXTENT` units, so the whole world is `2^zoom * EXTENT` integer units across. Web Mercator
 //!   metres map into that `i32` grid (Y flipped so tile row 0 is at the north edge).
-//! * **slice** — a fresh [`SlicerAll`] per geometry; iterate its `(TileId, Geometry)` pieces through
-//!   [`black_box`].
+//! * **slice** — accumulate every geometry into one [`SlicerAll`] (all lines share a single tile
+//!   grid), then walk its tiles → features → polylines through [`black_box`].
 
 #![allow(clippy::pedantic, reason = "profiling helper")]
 
@@ -101,21 +101,29 @@ fn main() {
     let t = Instant::now();
     let mut tiles = 0u64;
     let mut skipped = 0u64;
+    // Accumulate every geometry into one slicer: all lines share a single tile grid, the way you would
+    // build a whole tiled dataset in one pass.
+    let mut acc = SlicerAll::new(EXTENT, 0).expect("valid slicer config");
     for geom in &geoms {
-        let mut acc = SlicerAll::new(EXTENT, 0).expect("valid slicer config");
         if acc.add_geometry(black_box(geom)).is_err() {
             skipped += 1;
-            continue;
-        }
-        for (tile, piece) in acc.iter_geometries() {
-            black_box(&tile);
-            black_box(&piece);
-            tiles += 1;
         }
     }
-    black_box(tiles);
+    // Read the accumulated tiles back through the borrowed iterators (no owned `Geometry`).
+    let mut pieces = 0u64;
+    for tile in acc.iter_tiles() {
+        black_box(tile.id());
+        for feature in tile.iter_features() {
+            for polyline in feature.iter_polylines() {
+                black_box(polyline);
+                pieces += 1;
+            }
+        }
+        tiles += 1;
+    }
+    black_box(pieces);
     eprintln!(
-        "sliced {} geometries into {tiles} tile pieces ({skipped} skipped) in {:?}",
+        "sliced {} geometries into {tiles} tiles / {pieces} pieces ({skipped} skipped) in {:?}",
         geoms.len(),
         t.elapsed()
     );

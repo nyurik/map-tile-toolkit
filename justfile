@@ -26,7 +26,15 @@ bench filter='':
 bench-big: (bench 'big')
 
 # Flamegraph one profiling case (see `examples/profile.rs`), e.g. `just flamegraph big-all-multi 5000`
-flamegraph name *args:  (_flamegraph name args)
+# Profile the `profile` example for one case with cargo-flamegraph, writing target/flamegraphs/<name>.svg
+flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
+    mkdir -p target/flamegraphs
+    svg="target/flamegraphs/{{name}}.svg"
+    cargo flamegraph --profile profiling --example profile --output "$svg" -- {{name}} {{args}}
+    echo "Wrote $svg"
 
 # Flamegraph every profiling case into target/flamegraphs/<name>.svg (args optional; default iters per case), e.g. `just flamegraph-all 5000`
 flamegraph-all: \
@@ -38,17 +46,6 @@ flamegraph-all: \
         (flamegraph 'big-one-multi') \
         (flamegraph 'big-one-few') \
         (flamegraph 'big-one-single')
-
-# Profile the `profile` example for one case with cargo-flamegraph, writing target/flamegraphs/<name>.svg
-[private]
-_flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # perf may need `sudo sysctl kernel.perf_event_paranoid=1` (or run this recipe as root).
-    mkdir -p target/flamegraphs
-    svg="target/flamegraphs/{{name}}.svg"
-    cargo flamegraph --profile profiling --example profile --output "$svg" -- {{name}} {{args}}
-    echo "Wrote $svg"
 
 # Fuzz a target with cargo-fuzz (needs nightly), e.g. `just fuzz slice_equivalence -- -max_total_time=60`
 fuzz target='slice_equivalence' *args:  (cargo-install 'cargo-fuzz')
