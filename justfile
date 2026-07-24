@@ -28,6 +28,17 @@ bench-big: (bench 'big')
 # Flamegraph one profiling case (see `examples/profile.rs`), e.g. `just flamegraph big-all-multi 5000`
 flamegraph name *args:  (_flamegraph name args)
 
+# Flamegraph every profiling case into target/flamegraphs/<name>.svg (args optional; default iters per case), e.g. `just flamegraph-all 5000`
+flamegraph-all: \
+        (flamegraph 'all') \
+        (flamegraph 'one') \
+        (flamegraph 'big-all-multi') \
+        (flamegraph 'big-all-few') \
+        (flamegraph 'big-all-single') \
+        (flamegraph 'big-one-multi') \
+        (flamegraph 'big-one-few') \
+        (flamegraph 'big-one-single')
+
 # Profile the `profile` example for one case with cargo-flamegraph, writing target/flamegraphs/<name>.svg
 [private]
 _flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
