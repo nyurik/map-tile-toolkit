@@ -12,9 +12,10 @@
 //!    - **All-tiles == exhaustive per-tile scan** over the reachable span (skipped when a tiny
 //!      extent makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
-//! 3. Accumulating all polylines never panics, and **merge is order-independent:** `merge(a, b)`
-//!    reconstructs the same connectivity (directed-edge set) as `merge(b, a)` for every adjacent
-//!    pair of accumulated tiles. (The *order* of the returned runs is unspecified.)
+//! 3. Accumulating all polylines never panics, and a `Mosaic` fed those same tiles reassembles them:
+//!    every tile is accepted (a slicer's own tiles are self-consistent), the reassembled directed-edge
+//!    set equals the original input's, insertion order does not matter, and purging every tile empties
+//!    it.
 //!
 //! Coordinates are `i8` (small, so slicing stays fast and the invariants get many cheap
 //! iterations); the extent/buffer range freely and the probe tile is a full `i32`, so the
@@ -28,7 +29,7 @@ use std::collections::{BTreeMap, HashSet};
 use arbitrary::Arbitrary;
 use geo_types::Coord;
 use libfuzzer_sys::fuzz_target;
-use map_tile_toolkit::{SlicerAll, SlicerOne, TileId, merge};
+use map_tile_toolkit::{Mosaic, SlicerAll, SlicerOne, TileId};
 
 /// Cap on tiles scanned by the exhaustive oracle per run (each scanned tile re-walks the polyline),
 /// so a tiny extent can't blow up time.
@@ -145,8 +146,7 @@ fuzz_target!(|input: Input| {
         assert_eq!(all, all_duped, "duplicating every vertex changed the result");
     }
 
-    // (5) Accumulating all polylines never panics; merge reconstructs the same connectivity on the
-    // result regardless of the order its two tiles are passed.
+    // (5) Accumulating all polylines never panics.
     let mut acc = SlicerAll::new(extent, buffer).expect("extent validated");
     for poly in &polylines {
         if acc.add_feature(poly).is_err() {
@@ -154,36 +154,49 @@ fuzz_target!(|input: Input| {
         }
     }
     let map = drain_all(&acc);
-    let ids: Vec<TileId> = map.keys().copied().collect();
-    for &t in &ids {
-        for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
-            let n = TileId::new(t.x + dx, t.y + dy);
-            let (Some(a), Some(b)) = (map.get(&t), map.get(&n)) else {
-                continue;
-            };
-            let ab = merge(extent, (t, a.as_slice()), (n, b.as_slice()));
-            let ba = merge(extent, (n, b.as_slice()), (t, a.as_slice()));
-            // `merge` reconstructs the same *connectivity* regardless of input order; the *order* of
-            // the returned runs is unspecified (disconnected components come out first-seen), so
-            // compare directed-edge sets, not the run vectors — same contract as `tests/merge.rs`.
-            match (ab, ba) {
-                (Ok(ab), Ok(ba)) => assert_eq!(
-                    edge_set(&ab),
-                    edge_set(&ba),
-                    "merge connectivity differs by input order for {t:?}/{n:?}"
-                ),
-                (ab, ba) => assert_eq!(
-                    ab.is_ok(),
-                    ba.is_ok(),
-                    "merge succeeds in only one input order for {t:?}/{n:?}"
-                ),
-            }
+
+    // (6) `Mosaic` reassembles a `SlicerAll`'s own tiles: self-consistent tiles never conflict, every
+    // touched tile registers, and the reassembled global edges equal the original input's. Insertion
+    // order must not matter (forward vs reversed give the same connectivity), and purging every tile
+    // empties it.
+    let build = |reversed: bool| -> Mosaic<Coord<i32>> {
+        let mut entries: Vec<(&TileId, &Runs)> = map.iter().collect();
+        if reversed {
+            entries.reverse();
         }
+        let mut mosaic = Mosaic::new(extent).expect("extent validated");
+        for (tile, runs) in entries {
+            mosaic
+                .add(*tile, runs.as_slice())
+                .expect("a slicer's own tiles are self-consistent");
+        }
+        mosaic
+    };
+    let forward = build(false);
+    let reversed = build(true);
+    assert_eq!(forward.len(), map.len(), "every touched tile is added");
+    let fwd: Runs = forward.iter_features().collect();
+    let rev: Runs = reversed.iter_features().collect();
+    assert_eq!(
+        edge_set(&fwd),
+        edge_set(&polylines),
+        "mosaic must recover the original global edges"
+    );
+    assert_eq!(
+        edge_set(&fwd),
+        edge_set(&rev),
+        "mosaic connectivity must not depend on insertion order"
+    );
+
+    let mut mosaic = forward;
+    for tile in map.keys() {
+        assert!(mosaic.purge(*tile), "every added tile purges");
     }
+    assert!(mosaic.is_empty(), "purging every tile empties the mosaic");
 });
 
-/// Directed-edge set of a run list, skipping zero-length edges — the connectivity `merge` must
-/// preserve regardless of the order its two inputs are given. Mirrors the `tests/merge.rs` oracle.
+/// Directed-edge set of a run list, skipping zero-length edges — the connectivity a `Mosaic` must
+/// preserve regardless of tile insertion order.
 fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
     let mut set = HashSet::new();
     for run in runs {

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use geo_types::Coord;
-use map_tile_toolkit::{Measured, SlicerAll, TileId, Vertex, merge};
+use map_tile_toolkit::{CombineError, Measured, Mosaic, SlicerAll, TileId, Vertex};
 
 /// Slice one polyline into every tile it touches (as a single feature), each tile's runs flattened.
 /// Generic over the vertex type, so the same helper drives both the `Measured` and `Coord` paths.
@@ -79,24 +79,35 @@ fn positions_match_the_coord_path() {
 }
 
 #[test]
-fn merge_reconstructs_with_m_values() {
-    let tiles = slice_all_runs(&measured_line());
+fn mosaic_reconstructs_with_m_values() {
+    // Feed every sliced tile into a mosaic; it reassembles the original line in the global frame with
+    // every M value carried through unchanged (the duplicated border segments collapse).
+    let mut mosaic = Mosaic::new(10).expect("valid config");
+    for (tile, runs) in slice_all_runs(&measured_line()) {
+        mosaic
+            .add(tile, runs.as_slice())
+            .expect("self-consistent tiles never conflict");
+    }
+    let feats: Vec<Vec<Measured<u32>>> = mosaic.iter_features().collect();
+    assert_eq!(feats, vec![measured_line()]);
+}
 
-    // Merge tiles (0,1) and (0,2); the shared frame is anchored at (0,1).
-    let merged = merge(
-        10,
-        (TileId::new(0, 1), tiles[&TileId::new(0, 1)].as_slice()),
-        (TileId::new(0, 2), tiles[&TileId::new(0, 2)].as_slice()),
-    )
-    .expect("merge");
-
-    // The duplicated border segment collapses; the reconstructed run keeps every M value.
-    assert_eq!(
-        merged,
-        vec![vec![
-            Measured::new(5, -5, 10),
-            Measured::new(5, 5, 20),
-            Measured::new(5, 15, 30),
-        ]]
+#[test]
+fn mosaic_rejects_a_payload_mismatch() {
+    // Two tiles share the border segment (5,5)→(5,15), but tile (0,1) carries a different M on the
+    // shared vertex — the mosaic rejects it, naming tile (0,0), and stays unchanged.
+    let mut mosaic = Mosaic::new(10).expect("valid config");
+    mosaic
+        .add(
+            TileId::new(0, 0),
+            &[vec![Measured::new(5, 5, 10), Measured::new(5, 15, 20)]],
+        )
+        .expect("first tile");
+    let bad = mosaic.add(
+        TileId::new(0, 1),
+        &[vec![Measured::new(5, -5, 10), Measured::new(5, 5, 999)]],
     );
+    assert_eq!(bad, Err(CombineError::Conflict(vec![TileId::new(0, 0)])));
+    assert_eq!(mosaic.len(), 1);
+    assert!(mosaic.contains(TileId::new(0, 0)));
 }

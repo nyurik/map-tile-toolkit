@@ -15,7 +15,7 @@ pub enum SliceError {
     InvalidExtent,
 
     /// The `buffer` was too large for the tile size: it must be **strictly less than half** the
-    /// `extent`, so geometry near a tile edge spills into at most one neighbouring tile per axis.
+    /// `extent`, so geometry near a tile edge spills into at most one neighboring tile per axis.
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 

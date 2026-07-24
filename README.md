@@ -56,28 +56,30 @@ emitted at `x − tile·extent ∈ [0, extent)`; add `tile · extent` to recover
 all float/projection work up front (e.g. with [`geo`](https://docs.rs/geo)). For web-mercator at zoom
 `z`: project, simplify, then apply one affine — scale `s = 2^z · extent / circumference`, translate
 the top-left corner to the origin, flip `y`, round to `i32` — landing data in `[0, 2^z · extent)`.
-`buffer` and `merge`'s `extent` are in these same units.
+`buffer` and `Mosaic`'s `extent` are in these same units.
 
 ### Merging tiles back
 
-`merge` is the stateless inverse of slicing: pass two `(tile, runs)` pairs at the same `extent` and it
-stitches shared-border duplicates back into connected runs, in a frame anchored at the lower-left
-tile. Non-adjacent tiles stay disconnected until a connecting tile is merged in; fold across many
-tiles with that min tile as the running anchor.
+`Mosaic` is the stateful inverse of `SlicerAll`: add tiles (each tile's runs, in its local frame) and
+it reassembles whole features across borders in the global frame. Continuity is by shared border
+edge, so an inconsistent tile — one whose shared segment disagrees (coordinates or payload) with an
+already-added tile — is rejected with the conflicting tile ids, leaving the mosaic unchanged. `purge`
+drops a tile; `iter_features` walks every reassembled feature.
 
 ```rust
 use geo_types::Coord;
-use map_tile_toolkit::{SlicerAll, TileId, merge};
+use map_tile_toolkit::{Mosaic, SlicerAll};
 
 let mut slicer = SlicerAll::new(25, 0)?;
 slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }])?;
 
-let tiles: Vec<(TileId, Vec<&[Coord<i32>]>)> = slicer
-    .iter_tiles()
-    .map(|t| (t.id(), t.iter_features().flat_map(|f| f.iter_polylines()).collect()))
-    .collect();
-if let [(ta, ra), (tb, rb), ..] = tiles.as_slice() {
-    let _merged = merge(slicer.extent(), (*ta, ra.as_slice()), (*tb, rb.as_slice()))?;
+let mut mosaic = Mosaic::new(slicer.extent())?;
+for tile in slicer.iter_tiles() {
+    let runs: Vec<&[Coord<i32>]> = tile.iter_features().flat_map(|f| f.iter_polylines()).collect();
+    mosaic.add(tile.id(), &runs).expect("consistent tiles never conflict");
+}
+for feature in mosaic.iter_features() {
+    let _ = feature; // Vec<Coord<i32>> in global coordinates
 }
 # Ok::<(), map_tile_toolkit::SliceError>(())
 ```

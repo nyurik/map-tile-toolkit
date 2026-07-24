@@ -63,7 +63,7 @@ pub(crate) trait RouteSink<V: Vertex> {
 ///   extent`); a coordinate here has this tile as its owner.
 /// - the **inner box** `[base + buffer, base + extent − 1 − buffer]` is the core shrunk by the
 ///   buffer; a segment with both endpoints inside it stays ≥ `buffer` from every edge, so it cannot
-///   reach any neighbouring tile's buffered box.
+///   reach any neighboring tile's buffered box.
 #[derive(Clone, Copy)]
 struct Located {
     owner: TileId,
@@ -114,7 +114,7 @@ impl Grid {
     ///
     /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
     /// - [`SliceError::BufferTooLarge`] if `2 * buffer >= extent` — the buffer must stay under half a
-    ///   tile, so a vertex near an edge spills into at most one neighbour per axis and the
+    ///   tile, so a vertex near an edge spills into at most one neighbor per axis and the
     ///   tile-minus-buffer inner box stays non-empty (both relied on by the routing).
     pub(crate) const fn new(extent: u32, buffer: u16) -> Result<Self, SliceError> {
         if extent == 0 || extent > i32::MAX.cast_unsigned() {

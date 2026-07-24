@@ -18,8 +18,8 @@ mod grid;
 mod slicer;
 pub use slicer::{FeatureView, SlicerAll, SlicerOne, TileView};
 
-mod merge;
-pub use merge::merge;
+mod mosaic;
+pub use mosaic::{CombineError, Mosaic};
 
 // Optional `geo-types` `Geometry` bridge for the accumulator. The core API is geo-free.
 #[cfg(feature = "geo")]
