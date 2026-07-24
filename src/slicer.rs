@@ -30,7 +30,8 @@ use std::collections::BTreeMap;
 use geo_types::Coord;
 
 use crate::SliceError;
-use crate::grid::Grid;
+use crate::clip_polyline::to_local;
+use crate::grid::{Grid, RouteSink};
 use crate::tile::TileId;
 use crate::vertex::Vertex;
 
@@ -40,10 +41,13 @@ use crate::vertex::Vertex;
 /// - run `r` is `verts[run_ends[r-1] .. run_ends[r]]` (with `run_ends[-1] ≡ 0`);
 /// - feature `f` is the runs `run_ends[feat_ends[f-1] .. feat_ends[f]]`.
 ///
-/// `last_id` is the feature id of the most-recent feature written here, so
-/// [`continue_last_feature`](SlicerAll::continue_last_feature) can tell whether the currently-open
-/// feature already reached this tile (extend it) or not (start a new one). Only non-empty features
-/// are ever recorded, so every `feat_ends` span holds at least one run.
+/// `last_id` is the feature id of the most-recent feature written here, so a continuation can tell
+/// whether the currently-open feature already reached this tile (extend it) or not (start a new one).
+/// Only non-empty features are ever recorded, so every `feat_ends` span holds at least one run.
+///
+/// `open_step` is the [`SlicerAll`] segment step at which this tile's current run was last extended;
+/// [`SlicerAll`]'s direct-build compares it to the current step to decide whether a segment continues
+/// the open run or starts a new one. It is unused by [`SlicerOne`] (which builds whole runs at once).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TileBuf<V> {
     tile: TileId,
@@ -51,6 +55,7 @@ struct TileBuf<V> {
     run_ends: Vec<u32>,
     feat_ends: Vec<u32>,
     last_id: u32,
+    open_step: u64,
 }
 
 impl<V> TileBuf<V> {
@@ -61,6 +66,7 @@ impl<V> TileBuf<V> {
             run_ends: Vec::new(),
             feat_ends: Vec::new(),
             last_id: 0,
+            open_step: 0,
         }
     }
 
@@ -203,6 +209,9 @@ pub struct SlicerAll<V: Vertex = Coord<i32>> {
     tiles: Vec<TileBuf<V>>,
     /// [`TileId`] → slot in `tiles`, ordered so reads come out by tile and find-or-insert is cheap.
     index: BTreeMap<TileId, u32>,
+    /// Monotonic segment counter for the direct-build run continuity (see [`RouteSink::emit`]). A gap
+    /// is inserted at each polyline boundary so a run never continues across separate polylines.
+    step: u64,
 }
 
 impl<V: Vertex> SlicerAll<V> {
@@ -219,6 +228,7 @@ impl<V: Vertex> SlicerAll<V> {
             open: None,
             tiles: Vec::new(),
             index: BTreeMap::new(),
+            step: 0,
         })
     }
 
@@ -234,63 +244,58 @@ impl<V: Vertex> SlicerAll<V> {
         self.grid.buffer()
     }
 
-    /// Begin a new feature from `polyline`: slice it into every tile it touches and store its runs as
-    /// a fresh feature in each. Chainable.
+    /// Begin a new feature from `polyline`: slice it into every tile it touches, storing its runs as a
+    /// fresh feature in each. Chainable.
     ///
-    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
+    /// Not atomic: pieces are written into the per-tile buffers as the polyline is walked, so on error
+    /// the accumulator may hold a partial result — discard it or [`clear`](Self::clear) after an error.
+    /// (Errors only arise for pathological input: an oversized polyline, an adversarially wide spread,
+    /// or coordinates near the `i32` limits.)
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`],
-    /// or [`SliceError::Overflow`].
+    /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
-        let sliced = self.grid.slice_all(polyline.as_ref())?;
-        let id = begin_feature(&mut self.next_feature, &mut self.open);
-        for (tile, runs) in sliced {
-            self.absorb_tile(tile, id, runs);
-        }
+        begin_feature(&mut self.next_feature, &mut self.open);
+        let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
+        grid.route(polyline.as_ref(), self)?;
         Ok(self)
     }
 
-    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another
-    /// `polyline` — slice it and fold its per-tile runs into that same feature (so the lines of one
-    /// multi-line geometry stay a single feature). If no feature is open yet, this begins one.
+    /// Extend the feature opened by the last [`add_feature`](Self::add_feature) with another `polyline`
+    /// — slice it and fold its per-tile runs into that same feature (so the lines of one multi-line
+    /// geometry stay a single feature, as separate runs). If no feature is open yet, this begins one.
     /// Chainable.
     ///
-    /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
+    /// Not atomic (see [`add_feature`](Self::add_feature)).
     ///
     /// # Errors
     ///
-    /// Whatever the engine returns: [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`],
-    /// or [`SliceError::Overflow`].
+    /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
     pub fn continue_last_feature<P: AsRef<[V]>>(
         &mut self,
         polyline: P,
     ) -> Result<&mut Self, SliceError> {
-        let sliced = self.grid.slice_all(polyline.as_ref())?;
-        let id = resume_feature(&mut self.next_feature, &mut self.open);
-        for (tile, runs) in sliced {
-            self.absorb_tile(tile, id, runs);
-        }
+        resume_feature(&mut self.next_feature, &mut self.open);
+        let grid = self.grid;
+        grid.route(polyline.as_ref(), self)?;
         Ok(self)
     }
 
-    /// Fold `runs` (always non-empty, straight from the engine) into `tile`'s buffer under feature
-    /// `id`, creating the buffer on first touch.
+    /// The slot of `tile`'s buffer, creating it on first touch.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "tile count stays far below u32::MAX"
     )]
-    fn absorb_tile(&mut self, tile: TileId, id: u32, runs: Vec<Vec<V>>) {
-        let slot = if let Some(&slot) = self.index.get(&tile) {
-            slot
+    fn tile_slot(&mut self, tile: TileId) -> usize {
+        if let Some(&slot) = self.index.get(&tile) {
+            slot as usize
         } else {
             let slot = self.tiles.len() as u32;
             self.tiles.push(TileBuf::new(tile));
             self.index.insert(tile, slot);
-            slot
-        };
-        self.tiles[slot as usize].absorb(id, runs);
+            slot as usize
+        }
     }
 
     /// Iterate the touched tiles, ordered by [`TileId`], borrowing so the accumulator can keep
@@ -320,6 +325,60 @@ impl<V: Vertex> SlicerAll<V> {
         self.index.clear();
         self.next_feature = 0;
         self.open = None;
+        self.step = 0;
+    }
+}
+
+impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
+    /// A polyline boundary: burn one step so the first segment of this polyline cannot continue a run
+    /// left open by the previous polyline (its runs stay separate, even in a shared tile).
+    fn begin_polyline(&mut self) {
+        self.step = self.step.wrapping_add(1);
+    }
+
+    /// Advance to the next segment.
+    fn begin_segment(&mut self) {
+        self.step = self.step.wrapping_add(1);
+    }
+
+    /// Append segment `a`–`c` to `tile`'s buffer (localized by `origin`), extending the tile's open
+    /// run if the immediately preceding segment also landed here (same feature), else starting a new
+    /// run. The current feature is [`self.open`](Self::open) (set before routing).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "run/vertex counts per tile stay far below u32::MAX"
+    )]
+    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), SliceError> {
+        let fid = self.open.expect("a feature is open while routing");
+        let step = self.step;
+        let slot = self.tile_slot(tile);
+        let buf = &mut self.tiles[slot];
+        // Continue the open run iff the previous segment (step − 1) also landed in this tile. The
+        // per-polyline gap in `begin_polyline` guarantees this never matches across polylines, and a
+        // fresh tile (`open_step == 0`) never matches (the first step is ≥ 2 after the gap).
+        let continues = buf.open_step == step.wrapping_sub(1);
+        let c_local = to_local(c, origin)?;
+        if continues {
+            buf.verts.push(c_local);
+            *buf.run_ends
+                .last_mut()
+                .expect("continuing implies an open run") = buf.verts.len() as u32;
+        } else {
+            let a_local = to_local(a, origin)?;
+            buf.verts.push(a_local);
+            buf.verts.push(c_local);
+            buf.run_ends.push(buf.verts.len() as u32);
+            if buf.last_id == fid && buf.feat_ends.last().is_some() {
+                // Another run in the feature already present here: extend its run span.
+                *buf.feat_ends.last_mut().expect("feature present") = buf.run_ends.len() as u32;
+            } else {
+                // First run of this feature in this tile.
+                buf.feat_ends.push(buf.run_ends.len() as u32);
+                buf.last_id = fid;
+            }
+        }
+        buf.open_step = step;
+        Ok(())
     }
 }
 

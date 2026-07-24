@@ -2,48 +2,50 @@
 //! [`SlicerOne`](crate::SlicerOne).
 //!
 //! [`Grid`] holds only the tile geometry (divider + buffer) and knows how to clip one polyline —
-//! into a single tile ([`Grid::slice_one`]) or into every tile it touches ([`Grid::slice_all`]). It
+//! into a single tile ([`Grid::slice_one`]) or, by routing it into every tile it touches, into a
+//! [`RouteSink`] ([`Grid::route`]). It
 //! keeps no accumulated state; the two public slicers layer feature accumulation on top of it.
 
 use geo_types::Coord;
 
 use crate::SliceError;
-use crate::clip_polyline::{clip_line, segment_intersects, to_local};
+use crate::clip_polyline::{clip_line, segment_intersects};
 use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
-/// One segment of the polyline routed into one tile during [`Grid::slice_all`], packed into 6 bytes
-/// so the sort moves little memory. `dx`/`dy` are the tile's offset from a reference tile (the first
-/// vertex's tile): a polyline is geographically local, so the offsets fit `i16` (checked up front),
-/// and their order equals absolute tile order (the reference is constant), so the derived `Ord` —
-/// `dx`, `dy`, then `i0` — groups each tile's segments in original order. `i0` is the segment's start
-/// vertex's **original** index; the end vertex is the next one at a distinct position (consecutive
-/// duplicates were skipped when routing), so it is recovered on lookup rather than stored. Within a
-/// tile a run continues only when the previous segment ended where this one starts (`prev end ==
-/// i0`); any gap starts a new piece.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct Hit {
-    dx: i16,
-    dy: i16,
-    i0: u16,
-}
-
-/// A vertex index in `0..=u16::MAX` fits the compact [`Hit`]; a polyline up to this many vertices
-/// therefore has all indices representable.
+/// The maximum polyline length the slicer accepts (`u16::MAX + 1` vertices); a longer polyline yields
+/// [`SliceError::PolylineTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
 const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 
-/// Upper bound on the candidate tiles [`Grid::slice_all`] will examine before giving up with
+/// Upper bound on the candidate tiles [`Grid::route`] will examine before giving up with
 /// [`SliceError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
 /// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
 /// well under a second.
 const MAX_TILE_VISITS: i64 = 1 << 25;
 
-/// Per-tile slicing output: for each tile, its runs (each run a vertex list) in that tile's local
-/// frame, ordered by [`TileId`].
-pub(crate) type TileRuns<V> = Vec<(TileId, Vec<Vec<V>>)>;
+/// Sink for [`Grid::route`]: receives every `(tile, segment)` the routing produces and decides how to
+/// store it. [`SlicerAll`](crate::SlicerAll) implements it to append clipped vertices straight into
+/// its per-tile buffers, with no intermediate hit list, sort, or copy.
+pub(crate) trait RouteSink<V: Vertex> {
+    /// Called once at the start of a polyline, before any segment — lets the sink break run continuity
+    /// across separate polylines.
+    fn begin_polyline(&mut self);
+
+    /// Called before each segment's `emit`s, in walk order — lets the sink tell whether a tile's run
+    /// continues (the same tile was emitted to by the immediately preceding segment).
+    fn begin_segment(&mut self);
+
+    /// Route the segment `a`–`c` (the original vertices) into `tile`, whose local-frame origin is
+    /// `origin` (`tile · divider`). The sink localizes and stores.
+    ///
+    /// # Errors
+    ///
+    /// [`SliceError::Overflow`] if a vertex lies more than an `i32` span from `origin`.
+    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), SliceError>;
+}
 
 /// A vertex's owner tile with its core cell and inner box precomputed in **global** coordinates, so
-/// membership tests are plain comparisons with no division. [`Grid::slice_all`] caches the last one
+/// membership tests are plain comparisons with no division. [`Grid::route`] caches the last one
 /// across the vertex walk: consecutive vertices in the same tile reuse it, and a segment whose two
 /// endpoints both lie in the inner box touches only that one tile.
 ///
@@ -168,54 +170,50 @@ impl Grid {
         Ok(runs)
     }
 
-    /// Clip one `polyline` into every tile it touches, as `(tile, runs)` pairs ordered by [`TileId`],
-    /// each run in that tile's local frame (see [`slice_one`](Self::slice_one)).
+    /// Walk one `polyline` once and drive `sink` with every `(tile, segment)` it produces — the same
+    /// routing the per-tile clip agrees with, but streamed into the sink instead of collected into a
+    /// hit list. [`SlicerAll`](crate::SlicerAll) uses this to write clipped vertices straight into its
+    /// per-tile buffers, with no intermediate allocation, sort, or copy.
     ///
-    /// `self.slice_all(poly)` and `self.slice_one(poly, tile)` agree by construction: the runs
-    /// `slice_all` yields for a tile equal what `slice_one` returns for it.
+    /// Every segment (consecutive same-position vertices skipped) is routed into each tile whose
+    /// buffered box it touches, in walk order. As a fast path, a segment whose two endpoints both lie
+    /// in one tile's inner box (≥ `buffer` from every edge) — the common case for a dense polyline —
+    /// is routed straight to that single tile, skipping the per-corner `tile_of` and the per-candidate
+    /// geometry test; the owning tile is cached across the walk (see [`Located`]), so division happens
+    /// only when the polyline crosses into a new tile. The sink sees, per touched tile, the tile id,
+    /// its local-frame origin, and the segment's two **original** vertices (localization is its job).
     ///
-    /// The polyline is walked **once**. Every segment (consecutive same-position vertices skipped) is
-    /// routed into each tile whose buffered box it touches, recording a compact hit (tile as an `i16`
-    /// offset from the first vertex's tile, plus the segment's start vertex's original index). Sorting
-    /// the hits groups every tile's segments together in original order; within a tile a run grows
-    /// while each segment starts where the previous ended (a gap starts a new piece), looking the
-    /// endpoints back up from the input. This yields the same runs the per-tile path produces, but
-    /// without re-clipping the whole polyline once per tile.
-    ///
-    /// Vertex/tile ranges are validated up front, so the hot loop packs into `Hit` without per-item
-    /// bounds checks. As a fast path, a segment whose two endpoints both lie in one tile's inner box
-    /// (≥ `buffer` from every edge) is routed straight to that single tile — the common case for a
-    /// dense polyline — skipping the per-corner `tile_of` and the per-candidate geometry test. The
-    /// owning tile is cached across the walk (see [`Located`]), so division happens only when the
-    /// polyline crosses into a new tile.
+    /// `sink.begin_polyline` is called once, then `sink.begin_segment` before each segment's `emit`s,
+    /// so the sink can track run continuity (a run grows only across segments one tile sees back to
+    /// back).
     ///
     /// # Errors
     ///
     /// - [`SliceError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
     /// - [`SliceError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
     ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
-    /// - [`SliceError::Overflow`] — a coordinate `± buffer` overflows `i32`, or a kept vertex lies more
-    ///   than an `i32` span from its tile origin (its local coordinate would not fit `i32`).
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "indices and tile offsets are validated to fit u16/i16 before these casts"
-    )]
-    pub(crate) fn slice_all<V: Vertex>(self, polyline: &[V]) -> Result<TileRuns<V>, SliceError> {
+    /// - [`SliceError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
+    ///   vertex lies more than an `i32` span from its tile origin.
+    pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
+        self,
+        polyline: &[V],
+        sink: &mut S,
+    ) -> Result<(), SliceError> {
         let poly = polyline;
 
-        // Empty polyline → no tiles.
+        // Empty polyline → nothing to route.
         let Some(first) = poly.first().map(Vertex::position) else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
-        // Up-front validation, so the hot loop can pack into `Hit` without per-item checks:
-        // (1) every vertex index fits u16;
+        // Up-front validation, before any `emit`, so these input-level errors leave the sink
+        // untouched: (1) the polyline length;
         if poly.len() > MAX_INDEXED_LEN {
             return Err(SliceError::PolylineTooLarge);
         }
-        // (2) every tile offset from `reference` fits i16. The extreme tiles come from the overall
-        // coordinate bounds grown by the buffer; `?` reports coordinates too close to the i32 edge.
+        // (2) the overall tile span fits `i16` from the first vertex's tile. The extreme tiles come
+        // from the coordinate bounds grown by the buffer; `?` reports coordinates too close to the
+        // i32 edge.
         let reference = tile_of(first, self.divider);
         let (lo_tile, hi_tile) = self.buffered_tile_bounds(poly, first)?;
         for (tile, refc) in [
@@ -228,57 +226,50 @@ impl Grid {
                 .map_err(|_| SliceError::TooManyTiles)?;
         }
 
-        // Route each segment into the tiles it touches. All casts below are within the ranges just
-        // validated; all coordinate arithmetic stays inside `[lo_tile, hi_tile]`, which is in range.
-        let mut hits: Vec<Hit> = Vec::with_capacity(poly.len().saturating_sub(1).saturating_mul(2));
+        sink.begin_polyline();
         // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
         // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.
         let mut budget: i64 = MAX_TILE_VISITS;
-        // Carry the previous vertex (index + position) and its located tile, so a segment whose two
-        // endpoints share one tile's inner box needs no division or geometry test at all.
-        let mut prev: Option<(usize, Coord<i32>)> = None;
+        // Carry the previous vertex and its located tile, so a segment whose two endpoints share one
+        // tile's inner box needs no division or geometry test at all.
+        let mut prev: Option<V> = None;
         let mut prev_loc: Option<Located> = None;
-        for (idx, v) in poly.iter().enumerate() {
+        for v in poly {
             let c = v.position();
-            if let Some((p, a)) = prev {
-                if a == c {
-                    continue; // drop a consecutive duplicate vertex (keep `prev`/`prev_loc` at `p`)
+            if let Some(a) = prev {
+                let a_pos = a.position();
+                if a_pos == c {
+                    continue; // drop a consecutive duplicate vertex (keep `prev`/`prev_loc`)
                 }
+                sink.begin_segment();
                 // `a`'s tile: carried from the previous step, or located now for the first segment.
                 let la = match prev_loc {
                     Some(l) => l,
-                    None => self.locate(a)?,
+                    None => self.locate(a_pos)?,
                 };
-                if la.contains_inner(a) && la.contains_inner(c) {
+                if la.contains_inner(a_pos) && la.contains_inner(c) {
                     // Fast path: the whole segment lies in `la`'s inner box, so it touches only that
-                    // tile. This is exactly what the scan below would produce — `lo == hi ==
-                    // la.owner`, and both endpoints are inside, so `segment_intersects` is trivially
-                    // true — but with no `tile_of`, `tile_bounds`, or geometry test.
+                    // tile (`la.core_lo` is that tile's origin) — no `tile_of`, `tile_bounds`, or
+                    // geometry test.
                     budget -= 1;
                     if budget < 0 {
                         return Err(SliceError::TooManyTiles);
                     }
-                    let dx = (la.owner.x - reference.x) as i16;
-                    let dy = (la.owner.y - reference.y) as i16;
-                    hits.push(Hit {
-                        dx,
-                        dy,
-                        i0: p as u16,
-                    });
+                    sink.emit(la.owner, la.core_lo, a, *v)?;
                     prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
                 } else {
                     // Slow path: route the segment through every candidate tile it might touch.
                     let lo = tile_of(
                         Coord {
-                            x: a.x.min(c.x) - self.buffer,
-                            y: a.y.min(c.y) - self.buffer,
+                            x: a_pos.x.min(c.x) - self.buffer,
+                            y: a_pos.y.min(c.y) - self.buffer,
                         },
                         self.divider,
                     );
                     let hi = tile_of(
                         Coord {
-                            x: a.x.max(c.x) + self.buffer,
-                            y: a.y.max(c.y) + self.buffer,
+                            x: a_pos.x.max(c.x) + self.buffer,
+                            y: a_pos.y.max(c.y) + self.buffer,
                         },
                         self.divider,
                     );
@@ -289,17 +280,16 @@ impl Grid {
                         return Err(SliceError::TooManyTiles);
                     }
                     for ty in lo.y..=hi.y {
-                        let dy = (ty - reference.y) as i16;
                         for tx in lo.x..=hi.x {
                             let tile = TileId::new(tx, ty);
                             let (min, max) = self.tile_bounds(tile)?;
-                            if segment_intersects(a, c, min, max) {
-                                let dx = (tx - reference.x) as i16;
-                                hits.push(Hit {
-                                    dx,
-                                    dy,
-                                    i0: p as u16,
-                                });
+                            if segment_intersects(a_pos, c, min, max) {
+                                // Tile origin = base = min + buffer.
+                                let origin = Coord {
+                                    x: min.x + self.buffer,
+                                    y: min.y + self.buffer,
+                                };
+                                sink.emit(tile, origin, a, *v)?;
                             }
                         }
                     }
@@ -312,97 +302,9 @@ impl Grid {
                     });
                 }
             }
-            prev = Some((idx, c));
+            prev = Some(*v);
         }
-
-        self.assemble_tiles(hits, poly, reference)
-    }
-
-    /// Group sorted hits by tile and assemble each tile's runs (in that tile's local frame), looking
-    /// endpoints back up from `poly`. Split out of [`Self::slice_all`] to keep each function focused.
-    ///
-    /// # Errors
-    ///
-    /// [`SliceError::Overflow`] if a kept vertex lies more than an `i32` span from its tile origin (its
-    /// local coordinate would not fit `i32`). The tile origins themselves are always in range — every
-    /// tile here already passed [`Self::tile_bounds`] while routing.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "`end` is a vertex index < poly length, validated to fit u16 in slice_all"
-    )]
-    fn assemble_tiles<V: Vertex>(
-        self,
-        mut hits: Vec<Hit>,
-        poly: &[V],
-        reference: TileId,
-    ) -> Result<TileRuns<V>, SliceError> {
-        hits.sort_unstable();
-        // Pre-alloc the output to the number of distinct tiles (one cheap pass over the sorted hits)
-        // so pushing results never reallocates.
-        let distinct = hits
-            .windows(2)
-            .filter(|w| (w[0].dx, w[0].dy) != (w[1].dx, w[1].dy))
-            .count()
-            + usize::from(!hits.is_empty());
-        let mut out: TileRuns<V> = Vec::with_capacity(distinct);
-
-        for group in hits.chunk_by(|a, b| (a.dx, a.dy) == (b.dx, b.dy)) {
-            let (dx, dy) = (group[0].dx, group[0].dy);
-            let tile = TileId::new(reference.x + i32::from(dx), reference.y + i32::from(dy));
-            // Origin of this tile's local frame; every kept vertex is offset by it below.
-            let origin = self.tile_origin(tile)?;
-            // Most tiles hold a single run; size for that and let it grow when the line re-enters.
-            let mut pieces: Vec<Vec<V>> = Vec::with_capacity(1);
-            let mut cur: Vec<V> = Vec::new();
-            let mut prev_end: Option<u16> = None; // end index of the previous segment in this tile
-            for h in group {
-                let i0 = h.i0 as usize;
-                let a = poly[i0];
-                // End vertex: the next one at a distinct position (routing skipped consecutive
-                // duplicates). A routed segment always has one; if somehow not, skip it (never
-                // panic).
-                let Some(step) = poly[i0 + 1..]
-                    .iter()
-                    .position(|v| v.position() != a.position())
-                else {
-                    continue;
-                };
-                let end = i0 + 1 + step;
-                let c = poly[end];
-                let c_local = to_local(c, origin)?;
-                if prev_end == Some(h.i0) && !cur.is_empty() {
-                    cur.push(c_local); // segment starts where the previous ended: extend the run
-                } else {
-                    if cur.len() >= 2 {
-                        pieces.push(std::mem::take(&mut cur));
-                    }
-                    cur = vec![to_local(a, origin)?, c_local]; // start a new run
-                }
-                prev_end = Some(end as u16);
-            }
-            if cur.len() >= 2 {
-                pieces.push(cur);
-            }
-            if !pieces.is_empty() {
-                out.push((tile, pieces));
-            }
-        }
-        Ok(out)
-    }
-
-    /// The global coordinate of `tile`'s origin — its `[0, 0]` corner in tile-local space, i.e.
-    /// `(tile.x·divider, tile.y·divider)`. [`SliceError::Overflow`] if that product leaves `i32`.
-    fn tile_origin(self, tile: TileId) -> Result<Coord<i32>, SliceError> {
-        Ok(Coord {
-            x: tile
-                .x
-                .checked_mul(self.divider)
-                .ok_or(SliceError::Overflow)?,
-            y: tile
-                .y
-                .checked_mul(self.divider)
-                .ok_or(SliceError::Overflow)?,
-        })
+        Ok(())
     }
 
     /// The closed integer bounds `(min, max)` of `tile`'s clip box, grown by `buffer` on each side.
