@@ -4,9 +4,12 @@
 //! for **every permutation** of the tile-insertion order builds a fresh mosaic, checks every `add`
 //! succeeds (a slicer's own tiles are self-consistent, so none ever conflict), and checks the
 //! reassembled geometry equals the combined input's — proving order-independence over all fixtures at
-//! once. The extent is chosen coarse enough that the whole fixture set lands in a handful of tiles, so
-//! all permutations stay enumerable while the geometry itself is unchanged; an assertion trips loudly
-//! if that count grows past a safe bound.
+//! once. It runs at **both** buffer sizes: flush tiles (buffer 0) and overlapping tiles (buffer 5).
+//! A buffer only duplicates near-edge segments into more tiles, so rebasing (`local + tile·extent`)
+//! must collapse those duplicates back onto the same global edges — either way the mosaic recovers
+//! the exact same original geometry. The extent is chosen coarse enough that the whole fixture set
+//! lands in a handful of tiles, so all permutations stay enumerable; an assertion trips loudly if
+//! that count grows past a safe bound.
 //!
 //! Reassembly is compared by **directed-edge set**: the mosaic re-chains the geometry by connectivity,
 //! so a self-touching path or a shared junction may come back split/joined differently than the input
@@ -19,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use geo_types::Coord;
 use map_tile_toolkit::{Mosaic, TileError, TileId};
+
+use crate::support::Cfg;
 
 mod support;
 
@@ -79,14 +84,23 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 
 #[test]
 fn every_permutation_reassembles_all_fixtures() {
-    let cfg = support::grid();
     let polylines = all_fixture_polylines();
 
-    // Slice the whole fixture set into per-tile (local-frame) runs — exactly what a caller feeds back.
-    let tiles = support::slice_all_runs(&cfg, &polylines);
-    assert!(!tiles.is_empty(), "fixtures produced no tiles");
+    // Both flush (buffer 0) and overlapping (buffer 5) slicing must reassemble to this same geometry.
+    for (label, cfg) in [
+        ("buffer 0", support::grid()),
+        ("buffer 5", support::grid_buffered()),
+    ] {
+        validate_mosaic(label, &cfg, &polylines);
+    }
+}
 
-    let want = edge_set(&polylines);
+/// Slice all fixtures into per-tile (local-frame) runs — exactly what a caller feeds back.
+fn validate_mosaic(label: &str, cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) {
+    let expected = edge_set(polylines);
+    let tiles = support::slice_all_runs(cfg, polylines);
+    assert!(!tiles.is_empty(), "{label}: fixtures produced no tiles");
+
     for order in permutations(tiles.len()) {
         let mut mosaic = Mosaic::new(cfg.extent).expect("valid config");
         for &i in &order {
@@ -95,14 +109,18 @@ fn every_permutation_reassembles_all_fixtures() {
                 .add(*tile, runs.as_slice())
                 .expect("a slicer's own tiles are self-consistent and never conflict");
         }
-        assert_eq!(mosaic.len(), tiles.len(), "every tile must register");
+        assert_eq!(
+            mosaic.len(),
+            tiles.len(),
+            "{label}: every tile must register"
+        );
 
-        // The mosaic reassembles in the global frame, which at buffer 0 is the input's own space.
+        // The mosaic reassembles in the global frame — the input's own space at any buffer.
         let features: Vec<Vec<Coord<i32>>> = mosaic.iter_features().collect();
         assert_eq!(
             edge_set(&features),
-            want,
-            "insertion order {order:?} did not reconstruct the combined geometry"
+            expected,
+            "{label}: insertion order {order:?} did not reconstruct the combined geometry"
         );
     }
 }
