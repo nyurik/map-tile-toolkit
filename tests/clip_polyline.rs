@@ -216,7 +216,7 @@ fn big_geometry_batch_matches_per_tile() {
             all,
             one,
             "big-geometry batch and per-tile slicing disagree (buffer {})",
-            slicer.buffer()
+            slicer.buffer
         );
         assert!(
             all.len() > 100,
@@ -273,7 +273,7 @@ fn slice_at_buffer(
         all,
         one,
         "batch and per-tile slicing disagree for {stem} (buffer {})",
-        slicer.buffer()
+        slicer.buffer
     );
 
     // (3) Duplicating every vertex must not change either slicer's output (consecutive dups are
@@ -286,7 +286,7 @@ fn slice_at_buffer(
         all_duped,
         all,
         "duplicating every vertex changed the batch result for {stem} (buffer {})",
-        slicer.buffer()
+        slicer.buffer
     );
     for (&tile, piece) in &all {
         let piece_dup = support::slice_tile_runs(slicer, &duped, tile);
@@ -302,7 +302,7 @@ fn slice_at_buffer(
 
     // The two snapshots must be byte identical; snapshot the (shared) result. Pieces come back in
     // tile-local coordinates, so convert them back to the global space before rendering.
-    let extent = slicer.extent() as i32;
+    let extent = slicer.extent as i32;
     let global =
         |m: &BTreeMap<TileId, Vec<Vec<Coord<i32>>>>| -> BTreeMap<TileId, Vec<Vec<Coord<i32>>>> {
             m.iter()
@@ -315,15 +315,15 @@ fn slice_at_buffer(
         all_bytes,
         one_bytes,
         "batch and per-tile snapshots differ for {stem} (buffer {})",
-        slicer.buffer()
+        slicer.buffer
     );
 
     insta::with_settings!({
         snapshot_path => snapshot_dir,
         prepend_module_to_snapshot => false,
     }, {
-        let name = if slicer.buffer() > 0 {
-            format!("{stem}-{}.geojson", slicer.buffer())
+        let name = if slicer.buffer > 0 {
+            format!("{stem}-{}.geojson", slicer.buffer)
         } else {
             format!("{stem}.geojson")
         };

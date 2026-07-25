@@ -12,15 +12,15 @@
           ],
           [
             15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
             20.0
           ],
           [
-            70.0,
-            4.0
+            64.0,
+            6.0
           ]
         ]
       },
@@ -41,74 +41,7 @@
           ],
           [
             15.0,
-            4.0
-          ],
-          [
-            45.0,
-            20.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/-1",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            45.0,
-            20.0
-          ],
-          [
-            70.0,
-            4.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/-1",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            45.0,
-            20.0
-          ],
-          [
-            70.0,
-            4.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 3/-1",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            5.0,
-            20.0
-          ],
-          [
-            15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
@@ -129,15 +62,15 @@
         "coordinates": [
           [
             15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
             20.0
           ],
           [
-            70.0,
-            4.0
+            64.0,
+            6.0
           ]
         ]
       },
@@ -154,15 +87,15 @@
         "coordinates": [
           [
             15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
             20.0
           ],
           [
-            70.0,
-            4.0
+            64.0,
+            6.0
           ]
         ]
       },
@@ -178,33 +111,12 @@
         "type": "LineString",
         "coordinates": [
           [
-            45.0,
-            20.0
-          ],
-          [
-            70.0,
-            4.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 3/0",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
             5.0,
             20.0
           ],
           [
             15.0,
-            4.0
+            6.0
           ]
         ]
       },
@@ -221,15 +133,15 @@
         "coordinates": [
           [
             15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
             20.0
           ],
           [
-            70.0,
-            4.0
+            64.0,
+            6.0
           ]
         ]
       },
@@ -246,15 +158,15 @@
         "coordinates": [
           [
             15.0,
-            4.0
+            6.0
           ],
           [
             45.0,
             20.0
           ],
           [
-            70.0,
-            4.0
+            64.0,
+            6.0
           ]
         ]
       },

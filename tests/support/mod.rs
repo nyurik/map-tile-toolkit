@@ -24,18 +24,6 @@ pub struct Cfg {
 }
 
 impl Cfg {
-    /// The tile side / output resolution, in coordinate units.
-    #[must_use]
-    pub fn extent(self) -> u32 {
-        self.extent
-    }
-
-    /// The buffer kept around every tile, in coordinate units.
-    #[must_use]
-    pub fn buffer(self) -> u16 {
-        self.buffer
-    }
-
     /// A fresh all-tiles slicer for this config (panics on a bad literal config).
     #[must_use]
     pub fn all(self) -> SlicerAll<Coord<i32>> {

@@ -9,7 +9,7 @@
     {
       "type": "Feature",
       "properties": {},
-      "geometry": {"type": "LineString", "coordinates": [[55, 10], [70, 20]]}
+      "geometry": {"type": "LineString", "coordinates": [[55, 10], [64, 20]]}
     }
   ]
 }

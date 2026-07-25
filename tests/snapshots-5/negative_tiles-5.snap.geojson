@@ -8,15 +8,15 @@
         "coordinates": [
           [
             -20.0,
-            -20.0
+            7.0
           ],
           [
-            -2.0,
-            -20.0
+            -4.0,
+            7.0
           ],
           [
             2.0,
-            20.0
+            16.0
           ],
           [
             22.0,
@@ -37,61 +37,15 @@
         "coordinates": [
           [
             -20.0,
-            -20.0
+            7.0
           ],
           [
-            -2.0,
-            -20.0
-          ],
-          [
-            2.0,
-            20.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile -1/-1",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -20.0,
-            -20.0
-          ],
-          [
-            -2.0,
-            -20.0
+            -4.0,
+            7.0
           ],
           [
             2.0,
-            20.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/-1",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -2.0,
-            -20.0
-          ],
-          [
-            2.0,
-            20.0
+            16.0
           ],
           [
             22.0,
@@ -111,12 +65,16 @@
         "type": "LineString",
         "coordinates": [
           [
-            -2.0,
-            -20.0
+            -20.0,
+            7.0
+          ],
+          [
+            -4.0,
+            7.0
           ],
           [
             2.0,
-            20.0
+            16.0
           ],
           [
             22.0,
@@ -137,7 +95,7 @@
         "coordinates": [
           [
             2.0,
-            20.0
+            16.0
           ],
           [
             22.0,
@@ -157,37 +115,8 @@
         "type": "LineString",
         "coordinates": [
           [
-            -2.0,
-            -20.0
-          ],
-          [
             2.0,
-            20.0
-          ],
-          [
-            22.0,
-            27.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile -1/1",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -2.0,
-            -20.0
-          ],
-          [
-            2.0,
-            20.0
+            16.0
           ],
           [
             22.0,
@@ -208,7 +137,7 @@
         "coordinates": [
           [
             2.0,
-            20.0
+            16.0
           ],
           [
             22.0,

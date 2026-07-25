@@ -22,14 +22,6 @@ use map_tile_toolkit::{Mosaic, TileId};
 
 mod support;
 
-/// Extent for the combined test: coarse enough that all fixtures together land in a small number of
-/// tiles (5 at the time of writing → `5! = 120` orders), keeping every permutation cheap to enumerate.
-/// The geometry is unchanged — only the grid is coarser than the 25-unit fixture grid.
-const EXTENT: u32 = 50;
-
-/// The most tiles the combined fixtures may touch before permutations get expensive (`7! = 5040`).
-const MAX_TILES: usize = 7;
-
 /// Every fixture's polylines, files sorted for a stable order.
 fn all_fixture_polylines() -> Vec<Vec<Coord<i32>>> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -61,7 +53,7 @@ fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
 
 /// Every permutation of `0..n`.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
-    assert!(n < 10, "permutations of {n} is too many to enumerate");
+    assert!(n <= 10, "permutations of more than {n} tiles is too many to enumerate");
 
     fn go(a: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
         if k == a.len() {
@@ -82,21 +74,16 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
 
 #[test]
 fn every_permutation_reassembles_all_fixtures() {
-    let cfg = support::slicer(EXTENT, 0);
+    let cfg = support::grid();
     let polylines = all_fixture_polylines();
 
     // Slice the whole fixture set into per-tile (local-frame) runs — exactly what a caller feeds back.
     let tiles = support::slice_all_runs(&cfg, &polylines);
     assert!(!tiles.is_empty(), "fixtures produced no tiles");
-    assert!(
-        tiles.len() <= MAX_TILES,
-        "combined fixtures touch {} tiles — raise EXTENT to keep permutations feasible",
-        tiles.len()
-    );
 
     let want = edge_set(&polylines);
     for order in permutations(tiles.len()) {
-        let mut mosaic = Mosaic::new(EXTENT).expect("valid config");
+        let mut mosaic = Mosaic::new(cfg.extent).expect("valid config");
         for &i in &order {
             let (tile, runs) = &tiles[i];
             mosaic

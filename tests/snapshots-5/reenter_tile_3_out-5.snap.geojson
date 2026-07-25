@@ -8,7 +8,7 @@
         "coordinates": [
           [
             10.0,
-            4.0
+            6.0
           ],
           [
             44.0,
@@ -45,28 +45,7 @@
         "coordinates": [
           [
             10.0,
-            4.0
-          ],
-          [
-            44.0,
-            9.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/-1",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            10.0,
-            4.0
+            6.0
           ],
           [
             44.0,
@@ -103,7 +82,7 @@
         "coordinates": [
           [
             10.0,
-            4.0
+            6.0
           ],
           [
             44.0,

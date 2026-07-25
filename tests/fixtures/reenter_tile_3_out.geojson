@@ -7,7 +7,7 @@
       "geometry": {
         "type": "LineString",
         "coordinates": [
-          [10, 4],
+          [10, 6],
           [44, 9],
           [26, 13],
           [48, 17],

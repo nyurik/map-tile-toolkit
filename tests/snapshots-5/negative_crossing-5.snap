@@ -1,6 +1,0 @@
----
-source: tests/clip_polyline.rs
-expression: all_bytes
-extension: geojson
-snapshot_kind: binary
----
