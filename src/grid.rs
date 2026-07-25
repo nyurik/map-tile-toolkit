@@ -247,20 +247,9 @@ impl Grid {
             return Ok(());
         };
 
-        // The overall tile span must fit `i16` from the first vertex's tile. The extreme tiles come
-        // from the coordinate bounds grown by the buffer; `?` reports coordinates too close to the
-        // i32 edge.
+        // Each routed segment's tile box is bounded against this reference (the first vertex's tile)
+        // as it is walked, so there is no separate bounding-box pass over the whole polyline.
         let reference = tile_of(first, self.extent);
-        let (lo_tile, hi_tile) = self.buffered_tile_bounds(poly, first)?;
-        for (tile, refc) in [
-            (lo_tile.x, reference.x),
-            (hi_tile.x, reference.x),
-            (lo_tile.y, reference.y),
-            (hi_tile.y, reference.y),
-        ] {
-            i16::try_from(i64::from(tile) - i64::from(refc))
-                .map_err(|_| TileError::TooManyTiles)?;
-        }
 
         sink.begin_polyline();
         // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
@@ -294,22 +283,44 @@ impl Grid {
                     sink.emit(la.owner, la.core_lo, a, *v)?;
                     prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
                 } else {
-                    // Slow path: route the segment through every candidate tile it might touch.
+                    // Slow path: route the segment through every candidate tile it might touch. Grow
+                    // the segment's coordinate box by the buffer (checked — a coordinate too near the
+                    // i32 edge reports `Overflow`) and map it to tiles.
                     let lo = tile_of(
                         Coord {
-                            x: a_pos.x.min(c.x) - self.buffer,
-                            y: a_pos.y.min(c.y) - self.buffer,
+                            x: (a_pos.x.min(c.x))
+                                .checked_sub(self.buffer)
+                                .ok_or(TileError::Overflow)?,
+                            y: (a_pos.y.min(c.y))
+                                .checked_sub(self.buffer)
+                                .ok_or(TileError::Overflow)?,
                         },
                         self.extent,
                     );
                     let hi = tile_of(
                         Coord {
-                            x: a_pos.x.max(c.x) + self.buffer,
-                            y: a_pos.y.max(c.y) + self.buffer,
+                            x: (a_pos.x.max(c.x))
+                                .checked_add(self.buffer)
+                                .ok_or(TileError::Overflow)?,
+                            y: (a_pos.y.max(c.y))
+                                .checked_add(self.buffer)
+                                .ok_or(TileError::Overflow)?,
                         },
                         self.extent,
                     );
-                    // Charge this segment's candidate-tile box (in range: lo/hi ∈ [lo_tile, hi_tile]).
+                    // Bound this segment's tile box against the reference: each extreme must stay within
+                    // `i16` of the first vertex's tile (else the polyline reaches too many tiles). This
+                    // also keeps the candidate-count product below `i64` overflow.
+                    for (t, r) in [
+                        (lo.x, reference.x),
+                        (hi.x, reference.x),
+                        (lo.y, reference.y),
+                        (hi.y, reference.y),
+                    ] {
+                        i16::try_from(i64::from(t) - i64::from(r))
+                            .map_err(|_| TileError::TooManyTiles)?;
+                    }
+                    // Charge this segment's candidate-tile box.
                     budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
                         * (i64::from(hi.y) - i64::from(lo.y) + 1);
                     if budget < 0 {
@@ -376,38 +387,5 @@ impl Grid {
             inner_lo: shift(min, 2 * self.buffer),
             inner_hi: shift(max, -2 * self.buffer),
         })
-    }
-
-    /// The lowest and highest tiles any part of `poly` can reach: the coordinate bounding box grown by
-    /// `buffer`, mapped to tiles. `first` seeds the bounds. [`TileError::Overflow`] if a coordinate
-    /// `± buffer` overflows `i32`.
-    fn buffered_tile_bounds<V: Vertex>(
-        self,
-        poly: &[V],
-        first: Coord<i32>,
-    ) -> Result<(TileId, TileId), TileError> {
-        let (mut min, mut max) = (first, first);
-        for v in poly {
-            let c = v.position();
-            min.x = min.x.min(c.x);
-            min.y = min.y.min(c.y);
-            max.x = max.x.max(c.x);
-            max.y = max.y.max(c.y);
-        }
-        let lo = tile_of(
-            Coord {
-                x: min.x.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
-                y: min.y.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
-            },
-            self.extent,
-        );
-        let hi = tile_of(
-            Coord {
-                x: max.x.checked_add(self.buffer).ok_or(TileError::Overflow)?,
-                y: max.y.checked_add(self.buffer).ok_or(TileError::Overflow)?,
-            },
-            self.extent,
-        );
-        Ok((lo, hi))
     }
 }
