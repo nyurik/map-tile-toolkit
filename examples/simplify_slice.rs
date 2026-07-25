@@ -99,7 +99,7 @@ fn main() {
     // build a whole tiled dataset in one pass.
     let mut acc = SlicerAll::new(EXTENT, 0).expect("valid slicer config");
     for geom in &geoms {
-        if acc.add_line(black_box(geom)).is_err() {
+        if acc.add_feature(black_box(geom.0.as_slice())).is_err() {
             skipped += 1;
         }
     }

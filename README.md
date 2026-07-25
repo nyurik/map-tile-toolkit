@@ -88,18 +88,21 @@ for feature in mosaic.iter_features() {
 
 The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` carries any
 `Copy + PartialEq` payload (an M value, an id) that rides through slicing and merging **unchanged** —
-nothing is interpolated, since no new vertices are cut. With the default `geo` feature, `add_line`
-takes a `LineString<i32>` (one line = one feature) and `iter_geometries` reads the pieces back out.
+nothing is interpolated, since no new vertices are cut.
 
 ```rust
 # #[cfg(feature = "geo")] {
-use geo_types::LineString;
+use geo_types::Coord;
 use map_tile_toolkit::SlicerAll;
 
 let mut slicer = SlicerAll::new(25, 0)?;
-slicer.add_line(&LineString::from(vec![(5, 5), (20, 20), (60, 40)]))?;
-for (tile, piece) in slicer.iter_geometries() {
-    let _ = (tile, piece); // piece: LineString or MultiLineString in the tile's local frame
+slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 20, y: 20 }, Coord { x: 60, y: 40 }])?;
+for tile in slicer.iter_tiles() {
+    for feature in tile.iter_features() {
+        for line in feature.iter_line_strings() {
+            let _ = (tile.tile_id(), line); // one LineString per run, in the tile's local frame
+        }
+    }
 }
 # }
 # Ok::<(), map_tile_toolkit::TileError>(())

@@ -20,7 +20,3 @@ pub use slicer::{FeatureView, SlicerAll, SlicerOne, TileView};
 
 mod mosaic;
 pub use mosaic::Mosaic;
-
-// Optional `geo-types` `Geometry` bridge for the accumulator. The core API is geo-free.
-#[cfg(feature = "geo")]
-mod geo;
