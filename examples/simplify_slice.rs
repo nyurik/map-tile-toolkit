@@ -106,7 +106,7 @@ fn main() {
     // Read the accumulated tiles back through the borrowed iterators (no owned `Geometry`).
     let mut pieces = 0u64;
     for tile in acc.iter_tiles() {
-        black_box(tile.id());
+        black_box(tile.tile_id());
         for feature in tile.iter_features() {
             for polyline in feature.iter_polylines() {
                 black_box(polyline);

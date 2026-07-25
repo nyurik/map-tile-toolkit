@@ -31,7 +31,7 @@ use support::Cfg;
 fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
     let mut acc = cfg.all();
     acc.add_feature(poly).expect("polyline");
-    acc.iter_tiles().map(|t| t.id()).collect()
+    acc.iter_tiles().map(|t| t.tile_id()).collect()
 }
 
 /// Time slicing every polyline into all touched tiles, accumulated into one `SlicerAll`.

@@ -89,8 +89,8 @@ fn features_of<V: Vertex>(
         let start = if rs == 0 { 0 } else { run_ends[rs - 1] };
         FeatureView {
             verts,
-            run_ends: &run_ends[rs..re],
             start,
+            run_ends: &run_ends[rs..re],
         }
     })
 }
@@ -103,7 +103,7 @@ pub struct TileView<'a, V: Vertex> {
 impl<'a, V: Vertex> TileView<'a, V> {
     /// The tile this view is for.
     #[must_use]
-    pub fn id(&self) -> TileId {
+    pub fn tile_id(&self) -> TileId {
         self.buf.tile
     }
 
@@ -118,10 +118,10 @@ impl<'a, V: Vertex> TileView<'a, V> {
 pub struct FeatureView<'a, V: Vertex> {
     /// The whole tile's vertex arena; polylines are subslices of it.
     verts: &'a [V],
-    /// End offsets (into `verts`) of this feature's runs.
-    run_ends: &'a [u32],
     /// Vertex offset where this feature's first run begins.
     start: u32,
+    /// End offsets (into `verts`) of this feature's runs.
+    run_ends: &'a [u32],
 }
 
 impl<'a, V: Vertex> FeatureView<'a, V> {

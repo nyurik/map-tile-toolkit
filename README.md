@@ -37,7 +37,7 @@ slicer.add_feature(&line)?;
 for tile in slicer.iter_tiles() {
     for feature in tile.iter_features() {
         for polyline in feature.iter_polylines() {
-            let _ = (tile.id(), polyline); // polyline: &[Coord<i32>]
+            let _ = (tile.tile_id(), polyline); // polyline: &[Coord<i32>]
         }
     }
 }
@@ -76,7 +76,7 @@ slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }])?;
 let mut mosaic = Mosaic::new(slicer.extent())?;
 for tile in slicer.iter_tiles() {
     let runs: Vec<&[Coord<i32>]> = tile.iter_features().flat_map(|f| f.iter_polylines()).collect();
-    mosaic.add(tile.id(), &runs).expect("consistent tiles never conflict");
+    mosaic.add(tile.tile_id(), &runs).expect("consistent tiles never conflict");
 }
 for feature in mosaic.iter_features() {
     let _ = feature; // Vec<Coord<i32>> in global coordinates

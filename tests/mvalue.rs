@@ -20,7 +20,7 @@ fn slice_all_runs<V: Vertex>(poly: &[V]) -> BTreeMap<TileId, Vec<Vec<V>>> {
                 .iter_features()
                 .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
                 .collect();
-            (t.id(), runs)
+            (t.tile_id(), runs)
         })
         .collect()
 }

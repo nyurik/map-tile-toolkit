@@ -38,7 +38,7 @@ type Case = (Vec<Coord<i32>>, Vec<TileId>);
 fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
     let mut acc = cfg.all();
     acc.add_feature(poly).expect("polyline");
-    acc.iter_tiles().map(|t| t.id()).collect()
+    acc.iter_tiles().map(|t| t.tile_id()).collect()
 }
 
 fn main() {

@@ -26,7 +26,7 @@ fn snapshot(s: &SlicerAll<Coord<i32>>) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
                 .iter_features()
                 .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
                 .collect();
-            (t.id(), runs)
+            (t.tile_id(), runs)
         })
         .collect()
 }

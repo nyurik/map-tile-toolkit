@@ -46,7 +46,7 @@ impl SlicerAll<Coord<i32>> {
     /// in [`TileId`] order; within a tile, features come in insertion order.
     pub fn iter_geometries(&self) -> impl Iterator<Item = (TileId, Geometry<i32>)> + '_ {
         self.iter_tiles().flat_map(|tile| {
-            let id = tile.id();
+            let id = tile.tile_id();
             tile.iter_features().filter_map(move |v| {
                 assemble(v.iter_polylines().map(<[_]>::to_vec)).map(|g| (id, g))
             })

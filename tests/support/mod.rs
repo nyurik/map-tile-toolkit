@@ -103,7 +103,7 @@ pub fn slice_all_runs(
         acc.add_feature(line.as_slice()).expect("slice");
     }
     acc.iter_tiles()
-        .map(|tile| (tile.id(), flatten(&tile)))
+        .map(|tile| (tile.tile_id(), flatten(&tile)))
         .filter(|(_, runs)| !runs.is_empty())
         .collect()
 }
