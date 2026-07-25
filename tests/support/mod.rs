@@ -11,8 +11,9 @@ use std::fs;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString};
-use geojson::{Feature, GeoJson, GeometryValue, JsonObject, JsonValue};
+use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
+use serde_json::json;
 
 /// A slicer config (extent + buffer) shared by the tests, benches, and example. The slicers now own
 /// accumulated state, so the shared value is the *config*, from which each caller spins up a fresh
@@ -239,6 +240,27 @@ fn to_i32(geom: &Geometry<f64>) -> Geometry<i32> {
     }
 }
 
+/// Convert an integer polyline geometry to `f64` for GeoJSON output. Inverse of [`to_i32`].
+pub fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
+    let ls = |ls: &LineString<i32>| {
+        LineString(
+            ls.0.iter()
+                .map(|c| Coord {
+                    x: f64::from(c.x),
+                    y: f64::from(c.y),
+                })
+                .collect(),
+        )
+    };
+    match geom {
+        Geometry::LineString(l) => Geometry::LineString(ls(l)),
+        Geometry::MultiLineString(m) => {
+            Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
+        }
+        other => panic!("expected a polyline geometry, got {other:?}"),
+    }
+}
+
 /// A GeoJSON [`Feature`] wrapping `geom` with the given [simplestyle-spec] properties. Because a
 /// snapshot file ends in `.geojson`, GitHub and geojson.io render the properties (`stroke`/`fill`/
 /// …) directly on a map.
@@ -256,4 +278,43 @@ pub fn feature(geom: &Geometry<f64>, props: Vec<(&str, JsonValue)>) -> Feature {
         properties: Some(properties),
         foreign_members: None,
     }
+}
+
+/// A GeoJSON `LineString` [`Feature`] for one integer run (converted to `f64`) with the given
+/// [`simplestyle-spec`](https://github.com/mapbox/simplestyle-spec) properties.
+pub fn line_feature(run: &[Coord<i32>], props: Vec<(&str, JsonValue)>) -> Feature {
+    feature(
+        &to_f64(&Geometry::LineString(LineString(run.to_vec()))),
+        props,
+    )
+}
+
+/// A `LineString` feature for one run tagged with the simplestyle `role`, `stroke` color, and
+/// `stroke-width` — the shape every snapshot feature uses.
+pub fn styled_line(run: &[Coord<i32>], role: &str, stroke: &str, width: u32) -> Feature {
+    line_feature(
+        run,
+        vec![
+            ("role", json!(role)),
+            ("stroke", json!(stroke)),
+            ("stroke-width", json!(width)),
+        ],
+    )
+}
+
+/// The thin gray "input" underlay feature for one run, drawn beneath the colored output pieces so a
+/// snapshot shows the pieces lying exactly on the original geometry.
+pub fn input_feature(run: &[Coord<i32>]) -> Feature {
+    styled_line(run, "input", "#888888", 1)
+}
+
+/// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot
+/// tests store and compare.
+pub fn feature_collection_bytes(features: Vec<Feature>) -> Vec<u8> {
+    serde_json::to_vec_pretty(&FeatureCollection {
+        bbox: None,
+        features,
+        foreign_members: None,
+    })
+    .expect("serializes")
 }

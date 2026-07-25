@@ -22,11 +22,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use geo_types::{Coord, Geometry, LineString, MultiLineString};
-use geojson::FeatureCollection;
+use geo_types::Coord;
 use insta::assert_binary_snapshot;
 use map_tile_toolkit::TileId;
-use serde_json::json;
 
 mod support;
 use support::{feature, load_fixture};
@@ -94,53 +92,17 @@ fn globalize(tile: TileId, runs: &[Vec<Coord<i32>>], extent: i32) -> Vec<Vec<Coo
         .collect()
 }
 
-/// Convert an integer polyline geometry back to `f64` for GeoJSON output.
-fn to_f64(geom: &Geometry<i32>) -> Geometry<f64> {
-    let ls = |ls: &LineString<i32>| {
-        LineString(
-            ls.0.iter()
-                .map(|c| Coord {
-                    x: f64::from(c.x),
-                    y: f64::from(c.y),
-                })
-                .collect(),
-        )
-    };
-    match geom {
-        Geometry::LineString(l) => Geometry::LineString(ls(l)),
-        Geometry::MultiLineString(m) => {
-            Geometry::MultiLineString(MultiLineString(m.0.iter().map(ls).collect()))
-        }
-        other => panic!("expected a polyline geometry, got {other:?}"),
-    }
-}
-
-/// A [`LineString`] feature for one run, converted to `f64` for GeoJSON output.
-fn line_feature(run: &[Coord<i32>], props: Vec<(&str, serde_json::Value)>) -> geojson::Feature {
-    let geom = Geometry::LineString(LineString(run.to_vec()));
-    feature(&to_f64(&geom), props)
-}
-
-/// Build the snapshot `FeatureCollection`: the input polylines first (one feature each), then one
-/// feature per per-tile **run** — each a plain `LineString`, never a `MultiLineString`, so distinct
+/// Build the snapshot features: the input polylines first (one gray feature each), then one feature
+/// per per-tile **run** — each a plain `LineString`, never a `MultiLineString`, so distinct
 /// features/runs in a tile stay distinct (colored by tile parity so neighbors contrast, tagged with
 /// the tile).
-fn build_fc(
+fn build_features(
     input: &[Vec<Coord<i32>>],
     tiles: &BTreeMap<TileId, Vec<Vec<Coord<i32>>>>,
-) -> FeatureCollection {
+) -> Vec<geojson::Feature> {
     let mut features: Vec<_> = input
         .iter()
-        .map(|line| {
-            line_feature(
-                line,
-                vec![
-                    ("role", json!("input")),
-                    ("stroke", json!("#888888")),
-                    ("stroke-width", json!(1)),
-                ],
-            )
-        })
+        .map(|line| support::input_feature(line))
         .collect();
     let mut tiles = tiles.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
     tiles.sort_unstable_by_key(|(k, _)| (k.y, k.x));
@@ -151,21 +113,15 @@ fn build_fc(
             "#ff7f0e"
         };
         for run in runs {
-            features.push(line_feature(
+            features.push(support::styled_line(
                 run,
-                vec![
-                    ("role", json!(format!("tile {}/{}", tile.x, tile.y))),
-                    ("stroke", json!(color)),
-                    ("stroke-width", json!(3)),
-                ],
+                &format!("tile {}/{}", tile.x, tile.y),
+                color,
+                3,
             ));
         }
     }
-    FeatureCollection {
-        bbox: None,
-        features,
-        foreign_members: None,
-    }
+    features
 }
 
 fn slice_one_fixture([path]: [&Path; 1]) {
@@ -179,15 +135,11 @@ fn slice_one_fixture([path]: [&Path; 1]) {
 #[test]
 #[ignore = "manually save big geometry"]
 fn save_big_geometry() {
-    let features = vec![feature(&to_f64(&support::big_polyline()), vec![])];
-    let fc = FeatureCollection {
-        bbox: None,
-        features,
-        foreign_members: None,
-    };
-
-    let geojson = serde_json::to_vec_pretty(&fc).expect("serializes");
-    std::fs::write("tests/fixtures/big-geometry.geojson", geojson).expect("writes");
+    let bytes = support::feature_collection_bytes(vec![feature(
+        &support::to_f64(&support::big_polyline()),
+        vec![],
+    )]);
+    std::fs::write("tests/fixtures/big-geometry.geojson", bytes).expect("writes");
 }
 
 /// The single-pass `slice_all` must still agree with per-tile `slice` on a large geometry that
@@ -306,8 +258,8 @@ fn slice_at_buffer(
                 .map(|(&t, runs)| (t, globalize(t, runs, extent)))
                 .collect()
         };
-    let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&all))).expect("serializes");
-    let one_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&one))).expect("serializes");
+    let all_bytes = support::feature_collection_bytes(build_features(geom, &global(&all)));
+    let one_bytes = support::feature_collection_bytes(build_features(geom, &global(&one)));
     assert_eq!(
         all_bytes, one_bytes,
         "batch and per-tile snapshots differ for {stem} (buffer {})",
