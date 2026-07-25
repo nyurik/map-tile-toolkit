@@ -3,7 +3,8 @@
 //! Clipping keeps the **original** vertices — never cutting new ones at the tile edge. Every
 //! segment that touches the box contributes both of its endpoints, so a line shows up in every tile
 //! it passes through, even ones it merely crosses with no vertex inside. A stretch that leaves the
-//! box and re-enters comes back as separate pieces.
+//! box and re-enters splits into separate pieces only where a vertex is *dropped*: a single-segment
+//! excursion out and back keeps both its (outside) endpoints, so it stays one connected piece.
 
 use geo_types::Coord;
 

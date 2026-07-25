@@ -148,8 +148,13 @@ impl Grid {
     /// Clip one `polyline` to a single tile, keeping original vertices. Returns the kept runs in the
     /// tile's **local coordinates** — the tile's `[0, 0]` corner is the origin, so a kept vertex lands
     /// in `0..extent` (buffer vertices past the low edge go negative). The result is empty when nothing
-    /// of `polyline` touches the tile's (buffered) box, and holds several runs where the polyline
-    /// leaves the tile and re-enters.
+    /// of `polyline` touches the tile's (buffered) box.
+    ///
+    /// A vertex is **kept** when either of its segments touches the box, so a border crossing keeps the
+    /// first vertex just outside. A run breaks only where a vertex is *dropped* (both its segments miss
+    /// the box): a single-segment excursion out of and back into the tile keeps its whole geometry as
+    /// one run (both outside vertices are kept), while a longer excursion — which drops the vertices in
+    /// between — comes back as separate runs.
     ///
     /// # Errors
     ///
@@ -167,28 +172,34 @@ impl Grid {
         // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
         // overflow — no need to recompute (and re-check) `tile · extent`.
         let origin = shift(min, self.buffer);
-        // Clip and localize in one pass: store each kept vertex already offset by the
-        // tile origin, so there is no separate localization pass over the output.
+        // Clip and localize in one pass: store each kept vertex already offset by the tile origin, so
+        // there is no separate localization pass over the output. Each vertex is emitted once its keep
+        // status is fully known (both its segments seen), so we act on `prev`, carrying whether the
+        // segment *into* `prev` touched the box.
         let mut runs = Vec::new();
-        let mut prev: Option<V> = None;
         let mut cur: Vec<V> = Vec::new();
+        let mut prev: Option<V> = None;
+        let mut left_hit = false;
         for &c in poly {
-            if prev.map(|v| v.position()) == Some(c.position()) {
-                continue; // drop a consecutive duplicate vertex (same position)
-            }
             if let Some(a) = prev {
-                if segment_intersects(a.position(), c.position(), min, max) {
-                    if cur.is_empty() {
-                        cur.push(to_local(a, origin)?);
-                    }
-                    cur.push(to_local(c, origin)?);
+                if a.position() == c.position() {
+                    continue; // drop a consecutive duplicate vertex (keep `prev`/`left_hit`)
+                }
+                let this_hit = segment_intersects(a.position(), c.position(), min, max);
+                if left_hit || this_hit {
+                    cur.push(to_local(a, origin)?); // `a` is kept by one of its segments
                 } else if cur.len() >= 2 {
-                    runs.push(std::mem::take(&mut cur));
+                    runs.push(std::mem::take(&mut cur)); // `a` is dropped: close the run before it
                 } else {
                     cur.clear();
                 }
+                left_hit = this_hit;
             }
             prev = Some(c);
+        }
+        // The last vertex is kept iff its only segment (the final one) touched the box.
+        if left_hit && let Some(a) = prev {
+            cur.push(to_local(a, origin)?);
         }
         if cur.len() >= 2 {
             runs.push(cur);

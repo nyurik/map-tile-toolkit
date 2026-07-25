@@ -331,7 +331,7 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
     }
 
     /// Append segment `a`–`c` to `tile`'s buffer (localized by `origin`), extending the tile's open
-    /// run if the immediately preceding segment also landed here, else starting a new run — and, when
+    /// run if the preceding one or two segments also landed here, else starting a new run — and, when
     /// a new run, opening a new feature unless this feature already reached the tile (a re-entry).
     #[expect(
         clippy::cast_possible_truncation,
@@ -346,12 +346,28 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
         // per-polyline gap in `begin_polyline` guarantees this never matches across polylines, and a
         // fresh tile (`open_step == 0`) never matches (the first step is ≥ 2 after the gap).
         let continues = buf.open_step == step.wrapping_sub(1);
+        // Bridge a single-segment excursion: this tile was last written exactly two steps ago (the one
+        // segment in between missed it) within *this* feature. That skipped segment connects the run's
+        // tail to this segment's `a` — both kept — so join them into one run rather than splitting,
+        // matching `slice_one`'s "break only at a dropped vertex". The `feature_start` guard keeps the
+        // two-step gap from spanning a polyline boundary (where it would be a coincidence, not a
+        // bridge).
+        let bridges =
+            !continues && buf.open_step == step.wrapping_sub(2) && buf.open_step >= feature_start;
         let c_local = to_local(c, origin)?;
         if continues {
             buf.verts.push(c_local);
             *buf.run_ends
                 .last_mut()
                 .expect("continuing implies an open run") = buf.verts.len() as u32;
+        } else if bridges {
+            // Append both endpoints of this segment: `a` is the bridge vertex just outside the tile,
+            // not yet in the run.
+            buf.verts.push(to_local(a, origin)?);
+            buf.verts.push(c_local);
+            *buf.run_ends
+                .last_mut()
+                .expect("bridging implies an open run") = buf.verts.len() as u32;
         } else {
             let a_local = to_local(a, origin)?;
             buf.verts.push(a_local);

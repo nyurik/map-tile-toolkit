@@ -42,20 +42,7 @@
           [
             40.0,
             5.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/0",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
+          ],
           [
             65.0,
             20.0
