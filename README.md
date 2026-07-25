@@ -16,7 +16,7 @@ just outside wherever the line crosses an edge — instead of cutting new vertic
 
 `SlicerAll` accumulates every tile a polyline touches, even if there are no vertices in that tile. `SlicerOne` accumulates one fixed tile. Add
 each polyline as an independent **feature**, then read the pieces back through borrowed iterators —
-never owned `Vec`s. Nothing panics: bad input returns a `SliceError`.
+never owned `Vec`s. Nothing panics: bad input returns a `TileError`.
 
 ```rust
 use geo_types::Coord;
@@ -41,7 +41,7 @@ for tile in slicer.iter_tiles() {
         }
     }
 }
-# Ok::<(), map_tile_toolkit::SliceError>(())
+# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 `SlicerOne::new(extent, buffer, tile)` clips to one tile and skips the tile level (`iter_features`
@@ -81,7 +81,7 @@ for tile in slicer.iter_tiles() {
 for feature in mosaic.iter_features() {
     let _ = feature; // Vec<Coord<i32>> in global coordinates
 }
-# Ok::<(), map_tile_toolkit::SliceError>(())
+# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 ### Payloads and `geo-types`
@@ -102,7 +102,7 @@ for (tile, piece) in slicer.iter_geometries() {
     let _ = (tile, piece); // piece: LineString or MultiLineString in the tile's local frame
 }
 # }
-# Ok::<(), map_tile_toolkit::SliceError>(())
+# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 ## Development

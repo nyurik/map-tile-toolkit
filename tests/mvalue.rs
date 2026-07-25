@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use geo_types::Coord;
-use map_tile_toolkit::{CombineError, Measured, Mosaic, SlicerAll, TileId, Vertex};
+use map_tile_toolkit::{Measured, Mosaic, SlicerAll, TileError, TileId, Vertex};
 
 /// Slice one polyline into every tile it touches (as a single feature), each tile's runs flattened.
 /// Generic over the vertex type, so the same helper drives both the `Measured` and `Coord` paths.
@@ -107,7 +107,7 @@ fn mosaic_rejects_a_payload_mismatch() {
         TileId::new(0, 1),
         &[vec![Measured::new(5, -5, 10), Measured::new(5, 5, 999)]],
     );
-    assert_eq!(bad, Err(CombineError::Conflict(vec![TileId::new(0, 0)])));
+    assert_eq!(bad, Err(TileError::Conflict(vec![TileId::new(0, 0)])));
     assert_eq!(mosaic.len(), 1);
     assert!(mosaic.contains(TileId::new(0, 0)));
 }

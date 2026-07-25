@@ -1,4 +1,4 @@
-//! The error type returned by the slicer.
+//! The error type returned by the slicers and the [`Mosaic`](crate::Mosaic) combiner.
 //!
 //! This crate never panics on caller input: every operation that cannot proceed returns one of
 //! these variants instead. All coordinate math is checked, so out-of-range inputs are reported
@@ -6,10 +6,13 @@
 
 use thiserror::Error;
 
-/// Something the slicer cannot process. Returned in place of a panic or a silently-wrong result.
+use crate::TileId;
+
+/// Something the slicer or combiner cannot process. Returned in place of a panic or a silently-wrong
+/// result.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum SliceError {
+pub enum TileError {
     /// The per-tile output resolution / tile side (`extent`) was zero, or larger than `i32::MAX`.
     #[error("extent must be between 1 and {}", i32::MAX)]
     InvalidExtent,
@@ -41,4 +44,10 @@ pub enum SliceError {
     /// the representable range for the given `extent`/`buffer`.
     #[error("coordinate arithmetic overflowed the i32 range")]
     Overflow,
+
+    /// While combining tiles, the added tile disagreed with the already-added tiles on a
+    /// shared border segment (see [`Mosaic::add`](crate::Mosaic::add)). Ids are sorted and unique;
+    /// the mosaic is left unchanged.
+    #[error("tile conflicts with {} already-added tile(s)", .0.len())]
+    Conflict(Vec<TileId>),
 }

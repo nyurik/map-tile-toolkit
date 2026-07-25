@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
-pub use error::SliceError;
+pub use error::TileError;
 
 mod tile;
 pub use tile::TileId;
@@ -19,7 +19,7 @@ mod slicer;
 pub use slicer::{FeatureView, SlicerAll, SlicerOne, TileView};
 
 mod mosaic;
-pub use mosaic::{CombineError, Mosaic};
+pub use mosaic::Mosaic;
 
 // Optional `geo-types` `Geometry` bridge for the accumulator. The core API is geo-free.
 #[cfg(feature = "geo")]

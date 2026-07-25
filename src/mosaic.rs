@@ -16,22 +16,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use geo_types::Coord;
 
-use crate::SliceError;
+use crate::TileError;
 use crate::tile::TileId;
 use crate::vertex::Vertex;
-
-/// Why [`Mosaic::add`] rejected a tile. In every case the mosaic is left unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum CombineError {
-    /// The tile shares a border segment with the listed already-added tiles, but their vertices
-    /// disagree (different coordinates or payload). Ids are sorted and unique.
-    #[error("tile conflicts with {} already-added tile(s)", .0.len())]
-    Conflict(Vec<TileId>),
-    /// A vertex could not be rebased into the global frame without overflowing `i32`.
-    #[error("coordinate arithmetic overflowed the i32 range")]
-    Overflow,
-}
 
 /// A global directed edge's two vertices (identical across every tile that carries it) and the set of
 /// tiles that do.
@@ -48,8 +35,8 @@ type EdgeKey = (Coord<i32>, Coord<i32>);
 /// Reassembles tiled features back into whole features as tiles are [added](Self::add).
 ///
 /// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]). With plain `Coord` vertices only
-/// [`Overflow`](CombineError::Overflow) can arise (positions always agree); a payload-carrying vertex
-/// (e.g. [`Measured`](crate::Measured)) is what makes [`Conflict`](CombineError::Conflict) meaningful.
+/// [`TileError::Overflow`] can arise (positions always agree); a payload-carrying vertex (e.g.
+/// [`Measured`](crate::Measured)) is what makes [`TileError::Conflict`] meaningful.
 #[derive(Debug, Clone)]
 pub struct Mosaic<V: Vertex = Coord<i32>> {
     extent: u32,
@@ -65,10 +52,10 @@ impl<V: Vertex> Mosaic<V> {
     ///
     /// # Errors
     ///
-    /// [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
-    pub fn new(extent: u32) -> Result<Self, SliceError> {
+    /// [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    pub fn new(extent: u32) -> Result<Self, TileError> {
         if extent == 0 || extent > i32::MAX.cast_unsigned() {
-            return Err(SliceError::InvalidExtent);
+            return Err(TileError::InvalidExtent);
         }
         Ok(Self {
             extent,
@@ -89,10 +76,10 @@ impl<V: Vertex> Mosaic<V> {
     ///
     /// # Errors
     ///
-    /// - [`CombineError::Conflict`] if the tile disagrees with already-added tiles on a shared border
+    /// - [`TileError::Conflict`] if the tile disagrees with already-added tiles on a shared border
     ///   segment. The mosaic is unchanged.
-    /// - [`CombineError::Overflow`] if a vertex overflows `i32` when rebased into the global frame.
-    pub fn add<L: AsRef<[V]>>(&mut self, tile: TileId, runs: &[L]) -> Result<(), CombineError> {
+    /// - [`TileError::Overflow`] if a vertex overflows `i32` when rebased into the global frame.
+    pub fn add<L: AsRef<[V]>>(&mut self, tile: TileId, runs: &[L]) -> Result<(), TileError> {
         // `tile · extent` fits `i64`: both factors are within `i32`, so the product is below `2^62`.
         let e = i64::from(self.extent);
         let off_x = i64::from(tile.x) * e;
@@ -101,7 +88,7 @@ impl<V: Vertex> Mosaic<V> {
         // mutated yet, so an overflow (or a later conflict) leaves the mosaic untouched.
         let mut new_edges: HashMap<EdgeKey, (V, V)> = HashMap::new();
         for run in runs {
-            let g = rebase(run.as_ref(), off_x, off_y).map_err(|_| CombineError::Overflow)?;
+            let g = rebase(run.as_ref(), off_x, off_y)?;
             for w in g.windows(2) {
                 let key = (w[0].position(), w[1].position());
                 if key.0 != key.1 {
@@ -119,7 +106,7 @@ impl<V: Vertex> Mosaic<V> {
             }
         }
         if !conflicts.is_empty() {
-            return Err(CombineError::Conflict(conflicts.into_iter().collect()));
+            return Err(TileError::Conflict(conflicts.into_iter().collect()));
         }
         // Commit: replace any prior contents for this tile, then index the new edges.
         self.purge(tile);
@@ -198,13 +185,13 @@ impl<V: Vertex> Mosaic<V> {
 /// Rebase every vertex of `run` by `(off_x, off_y)` in `i64` (the offset is `tile · extent`, below
 /// `2^62`, and a vertex adds at most another `i32`, so the sum stays within `i64`), range-checking
 /// each result back into `i32`.
-fn rebase<V: Vertex>(run: &[V], off_x: i64, off_y: i64) -> Result<Vec<V>, SliceError> {
+fn rebase<V: Vertex>(run: &[V], off_x: i64, off_y: i64) -> Result<Vec<V>, TileError> {
     run.iter()
         .map(|&v| {
             let p = v.position();
             Ok(v.with_position(Coord {
-                x: i32::try_from(i64::from(p.x) + off_x).map_err(|_| SliceError::Overflow)?,
-                y: i32::try_from(i64::from(p.y) + off_y).map_err(|_| SliceError::Overflow)?,
+                x: i32::try_from(i64::from(p.x) + off_x).map_err(|_| TileError::Overflow)?,
+                y: i32::try_from(i64::from(p.y) + off_y).map_err(|_| TileError::Overflow)?,
             }))
         })
         .collect()

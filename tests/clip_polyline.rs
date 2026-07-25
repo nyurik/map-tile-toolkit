@@ -213,8 +213,7 @@ fn big_geometry_batch_matches_per_tile() {
             }
         }
         assert_eq!(
-            all,
-            one,
+            all, one,
             "big-geometry batch and per-tile slicing disagree (buffer {})",
             slicer.buffer
         );
@@ -270,8 +269,7 @@ fn slice_at_buffer(
         }
     }
     assert_eq!(
-        all,
-        one,
+        all, one,
         "batch and per-tile slicing disagree for {stem} (buffer {})",
         slicer.buffer
     );
@@ -283,8 +281,7 @@ fn slice_at_buffer(
         .into_iter()
         .collect();
     assert_eq!(
-        all_duped,
-        all,
+        all_duped, all,
         "duplicating every vertex changed the batch result for {stem} (buffer {})",
         slicer.buffer
     );
@@ -312,8 +309,7 @@ fn slice_at_buffer(
     let all_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&all))).expect("serializes");
     let one_bytes = serde_json::to_vec_pretty(&build_fc(geom, &global(&one))).expect("serializes");
     assert_eq!(
-        all_bytes,
-        one_bytes,
+        all_bytes, one_bytes,
         "batch and per-tile snapshots differ for {stem} (buffer {})",
         slicer.buffer
     );

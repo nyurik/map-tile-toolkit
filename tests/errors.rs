@@ -1,7 +1,7 @@
-//! The public API never panics: invalid input yields a typed [`SliceError`] instead.
+//! The public API never panics: invalid input yields a typed [`TileError`] instead.
 
 use geo_types::Coord;
-use map_tile_toolkit::{SliceError, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{SlicerAll, SlicerOne, TileError, TileId};
 
 /// A polyline as a `Vec<Coord<i32>>`.
 fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
@@ -9,7 +9,7 @@ fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
 }
 
 /// A fresh all-tiles slicer over `Coord` (the config validation is what these tests probe).
-fn all(extent: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, SliceError> {
+fn all(extent: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, TileError> {
     SlicerAll::new(extent, buffer)
 }
 
@@ -46,30 +46,30 @@ fn errors_after_emitting() -> Vec<Coord<i32>> {
 
 #[test]
 fn invalid_extent() {
-    assert_eq!(all(0, 0).err(), Some(SliceError::InvalidExtent));
-    assert_eq!(all(u32::MAX, 0).err(), Some(SliceError::InvalidExtent));
+    assert_eq!(all(0, 0).err(), Some(TileError::InvalidExtent));
+    assert_eq!(all(u32::MAX, 0).err(), Some(TileError::InvalidExtent));
     assert!(all(1, 0).is_ok());
     assert!(all(i32::MAX as u32, u16::MAX).is_ok());
     // Both slicers validate the extent the same way.
     assert_eq!(
         SlicerOne::<Coord<i32>>::new(0, 0, TileId::new(0, 0)).err(),
-        Some(SliceError::InvalidExtent)
+        Some(TileError::InvalidExtent)
     );
 }
 
 #[test]
 fn buffer_too_large() {
     // `buffer` must be strictly less than half the `extent` (i.e. `2*buffer < extent`).
-    assert_eq!(all(10, 5).err(), Some(SliceError::BufferTooLarge)); // 2*5 == 10, not < 10
-    assert_eq!(all(10, 6).err(), Some(SliceError::BufferTooLarge));
+    assert_eq!(all(10, 5).err(), Some(TileError::BufferTooLarge)); // 2*5 == 10, not < 10
+    assert_eq!(all(10, 6).err(), Some(TileError::BufferTooLarge));
     assert!(all(10, 4).is_ok()); // 2*4 == 8 < 10
     // With extent 1 only a zero buffer is allowed.
     assert!(all(1, 0).is_ok());
-    assert_eq!(all(2, 1).err(), Some(SliceError::BufferTooLarge));
+    assert_eq!(all(2, 1).err(), Some(TileError::BufferTooLarge));
     // Both slicers validate the buffer the same way.
     assert_eq!(
         SlicerOne::<Coord<i32>>::new(10, 5, TileId::new(0, 0)).err(),
-        Some(SliceError::BufferTooLarge)
+        Some(TileError::BufferTooLarge)
     );
 }
 
@@ -81,7 +81,7 @@ fn non_polyline_geometry_errors() {
     let point = Geometry::Point(Point::new(1, 2));
     assert_eq!(
         s.add_geometry(&point).err(),
-        Some(SliceError::UnsupportedGeometry("Point"))
+        Some(TileError::UnsupportedGeometry("Point"))
     );
 }
 
@@ -93,11 +93,11 @@ fn extreme_tile_errors_instead_of_panicking() {
         one(4096, 0, TileId::new(i32::MAX, i32::MAX))
             .add_feature(&l)
             .err(),
-        Some(SliceError::Overflow)
+        Some(TileError::Overflow)
     );
     assert_eq!(
         one(4096, 0, TileId::new(i32::MIN, 0)).add_feature(&l).err(),
-        Some(SliceError::Overflow)
+        Some(TileError::Overflow)
     );
     // A far-but-representable tile touches nothing → no features accumulated.
     let mut far = one(4096, 0, TileId::new(1000, 1000));
@@ -111,7 +111,7 @@ fn spanning_too_many_tiles_errors() {
     // Spans 40 000 tiles on x, past i16::MAX (32 767).
     assert_eq!(
         s.add_feature(line(vec![(0, 0), (40_000, 0)])).err(),
-        Some(SliceError::TooManyTiles)
+        Some(TileError::TooManyTiles)
     );
 }
 
@@ -122,7 +122,7 @@ fn coordinate_overflow_errors() {
     assert_eq!(
         s.add_feature(line(vec![(i32::MAX, 0), (i32::MAX, 10)]))
             .err(),
-        Some(SliceError::Overflow)
+        Some(TileError::Overflow)
     );
 }
 
@@ -135,7 +135,7 @@ fn too_many_vertices_errors() {
         .collect();
     assert_eq!(
         s.add_feature(&coords).err(),
-        Some(SliceError::PolylineTooLarge)
+        Some(TileError::PolylineTooLarge)
     );
 }
 
@@ -161,7 +161,7 @@ fn add_feature_is_atomic_on_error() {
     // The failing feature must leave no trace — the accumulator is byte-for-byte what it was.
     assert_eq!(
         s.add_feature(errors_after_emitting()).err(),
-        Some(SliceError::Overflow)
+        Some(TileError::Overflow)
     );
     assert_eq!(snapshot(&s), before, "errored feature must roll back fully");
 

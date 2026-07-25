@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use geo_types::Coord;
 
-use crate::SliceError;
+use crate::TileError;
 use crate::clip_polyline::to_local;
 use crate::grid::{Grid, RouteSink};
 use crate::tile::TileId;
@@ -148,7 +148,7 @@ impl<'a, V: Vertex> FeatureView<'a, V> {
 /// [`add_feature`](Self::add_feature) and read them back with [`iter_tiles`](Self::iter_tiles).
 ///
 /// The slicer never panics: bad input (an oversized polyline, or coordinates that overflow the tile
-/// math) yields an [`SliceError`] instead.
+/// math) yields an [`TileError`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlicerAll<V: Vertex = Coord<i32>> {
     grid: Grid,
@@ -190,9 +190,9 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
-    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
-    pub fn new(extent: u32, buffer: u16) -> Result<Self, SliceError> {
+    /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`TileError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
+    pub fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
         Ok(Self::from_grid(Grid::new(extent, buffer)?))
     }
 
@@ -218,8 +218,8 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// # Errors
     ///
-    /// [`SliceError::PolylineTooLarge`], [`SliceError::TooManyTiles`], or [`SliceError::Overflow`].
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
+    /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
         let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
         // Savepoint for rollback: how many tiles existed, and the last step used, before this feature.
         // Every piece this feature writes lands in a tile created after `tiles_before`, or bumps an
@@ -337,7 +337,7 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
         clippy::cast_possible_truncation,
         reason = "run/vertex counts per tile stay far below u32::MAX"
     )]
-    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), SliceError> {
+    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), TileError> {
         let step = self.step;
         let feature_start = self.feature_start;
         let slot = self.tile_slot(tile);
@@ -401,9 +401,9 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
-    /// - [`SliceError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
-    pub fn new(extent: u32, buffer: u16, tile: TileId) -> Result<Self, SliceError> {
+    /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`TileError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
+    pub fn new(extent: u32, buffer: u16, tile: TileId) -> Result<Self, TileError> {
         Ok(Self::from_grid(Grid::new(extent, buffer)?, tile))
     }
 
@@ -432,8 +432,8 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, SliceError> {
+    /// [`TileError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
         if !runs.is_empty() {
             self.buf.absorb(runs);

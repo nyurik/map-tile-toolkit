@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use geo_types::Coord;
-use map_tile_toolkit::{Mosaic, TileId};
+use map_tile_toolkit::{Mosaic, TileError, TileId};
 
 mod support;
 
@@ -53,7 +53,7 @@ fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
 
 /// Every permutation of `0..n`.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
-    assert!(n <= 10, "permutations of more than {n} tiles is too many to enumerate");
+    assert!(n <= 10, "permutations of more than {n} tiles is too many");
 
     fn go(a: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
         if k == a.len() {
@@ -106,23 +106,21 @@ fn every_permutation_reassembles_all_fixtures() {
 
 #[test]
 fn invalid_extent_is_rejected() {
-    use map_tile_toolkit::SliceError;
     assert_eq!(
         Mosaic::<Coord<i32>>::new(0).err(),
-        Some(SliceError::InvalidExtent)
+        Some(TileError::InvalidExtent)
     );
     assert_eq!(
         Mosaic::<Coord<i32>>::new(u32::MAX).err(),
-        Some(SliceError::InvalidExtent)
+        Some(TileError::InvalidExtent)
     );
 }
 
 #[test]
 fn far_tile_overflows_instead_of_panicking() {
-    use map_tile_toolkit::CombineError;
     let mut mosaic = Mosaic::new(4096).expect("valid config");
     let run = vec![Coord { x: 0, y: 0 }, Coord { x: 1, y: 0 }];
     let bad = mosaic.add(TileId::new(i32::MAX, 0), &[run]);
-    assert_eq!(bad, Err(CombineError::Overflow));
+    assert_eq!(bad, Err(TileError::Overflow));
     assert!(mosaic.is_empty(), "an overflowing add changes nothing");
 }

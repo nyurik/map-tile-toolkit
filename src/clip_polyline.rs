@@ -7,7 +7,7 @@
 
 use geo_types::Coord;
 
-use crate::SliceError;
+use crate::TileError;
 use crate::vertex::Vertex;
 
 /// Is coordinate `c` inside the closed rectangle `[min, max]`?
@@ -54,13 +54,13 @@ pub(crate) fn segment_intersects(
 }
 
 /// Re-express vertex `v` in the tile-local frame whose `[0, 0]` corner is `origin`: its position
-/// becomes `position − origin`, its payload unchanged. [`SliceError::Overflow`] if the offset leaves the
+/// becomes `position − origin`, its payload unchanged. [`TileError::Overflow`] if the offset leaves the
 /// `i32` range — possible only when a far crossing-segment endpoint lies more than a full `i32` span
 /// from the tile.
-pub(crate) fn to_local<V: Vertex>(v: V, origin: Coord<i32>) -> Result<V, SliceError> {
+pub(crate) fn to_local<V: Vertex>(v: V, origin: Coord<i32>) -> Result<V, TileError> {
     let p = v.position();
     Ok(v.with_position(Coord {
-        x: p.x.checked_sub(origin.x).ok_or(SliceError::Overflow)?,
-        y: p.y.checked_sub(origin.y).ok_or(SliceError::Overflow)?,
+        x: p.x.checked_sub(origin.x).ok_or(TileError::Overflow)?,
+        y: p.y.checked_sub(origin.y).ok_or(TileError::Overflow)?,
     }))
 }

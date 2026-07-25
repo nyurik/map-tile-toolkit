@@ -8,17 +8,17 @@
 
 use geo_types::Coord;
 
-use crate::SliceError;
+use crate::TileError;
 use crate::clip_polyline::{segment_intersects, to_local};
 use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
 /// The maximum polyline length the slicer accepts (`u16::MAX + 1` vertices); a longer polyline yields
-/// [`SliceError::PolylineTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
+/// [`TileError::PolylineTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
 const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 
 /// Upper bound on the candidate tiles [`Grid::route`] will examine before giving up with
-/// [`SliceError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
+/// [`TileError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
 /// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
 /// well under a second.
 const MAX_TILE_VISITS: i64 = 1 << 25;
@@ -50,8 +50,8 @@ pub(crate) trait RouteSink<V: Vertex> {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Overflow`] if a vertex lies more than an `i32` span from `origin`.
-    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), SliceError>;
+    /// [`TileError::Overflow`] if a vertex lies more than an `i32` span from `origin`.
+    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), TileError>;
 }
 
 /// A vertex's owner tile with its core cell and inner box precomputed in **global** coordinates, so
@@ -98,7 +98,7 @@ impl Located {
 /// `x − tile·extent ∈ [0, extent)`, so `extent` is both the tile side and its output resolution; each
 /// clip box grows `buffer` on every side. The library owns no float/projection math (callers scale
 /// into this space up front), keeps original vertices, and never panics — bad input yields a
-/// [`SliceError`].
+/// [`TileError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Grid {
     /// Tile side length in tile space, i.e. the per-tile output resolution (always in `1..=i32::MAX`).
@@ -112,17 +112,17 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`SliceError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
-    /// - [`SliceError::BufferTooLarge`] if `2 * buffer >= extent` — the buffer must stay under half a
+    /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`TileError::BufferTooLarge`] if `2 * buffer >= extent` — the buffer must stay under half a
     ///   tile, so a vertex near an edge spills into at most one neighbor per axis and the
     ///   tile-minus-buffer inner box stays non-empty (both relied on by the routing).
-    pub(crate) const fn new(extent: u32, buffer: u16) -> Result<Self, SliceError> {
+    pub(crate) const fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
         if extent == 0 || extent > i32::MAX.cast_unsigned() {
-            return Err(SliceError::InvalidExtent);
+            return Err(TileError::InvalidExtent);
         }
         // `2 * buffer` cannot overflow: `buffer <= u16::MAX`, so the product fits `u32`.
         if 2 * (buffer as u32) >= extent {
-            return Err(SliceError::BufferTooLarge);
+            return Err(TileError::BufferTooLarge);
         }
         Ok(Self {
             extent: extent.cast_signed(),
@@ -153,14 +153,14 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// [`SliceError::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far
+    /// [`TileError::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far
     /// outside the representable range for this `extent`), or a kept vertex lies more than an `i32`
     /// span from the tile origin.
     pub(crate) fn slice_one<V: Vertex>(
         self,
         polyline: &[V],
         tile: TileId,
-    ) -> Result<Vec<Vec<V>>, SliceError> {
+    ) -> Result<Vec<Vec<V>>, TileError> {
         let poly = polyline;
         let (min, max) = self.tile_buffered_bounds(tile)?;
         // The tile origin is `min` grown back by the buffer: `tile_buffered_bounds` already proved
@@ -214,21 +214,21 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`SliceError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
-    /// - [`SliceError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
+    /// - [`TileError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
+    /// - [`TileError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
     ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
-    /// - [`SliceError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
+    /// - [`TileError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
     ///   vertex lies more than an `i32` span from its tile origin.
     pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
         self,
         polyline: &[V],
         sink: &mut S,
-    ) -> Result<(), SliceError> {
+    ) -> Result<(), TileError> {
         let poly = polyline;
 
         // Up-front length check before any `emit`, so this input-level error is atomic.
         if poly.len() > MAX_INDEXED_LEN {
-            return Err(SliceError::PolylineTooLarge);
+            return Err(TileError::PolylineTooLarge);
         }
 
         // Empty polyline → nothing to route.
@@ -248,7 +248,7 @@ impl Grid {
             (hi_tile.y, reference.y),
         ] {
             i16::try_from(i64::from(tile) - i64::from(refc))
-                .map_err(|_| SliceError::TooManyTiles)?;
+                .map_err(|_| TileError::TooManyTiles)?;
         }
 
         sink.begin_polyline();
@@ -278,7 +278,7 @@ impl Grid {
                     // geometry test.
                     budget -= 1;
                     if budget < 0 {
-                        return Err(SliceError::TooManyTiles);
+                        return Err(TileError::TooManyTiles);
                     }
                     sink.emit(la.owner, la.core_lo, a, *v)?;
                     prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
@@ -302,7 +302,7 @@ impl Grid {
                     budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
                         * (i64::from(hi.y) - i64::from(lo.y) + 1);
                     if budget < 0 {
-                        return Err(SliceError::TooManyTiles);
+                        return Err(TileError::TooManyTiles);
                     }
                     for ty in lo.y..=hi.y {
                         for tx in lo.x..=hi.x {
@@ -329,43 +329,33 @@ impl Grid {
     }
 
     /// The closed integer bounds `(min, max)` of `tile`'s clip box (in output space), grown by
-    /// `buffer` on each side. All arithmetic is checked; [`SliceError::Overflow`] means the tile lies
+    /// `buffer` on each side. All arithmetic is checked; [`TileError::Overflow`] means the tile lies
     /// outside the representable range for this `extent`.
-    fn tile_buffered_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), SliceError> {
-        let base_x = tile
-            .x
-            .checked_mul(self.extent)
-            .ok_or(SliceError::Overflow)?;
-        let base_y = tile
-            .y
-            .checked_mul(self.extent)
-            .ok_or(SliceError::Overflow)?;
+    fn tile_buffered_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), TileError> {
+        let base_x = tile.x.checked_mul(self.extent).ok_or(TileError::Overflow)?;
+        let base_y = tile.y.checked_mul(self.extent).ok_or(TileError::Overflow)?;
         // Distance from the base corner to the far corner of the buffered box: extent - 1 + buffer.
         let reach = (self.extent - 1)
             .checked_add(self.buffer)
-            .ok_or(SliceError::Overflow)?;
+            .ok_or(TileError::Overflow)?;
         Ok((
             Coord {
-                x: base_x
-                    .checked_sub(self.buffer)
-                    .ok_or(SliceError::Overflow)?,
-                y: base_y
-                    .checked_sub(self.buffer)
-                    .ok_or(SliceError::Overflow)?,
+                x: base_x.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
+                y: base_y.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
             },
             Coord {
-                x: base_x.checked_add(reach).ok_or(SliceError::Overflow)?,
-                y: base_y.checked_add(reach).ok_or(SliceError::Overflow)?,
+                x: base_x.checked_add(reach).ok_or(TileError::Overflow)?,
+                y: base_y.checked_add(reach).ok_or(TileError::Overflow)?,
             },
         ))
     }
 
     /// Locate the tile owning `c` (in output space), with its core and inner boxes precomputed (see
-    /// [`Located`]). Built on [`Self::tile_buffered_bounds`], so it reports [`SliceError::Overflow`] for exactly
+    /// [`Located`]). Built on [`Self::tile_buffered_bounds`], so it reports [`TileError::Overflow`] for exactly
     /// the tiles the routing scan would — `min = base − buffer` and `max = base + extent − 1 + buffer`,
     /// from which the core (`base .. base + extent − 1`) and inner (`base + buffer .. max − 2·buffer`)
     /// follow by `± buffer` (all within `[min, max]`, so no further overflow).
-    fn locate(self, c: Coord<i32>) -> Result<Located, SliceError> {
+    fn locate(self, c: Coord<i32>) -> Result<Located, TileError> {
         let owner = tile_of(c, self.extent);
         let (min, max) = self.tile_buffered_bounds(owner)?;
         Ok(Located {
@@ -378,13 +368,13 @@ impl Grid {
     }
 
     /// The lowest and highest tiles any part of `poly` can reach: the coordinate bounding box grown by
-    /// `buffer`, mapped to tiles. `first` seeds the bounds. [`SliceError::Overflow`] if a coordinate
+    /// `buffer`, mapped to tiles. `first` seeds the bounds. [`TileError::Overflow`] if a coordinate
     /// `± buffer` overflows `i32`.
     fn buffered_tile_bounds<V: Vertex>(
         self,
         poly: &[V],
         first: Coord<i32>,
-    ) -> Result<(TileId, TileId), SliceError> {
+    ) -> Result<(TileId, TileId), TileError> {
         let (mut min, mut max) = (first, first);
         for v in poly {
             let c = v.position();
@@ -395,15 +385,15 @@ impl Grid {
         }
         let lo = tile_of(
             Coord {
-                x: min.x.checked_sub(self.buffer).ok_or(SliceError::Overflow)?,
-                y: min.y.checked_sub(self.buffer).ok_or(SliceError::Overflow)?,
+                x: min.x.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
+                y: min.y.checked_sub(self.buffer).ok_or(TileError::Overflow)?,
             },
             self.extent,
         );
         let hi = tile_of(
             Coord {
-                x: max.x.checked_add(self.buffer).ok_or(SliceError::Overflow)?,
-                y: max.y.checked_add(self.buffer).ok_or(SliceError::Overflow)?,
+                x: max.x.checked_add(self.buffer).ok_or(TileError::Overflow)?,
+                y: max.y.checked_add(self.buffer).ok_or(TileError::Overflow)?,
             },
             self.extent,
         );
