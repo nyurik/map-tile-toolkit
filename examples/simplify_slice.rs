@@ -22,7 +22,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use geo::Simplify;
-use geo_types::{Coord, Geometry, LineString};
+use geo_types::{Coord, LineString};
 use map_tile_toolkit::SlicerAll;
 use wkt::TryFromWkt;
 
@@ -69,7 +69,7 @@ fn main() {
 
     // --- simplify + project: RDP in metre space, then onto the integer tile grid ---
     let t = Instant::now();
-    let geoms: Vec<Geometry<i32>> = lines
+    let geoms: Vec<LineString<i32>> = lines
         .iter()
         .map(|ls| {
             let simplified = ls.simplify(epsilon);
@@ -82,16 +82,10 @@ fn main() {
                     y: ((HALF - c.y) * units_per_m) as i32,
                 })
                 .collect();
-            Geometry::LineString(LineString(coords))
+            LineString(coords)
         })
         .collect();
-    let vertices: usize = geoms
-        .iter()
-        .map(|g| match g {
-            Geometry::LineString(ls) => ls.0.len(),
-            _ => 0,
-        })
-        .sum();
+    let vertices: usize = geoms.iter().map(|ls| ls.0.len()).sum();
     eprintln!(
         "simplified + projected to {vertices} vertices in {:?}",
         t.elapsed()
@@ -105,7 +99,7 @@ fn main() {
     // build a whole tiled dataset in one pass.
     let mut acc = SlicerAll::new(EXTENT, 0).expect("valid slicer config");
     for geom in &geoms {
-        if acc.add_geometry(black_box(geom)).is_err() {
+        if acc.add_line(black_box(geom)).is_err() {
             skipped += 1;
         }
     }

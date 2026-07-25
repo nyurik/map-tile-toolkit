@@ -102,6 +102,7 @@ coverage:  (_coverage '--open')
 _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --workspace --all-features --all-targets
+    if rustup toolchain list | grep nightly &> /dev/null; then cargo +nightly llvm-cov --no-report --doctests --workspace --all-features; fi
     cargo llvm-cov report --include-build-script {{report_args}}
 
 # Build and open code documentation

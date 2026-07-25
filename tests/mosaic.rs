@@ -38,6 +38,11 @@ fn all_fixture_polylines() -> Vec<Vec<Coord<i32>>> {
         .collect()
 }
 
+/// A polyline of plain `Coord`s.
+fn line(coords: &[(i32, i32)]) -> Vec<Coord<i32>> {
+    coords.iter().map(|&(x, y)| Coord { x, y }).collect()
+}
+
 /// Directed-edge set of a run list, skipping zero-length edges (slicing drops consecutive dups).
 fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
     let mut set = HashSet::new();
@@ -123,4 +128,61 @@ fn far_tile_overflows_instead_of_panicking() {
     let bad = mosaic.add(TileId::new(i32::MAX, 0), &[run]);
     assert_eq!(bad, Err(TileError::Overflow));
     assert!(mosaic.is_empty(), "an overflowing add changes nothing");
+}
+
+#[test]
+fn purge_and_clear_manage_tiles() {
+    let mut mosaic = Mosaic::new(25).expect("valid config");
+    assert!(mosaic.is_empty());
+
+    // Two disjoint segments in different tiles.
+    mosaic
+        .add(TileId::new(0, 0), &[line(&[(1, 1), (10, 10)])])
+        .expect("tile 0");
+    mosaic
+        .add(TileId::new(5, 5), &[line(&[(3, 3), (12, 12)])])
+        .expect("tile 5");
+    assert_eq!(mosaic.len(), 2);
+    assert!(mosaic.contains(TileId::new(0, 0)));
+    assert!(!mosaic.contains(TileId::new(9, 9)));
+
+    // Purge one tile: it and only it disappears.
+    assert!(mosaic.purge(TileId::new(0, 0)));
+    assert!(!mosaic.contains(TileId::new(0, 0)));
+    assert!(mosaic.contains(TileId::new(5, 5)));
+    assert_eq!(mosaic.len(), 1);
+    assert!(
+        !mosaic.purge(TileId::new(0, 0)),
+        "purging an absent tile is a no-op"
+    );
+
+    // Clear drops everything.
+    mosaic.clear();
+    assert!(mosaic.is_empty());
+    assert_eq!(mosaic.len(), 0);
+}
+
+#[test]
+fn purge_keeps_edges_other_tiles_still_hold() {
+    // Both tiles carry the same global border segment (20,5)→(30,5) — tile (1,0)'s local run rebases
+    // onto it. Purging one tile must leave the shared edge, since the other still holds it.
+    let mut mosaic = Mosaic::new(25).expect("valid config");
+    mosaic
+        .add(TileId::new(0, 0), &[line(&[(20, 5), (30, 5)])])
+        .expect("tile 0");
+    mosaic
+        .add(TileId::new(1, 0), &[line(&[(-5, 5), (5, 5)])])
+        .expect("tile 1");
+
+    assert!(mosaic.purge(TileId::new(1, 0)));
+    let feats: Vec<Vec<Coord<i32>>> = mosaic.iter_features().collect();
+    assert_eq!(
+        feats,
+        vec![line(&[(20, 5), (30, 5)])],
+        "the shared edge survives while tile (0,0) still holds it"
+    );
+
+    // Purging the last holder drops the edge and empties the mosaic.
+    assert!(mosaic.purge(TileId::new(0, 0)));
+    assert!(mosaic.is_empty());
 }

@@ -22,10 +22,6 @@ pub enum TileError {
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
-    /// The geometry was not a `LineString` (the only kinds the slicer clips).
-    #[error("expected a LineString or MultiLineString, got a {0}")]
-    UnsupportedGeometry(&'static str),
-
     /// A line has more than `u16::MAX` vertices, or the geometry has more than `u16::MAX` lines —
     /// beyond what the slicer's compact indexing supports.
     #[error(

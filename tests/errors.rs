@@ -73,18 +73,6 @@ fn buffer_too_large() {
     );
 }
 
-#[cfg(feature = "geo")]
-#[test]
-fn non_polyline_geometry_errors() {
-    use geo_types::{Geometry, Point};
-    let mut s = all(25, 0).expect("valid config");
-    let point = Geometry::Point(Point::new(1, 2));
-    assert_eq!(
-        s.add_geometry(&point).err(),
-        Some(TileError::UnsupportedGeometry("Point"))
-    );
-}
-
 #[test]
 fn extreme_tile_errors_instead_of_panicking() {
     let l = line(vec![(0, 0), (10, 10)]);
