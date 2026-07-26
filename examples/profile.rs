@@ -41,6 +41,9 @@ fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
     acc.iter_tiles().map(|t| t.tile_id()).collect()
 }
 
+// With `--features hotpath`, `#[hotpath::main]` prints a per-function timing table on exit (the
+// `#[hotpath::measure]`-annotated slicing functions); without it this is an ordinary `main`.
+#[cfg_attr(feature = "hotpath", hotpath::main)]
 fn main() {
     let name = std::env::args()
         .nth(1)

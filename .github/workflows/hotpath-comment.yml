@@ -1,0 +1,80 @@
+name: Hotpath Comment
+
+# Runs after "Hotpath Profile" finishes, downloads its metrics artifact, and posts (or updates) a PR
+# comment with the hotpath timing + allocation diff. Split from the profiling job so it can hold a
+# write token without exposing it to untrusted fork PR code.
+
+on:
+  workflow_run:
+    workflows: ["Hotpath Profile"]
+    types: [ completed ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  COMMENT_MARKER: '<!-- hotpath-comment -->'
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hotpath-metrics
+          path: /tmp/metrics/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Install hotpath-utils CLI
+        run: cargo install hotpath --bin hotpath-utils --features=utils
+
+      - name: Compose comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(cat /tmp/metrics/pr_number.txt)
+          CASE=$(cat /tmp/metrics/case.txt)
+          {
+            echo "<details><summary>Hotpath performance — <code>$CASE</code></summary>"
+            echo
+            if [ -s /tmp/metrics/base.json ]; then
+              hotpath-utils profile-pr \
+                --head-metrics /tmp/metrics/head.json \
+                --base-metrics /tmp/metrics/base.json \
+                --pr-number "$PR_NUMBER" \
+                --benchmark-id "$CASE" \
+                --dry-run
+            else
+              echo "No base profile to compare against (the base branch predates hotpath). Head-only run recorded."
+            fi
+            echo
+            echo "</details>"
+            echo
+            echo "$COMMENT_MARKER"
+          } > /tmp/comment.md
+
+      - name: Post or update PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.event.workflow_run.repository.full_name }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(cat /tmp/metrics/pr_number.txt)
+          EXISTING_PR=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --jq ".[] | select(.body | contains(\"$COMMENT_MARKER\")) | .id" | head -n1)
+          if [ -n "$EXISTING_PR" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING_PR" -F body=@/tmp/comment.md
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/comment.md
+          fi

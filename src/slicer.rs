@@ -219,6 +219,7 @@ impl<V: Vertex> SlicerAll<V> {
     /// # Errors
     ///
     /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
         let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
         // Savepoint for rollback: how many tiles existed, and the last step used, before this feature.
@@ -449,6 +450,7 @@ impl<V: Vertex> SlicerOne<V> {
     /// # Errors
     ///
     /// [`TileError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
         if !runs.is_empty() {

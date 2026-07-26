@@ -161,6 +161,7 @@ impl Grid {
     /// [`TileError::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far
     /// outside the representable range for this `extent`), or a kept vertex lies more than an `i32`
     /// span from the tile origin.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn slice_one<V: Vertex>(
         self,
         polyline: &[V],
@@ -230,6 +231,7 @@ impl Grid {
     ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
     /// - [`TileError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
     ///   vertex lies more than an `i32` span from its tile origin.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
         self,
         polyline: &[V],

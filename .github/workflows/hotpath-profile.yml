@@ -1,0 +1,69 @@
+name: Hotpath Profile
+
+# Profiles the head and base of a PR with the `hotpath`-instrumented `profile` example, then uploads
+# the two JSON reports. A separate, write-capable "Hotpath Comment" workflow (triggered on this one's
+# completion) posts the timing + allocation diff back to the PR — the split keeps the profiling job
+# read-only, so it is safe to run on fork PRs.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "Cargo.toml"
+      - ".github/workflows/hotpath.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The `examples/profile.rs` case to profile and how many iterations to run it for. `big-all-multi`
+  # is the primary SlicerAll path (many tiles); allocation counts are deterministic, timing is not.
+  CASE: big-all-multi
+  ITERS: "5000"
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: mkdir -p /tmp/metrics
+
+      - name: Head profile (timing + alloc)
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/head.json
+        run: cargo run --release --example profile --features 'hotpath,hotpath-alloc' -- "$CASE" "$ITERS"
+
+      - name: Checkout base
+        run: git checkout ${{ github.event.pull_request.base.sha }}
+
+      - name: Base profile (timing + alloc)
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/base.json
+        # The base may predate hotpath (e.g. the PR that introduces it); then there is nothing to
+        # compare against and the comment falls back to a head-only note.
+        run: cargo run --release --example profile --features 'hotpath,hotpath-alloc' -- "$CASE" "$ITERS" || echo "base has no hotpath profiling; skipping"
+
+      - name: Save PR metadata
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "$PR_NUMBER" > /tmp/metrics/pr_number.txt
+          echo "$CASE" > /tmp/metrics/case.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hotpath-metrics
+          path: /tmp/metrics/
+          retention-days: 1

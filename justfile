@@ -25,6 +25,12 @@ bench filter='':
 # Run only the large-polyline benchmarks (many / a few / a single tile)
 bench-big: (bench 'big')
 
+# Profile a `profile` example case under the `hotpath` profiler (per-function timing + allocations),
+# e.g. `just hotpath big-all-multi 5000`. Set HOTPATH_OUTPUT_FORMAT=json + HOTPATH_OUTPUT_PATH for a
+# machine-readable report (this is what the Hotpath Profile CI does).
+hotpath name='big-all-multi' *args:
+    cargo run --release --example profile --features 'hotpath,hotpath-alloc' -- {{name}} {{args}}
+
 # Flamegraph one profiling case (see `examples/profile.rs`), e.g. `just flamegraph big-all-multi 5000`
 # Profile the `profile` example for one case with cargo-flamegraph, writing target/flamegraphs/<name>.svg
 flamegraph name *args:  (cargo-install 'cargo-flamegraph' 'flamegraph')
