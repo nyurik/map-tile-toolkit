@@ -9,8 +9,7 @@
 //! 2. For each tile that (1) produced, `slice_tile` re-clips that single tile.
 //!
 //! The result is snapshotted as a `FeatureCollection`: the original polyline first, then one
-//! feature per per-tile piece. `tests/fixtures/grid.geojson` overlays the 25-unit tile grid.
-//! Regenerate with `just bless`.
+//! feature per per-tile piece. Regenerate with `just bless`.
 //!
 //! Every fixture is snapshotted at two buffer sizes, each into its own directory:
 //! - `snapshots/` — buffer 0 (tile boxes flush with the grid);
@@ -27,7 +26,9 @@ use insta::assert_binary_snapshot;
 use map_tile_toolkit::TileId;
 
 mod support;
-use support::{feature, load_fixture};
+use support::{feature, load_fixture_geoms};
+
+use crate::support::EXTENT;
 
 /// Buffer sizes each fixture is snapshotted at, paired with the directory to write into. Buffer 0
 /// keeps the tile boxes flush with the grid; buffer 5 (a fifth of a tile) grows each box outward so
@@ -42,10 +43,8 @@ fn slicers() -> [(support::Cfg, &'static str); 2] {
 mod files {
     use test_each_file::test_each_path;
 
-    use super::slice_one_fixture;
-
     // Generate one test per input fixture.
-    test_each_path! { for ["geojson"] in "./tests/fixtures" => slice_one_fixture }
+    test_each_path! { for ["geojson"] in "./tests/fixtures" => super::slice_one_fixture }
 }
 
 /// Inclusive tile-coordinate bounds covering every vertex of `polylines`, padded by one tile so the
@@ -55,7 +54,7 @@ fn padded_tile_span(polylines: &[Vec<Coord<i32>>]) -> (TileId, TileId) {
     let mut hi = TileId::new(i32::MIN, i32::MIN);
     for line in polylines {
         for &c in line {
-            let (tx, ty) = (c.x.div_euclid(25), c.y.div_euclid(25));
+            let (tx, ty) = (c.x.div_euclid(EXTENT as i32), c.y.div_euclid(EXTENT as i32));
             lo = TileId::new(lo.x.min(tx), lo.y.min(ty));
             hi = TileId::new(hi.x.max(tx), hi.y.max(ty));
         }
@@ -79,16 +78,9 @@ fn duplicate_vertices(polylines: &[Vec<Coord<i32>>]) -> Vec<Vec<Coord<i32>>> {
 /// run, so the pieces are in the input's global coordinate space for rendering. Validation happens in
 /// local coords; only the snapshot files are written globally (so they still line up on the map grid).
 fn globalize(tile: TileId, runs: &[Vec<Coord<i32>>], extent: i32) -> Vec<Vec<Coord<i32>>> {
-    let (ox, oy) = (tile.x * extent, tile.y * extent);
+    let origin = tile.origin(extent.cast_unsigned()).expect("tile in range");
     runs.iter()
-        .map(|run| {
-            run.iter()
-                .map(|c| Coord {
-                    x: c.x + ox,
-                    y: c.y + oy,
-                })
-                .collect()
-        })
+        .map(|run| run.iter().map(|&c| c + origin).collect())
         .collect()
 }
 
@@ -113,12 +105,7 @@ fn build_features(
             "#ff7f0e"
         };
         for run in runs {
-            features.push(support::styled_line(
-                run,
-                &format!("tile {}/{}", tile.x, tile.y),
-                color,
-                3,
-            ));
+            features.push(support::line_per_tile(&tile, color, run));
         }
     }
     features
@@ -126,7 +113,7 @@ fn build_features(
 
 fn slice_one_fixture([path]: [&Path; 1]) {
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
-    let polylines = load_fixture(path);
+    let polylines = load_fixture_geoms(path);
     for (slicer, snapshot_dir) in &slicers() {
         slice_at_buffer(slicer, stem, &polylines, snapshot_dir);
     }
