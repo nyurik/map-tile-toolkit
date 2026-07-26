@@ -15,6 +15,8 @@ use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, Js
 use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
 use serde_json::json;
 
+pub const EXTENT: u32 = 25;
+
 /// A slicer config (extent + buffer) shared by the tests, benches, and example. The slicers now own
 /// accumulated state, so the shared value is the *config*, from which each caller spins up a fresh
 /// [`SlicerAll`] / [`SlicerOne`].
@@ -45,16 +47,38 @@ pub fn slicer(extent: u32, buffer: u16) -> Cfg {
     Cfg { extent, buffer }
 }
 
+/// Every permutation of `0..n` — used to prove tile-insertion order independence over a small tile
+/// set. Asserts `n <= 10`, so an unexpectedly large set can't explode into `n!` permutations.
+#[must_use]
+pub fn permutations(n: usize) -> Vec<Vec<usize>> {
+    assert!(n <= 10, "permutations of {n} tiles is too many");
+    fn go(a: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
+        if k == a.len() {
+            out.push(a.clone());
+            return;
+        }
+        for i in k..a.len() {
+            a.swap(k, i);
+            go(a, k + 1, out);
+            a.swap(k, i);
+        }
+    }
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut out = Vec::new();
+    go(&mut idx, 0, &mut out);
+    out
+}
+
 /// Tile extent for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
 #[must_use]
 pub fn grid() -> Cfg {
-    slicer(25, 0)
+    slicer(EXTENT, 0)
 }
 
 /// The grid config with a 5-unit buffer.
 #[must_use]
 pub fn grid_buffered() -> Cfg {
-    slicer(25, 5)
+    slicer(EXTENT, 5)
 }
 
 /// Slicing [`big_polyline`] with each of these yields a different number of output tiles, so the
@@ -66,7 +90,7 @@ pub fn grid_buffered() -> Cfg {
 #[must_use]
 pub fn big_configs() -> [(&'static str, Cfg); 3] {
     [
-        ("multi", slicer(25, 0)),
+        ("multi", slicer(EXTENT, 0)),
         ("few", slicer(300, 0)),
         ("single", slicer(1024, 0)),
     ]
@@ -133,37 +157,55 @@ fn flatten(tile: &map_tile_toolkit::TileView<'_, Coord<i32>>) -> Vec<Vec<Coord<i
         .collect()
 }
 
-/// Parse a fixture file into its (integer) polylines. Fixtures are `FeatureCollection`s holding one
-/// or more `LineString` features (whole-number coordinates); each feature is an independent
-/// polyline. `MultiLineString` is intentionally rejected — express several polylines as several
-/// features instead.
-pub fn load_fixture(path: &Path) -> Polylines {
+/// One parsed fixture feature: its `LineString` as integer coordinates plus its GeoJSON properties.
+pub struct TestFeature {
+    pub line: Vec<Coord<i32>>,
+    pub properties: JsonObject,
+}
+
+impl TestFeature {}
+
+/// Parse a fixture file into its features: each a `LineString` (whole-number coordinates, truncated
+/// to `i32`) and its properties. Fixtures are `FeatureCollection`s; `MultiLineString` is intentionally
+/// rejected — express several polylines as several features instead. This is the shared parse/convert
+/// core; [`load_fixture_geoms`] keeps only the geometry, other callers also read properties (e.g. a tile id).
+pub fn load_fixture(path: &Path) -> Vec<TestFeature> {
     let text = fs::read_to_string(path).expect("readable fixture");
     let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
         panic!("fixture must be a FeatureCollection: {}", path.display());
     };
-    let polys: Polylines = fc
+    let features: Vec<TestFeature> = fc
         .features
         .into_iter()
-        .filter_map(|f| f.geometry)
-        .map(|g| {
-            let geom = Geometry::<f64>::try_from(g).expect("geometry converts");
-            match to_i32(&geom) {
+        .map(|f| {
+            let geom = Geometry::<f64>::try_from(f.geometry.expect("feature has geometry"))
+                .expect("geometry converts");
+            let line = match to_i32(&geom) {
                 Geometry::LineString(ls) => ls.0,
                 other => panic!(
                     "fixtures must use LineString features, not {other:?} ({}): express multiple \
                      polylines as multiple features",
                     path.display()
                 ),
+            };
+            TestFeature {
+                line,
+                properties: f.properties.unwrap_or_default(),
             }
         })
         .collect();
     assert!(
-        !polys.is_empty(),
-        "fixture has no polyline features: {}",
+        !features.is_empty(),
+        "fixture has no features: {}",
         path.display()
     );
-    polys
+    features
+}
+
+/// Parse a fixture file into its (integer) polylines — [`load_fixture`] with the properties dropped.
+/// Each `LineString` feature is an independent polyline.
+pub fn load_fixture_geoms(path: &Path) -> Polylines {
+    load_fixture(path).into_iter().map(|f| f.line).collect()
 }
 
 /// Every `tests/fixtures/*.geojson` as `(name, polylines)`, sorted by name for stable ordering.
@@ -181,7 +223,7 @@ pub fn load_all_fixtures() -> Vec<(String, Polylines)> {
                 .to_str()
                 .expect("utf8")
                 .to_owned();
-            (name, load_fixture(&p))
+            (name, load_fixture_geoms(&p))
         })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -291,7 +333,7 @@ pub fn line_feature(run: &[Coord<i32>], props: Vec<(&str, JsonValue)>) -> Featur
 
 /// A `LineString` feature for one run tagged with the simplestyle `role`, `stroke` color, and
 /// `stroke-width` — the shape every snapshot feature uses.
-pub fn styled_line(run: &[Coord<i32>], role: &str, stroke: &str, width: u32) -> Feature {
+fn styled_line(run: &[Coord<i32>], role: &str, stroke: &str, width: u32) -> Feature {
     line_feature(
         run,
         vec![
@@ -302,10 +344,12 @@ pub fn styled_line(run: &[Coord<i32>], role: &str, stroke: &str, width: u32) -> 
     )
 }
 
-/// The thin gray "input" underlay feature for one run, drawn beneath the colored output pieces so a
-/// snapshot shows the pieces lying exactly on the original geometry.
+pub fn feature_line(run: &[Coord<i32>], role: &str) -> Feature {
+    styled_line(run, role, "#261fb5", 2)
+}
+
 pub fn input_feature(run: &[Coord<i32>]) -> Feature {
-    styled_line(run, "input", "#888888", 1)
+    styled_line(run, "input", "#f6fd31", 15)
 }
 
 /// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot

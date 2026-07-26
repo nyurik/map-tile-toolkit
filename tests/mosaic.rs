@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use geo_types::Coord;
 use map_tile_toolkit::{Mosaic, TileError, TileId};
 
-use crate::support::Cfg;
+use crate::support::{Cfg, feature_line, permutations};
 
 mod support;
 
@@ -39,7 +39,7 @@ fn all_fixture_polylines() -> Vec<Vec<Coord<i32>>> {
     assert!(!paths.is_empty(), "no fixtures found");
     paths
         .iter()
-        .flat_map(|p| support::load_fixture(p))
+        .flat_map(|p| support::load_fixture_geoms(p))
         .collect()
 }
 
@@ -59,27 +59,6 @@ fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
         }
     }
     set
-}
-
-/// Every permutation of `0..n`.
-fn permutations(n: usize) -> Vec<Vec<usize>> {
-    assert!(n <= 10, "permutations of more than {n} tiles is too many");
-
-    fn go(a: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
-        if k == a.len() {
-            out.push(a.clone());
-            return;
-        }
-        for i in k..a.len() {
-            a.swap(k, i);
-            go(a, k + 1, out);
-            a.swap(k, i);
-        }
-    }
-    let mut idx: Vec<usize> = (0..n).collect();
-    let mut out = Vec::new();
-    go(&mut idx, 0, &mut out);
-    out
 }
 
 #[test]
@@ -165,13 +144,13 @@ fn reassembly_geojson(input: &[Vec<Coord<i32>>], features: &[Vec<Coord<i32>>]) -
     let mut sorted = features.to_vec();
     sorted.sort_by_key(|run| run.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>());
     for (i, run) in sorted.iter().enumerate() {
-        let color = if i % 2 == 0 { "#1f77b4" } else { "#ff7f0e" };
-        fc.push(support::styled_line(run, &format!("feature {i}"), color, 3));
+        fc.push(feature_line(run, &format!("feature {i}")));
     }
     support::feature_collection_bytes(fc)
 }
 
-// --- Behaviors the Coord fixtures structurally can't reach (payload conflicts live in mvalue.rs). ---
+// --- Behaviors this valid-data file doesn't cover: payload conflicts live in mvalue.rs, membership
+// conflicts (inconsistent tiles) in mosaic_bad.rs. ---
 
 #[test]
 fn invalid_extent_is_rejected() {

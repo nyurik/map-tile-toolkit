@@ -42,8 +42,8 @@
       },
       "properties": {
         "role": "input",
-        "stroke": "#888888",
-        "stroke-width": 1
+        "stroke": "#f6fd31",
+        "stroke-width": 15
       }
     },
     {
@@ -83,8 +83,8 @@
       },
       "properties": {
         "role": "input",
-        "stroke": "#888888",
-        "stroke-width": 1
+        "stroke": "#f6fd31",
+        "stroke-width": 15
       }
     },
     {
@@ -112,8 +112,8 @@
       },
       "properties": {
         "role": "tile 0/0",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     },
     {
@@ -141,8 +141,8 @@
       },
       "properties": {
         "role": "tile 0/0",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     },
     {
@@ -178,8 +178,8 @@
       },
       "properties": {
         "role": "tile 1/0",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     },
     {
@@ -211,8 +211,8 @@
       },
       "properties": {
         "role": "tile 1/0",
-        "stroke": "#ff7f0e",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     },
     {
@@ -236,8 +236,8 @@
       },
       "properties": {
         "role": "tile 1/1",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     },
     {
@@ -261,8 +261,8 @@
       },
       "properties": {
         "role": "tile 1/1",
-        "stroke": "#1f77b4",
-        "stroke-width": 3
+        "stroke": "#261fb5",
+        "stroke-width": 2
       }
     }
   ]
