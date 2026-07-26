@@ -142,33 +142,24 @@ fmt:
 fmt-toml *args:  (cargo-install 'cargo-sort')
     cargo sort --workspace --grouped {{args}}
 
-# Reformat all test GeoJSON fixtures with the json-stringify-pretty-compact npm package
+# Reformat the input GeoJSON fixtures (tests/fixtures + tests/bad-fixtures) with the
+# json-stringify-pretty-compact npm package. Snapshot .geojson files are left untouched.
 fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
     #!/usr/bin/env bash
     set -euo pipefail
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    echo 'Installing json-stringify-pretty-compact...'
     npm install --silent --no-fund --no-audit --prefix "$tmp" json-stringify-pretty-compact
     cat > "$tmp/fmt.mjs" <<'EOF'
     import stringify from 'json-stringify-pretty-compact';
-    import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-    import { join } from 'node:path';
-    let count = 0;
-    (function walk(dir) {
-      for (const name of readdirSync(dir)) {
-        const p = join(dir, name);
-        if (statSync(p).isDirectory()) walk(p);
-        else if (p.endsWith('.geojson')) {
-          writeFileSync(p, stringify(JSON.parse(readFileSync(p, 'utf8'))) + '\n');
-          count++;
-        }
-      }
-    })(process.argv[2]);
-    console.log(`Formatted ${count} GeoJSON files`);
+    import { readFileSync, writeFileSync } from 'node:fs';
+    for (const p of process.argv.slice(2))
+      writeFileSync(p, stringify(JSON.parse(readFileSync(p, 'utf8'))) + '\n');
+    console.log(`Formatted ${process.argv.length - 2} GeoJSON files`);
     EOF
-    # Run from the temp dir so the bare import resolves against the throwaway install.
-    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}/tests/fixtures")
+    # The shell expands the file list (absolute paths); run node from the temp dir so the bare import
+    # resolves against the throwaway install.
+    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}"/tests/{fixtures,bad-fixtures}/*.geojson)
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')

@@ -3,11 +3,22 @@
 //!
 //! Feed [`Mosaic::add`] each tile's runs in its local frame; the mosaic rebases them into the global
 //! frame (`local + tile·extent`) and links geometry across borders by shared **directed edges**.
-//! Slicing duplicates a border-crossing segment identically (position **and** payload) in both tiles,
-//! so a shared edge whose vertices *disagree* means the two tiles came from inconsistent data:
-//! [`add`](Mosaic::add) rejects the tile, naming the ones it conflicts with, and leaves the mosaic
-//! unchanged. A single position may be shared by several features (edges only collide when their whole
-//! segment does), so unrelated features meeting at a point never conflict.
+//! [`add`](Mosaic::add) rejects a tile that is inconsistent with those already present — naming the
+//! ones it conflicts with, and leaving the mosaic unchanged — in two ways:
+//!
+//! - **Payload:** slicing duplicates a border-crossing segment identically (position **and** payload)
+//!   in every tile that carries it, so a shared edge whose vertices *disagree* is a conflict. (A single
+//!   position may be shared by several features — edges only collide when their whole segment does — so
+//!   unrelated features meeting at a point never conflict.)
+//! - **Membership:** every tile is complete in its own *core* (the cell it owns), so an edge with an
+//!   endpoint in a present tile's core must be carried by that tile. A present tile that owns an
+//!   endpoint but lacks the edge — a line spanning into a neighbor the neighbor never corroborates,
+//!   or two tiles disagreeing at a shared junction — is a conflict. A buffer only widens the overlap
+//!   two tiles share, and the whole overlap must match; any *disagreement* there surfaces here too,
+//!   because the differing vertex lands in some tile's core. Only a pure *omission* of redundant
+//!   overlap geometry goes unflagged — and that is harmless, since the core tile still supplies the
+//!   edge and duplicates collapse on reassembly. So the mosaic needs only the `extent`, never the
+//!   buffer.
 //!
 //! [`iter_features`](Mosaic::iter_features) re-chains the distinct edges into maximal polylines
 //! (`stitch`) — the same reconstruction a from-scratch merge of all tiles would produce.
@@ -17,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::tile::TileId;
+use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
 /// A global directed edge's two vertices (identical across every tile that carries it) and the set of
@@ -34,9 +45,10 @@ type EdgeKey = (Coord<i32>, Coord<i32>);
 
 /// Reassembles tiled features back into whole features as tiles are [added](Self::add).
 ///
-/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]). With plain `Coord` vertices only
-/// [`TileError::Overflow`] can arise (positions always agree); a payload-carrying vertex (e.g.
-/// [`Measured`](crate::Measured)) is what makes [`TileError::Conflict`] meaningful.
+/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]). Needs only the `extent` the
+/// tiles were sliced at — never the buffer (see the module docs). A payload-carrying vertex (e.g.
+/// [`Measured`](crate::Measured)) additionally makes payload [`Conflict`](TileError::Conflict)s
+/// meaningful.
 #[derive(Debug, Clone)]
 pub struct Mosaic<V: Vertex = Coord<i32>> {
     extent: u32,
@@ -99,11 +111,41 @@ impl<V: Vertex> Mosaic<V> {
         }
         // Conflict scan against *other* tiles (this tile's own prior data is replaced, not compared).
         let mut conflicts = BTreeSet::new();
+        // (a) Payload conflict: another tile carries the same edge (identical positions) but different
+        // vertices — only a payload (e.g. an M value) can differ, since the key is the positions.
         for (key, (a, b)) in &new_edges {
             if let Some(existing) = self.edges.get(key)
                 && !(existing.a == *a && existing.b == *b)
             {
                 conflicts.extend(existing.tiles.iter().copied().filter(|&t| t != tile));
+            }
+        }
+        // (b) Membership conflict: a tile is complete in its own core, so every edge with an endpoint
+        // in a present tile's core must be carried by that tile. A present endpoint-tile that lacks the
+        // edge means the tiles came from inconsistent data. Checked both ways so detection is
+        // order-independent. (Any *disagreement* in a buffer overlap surfaces here too — the differing
+        // vertex lands in some core — so only a harmless omission of a redundant overlap edge slips.)
+        let ext = self.extent.cast_signed();
+        // This tile must carry every already-present edge that names it as an endpoint-tile.
+        for (key, existing) in &self.edges {
+            if (tile_of(key.0, ext) == tile || tile_of(key.1, ext) == tile)
+                && !new_edges.contains_key(key)
+            {
+                conflicts.extend(existing.tiles.iter().copied().filter(|&t| t != tile));
+            }
+        }
+        // Every already-present endpoint-tile of one of this tile's edges must carry that edge.
+        for key in new_edges.keys() {
+            for endpoint in [tile_of(key.0, ext), tile_of(key.1, ext)] {
+                if endpoint != tile
+                    && self.tile_edges.contains_key(&endpoint)
+                    && !self
+                        .edges
+                        .get(key)
+                        .is_some_and(|e| e.tiles.contains(&endpoint))
+                {
+                    conflicts.insert(endpoint);
+                }
             }
         }
         if !conflicts.is_empty() {
