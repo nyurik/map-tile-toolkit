@@ -144,7 +144,7 @@ fn reassembly_geojson(input: &[Vec<Coord<i32>>], features: &[Vec<Coord<i32>>]) -
     let mut sorted = features.to_vec();
     sorted.sort_by_key(|run| run.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>());
     for (i, run) in sorted.iter().enumerate() {
-        fc.push(feature_line(&format!("feature {i}"), run));
+        fc.push(feature_line(run, &format!("feature {i}")));
     }
     support::feature_collection_bytes(fc)
 }

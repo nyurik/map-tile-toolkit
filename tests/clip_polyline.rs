@@ -28,7 +28,7 @@ use map_tile_toolkit::TileId;
 mod support;
 use support::{feature, load_fixture_geoms};
 
-use crate::support::EXTENT;
+use crate::support::{EXTENT, feature_line};
 
 /// Buffer sizes each fixture is snapshotted at, paired with the directory to write into. Buffer 0
 /// keeps the tile boxes flush with the grid; buffer 5 (a fifth of a tile) grows each box outward so
@@ -99,13 +99,8 @@ fn build_features(
     let mut tiles = tiles.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
     tiles.sort_unstable_by_key(|(k, _)| (k.y, k.x));
     for (tile, runs) in tiles {
-        let color = if (tile.x + tile.y).rem_euclid(2) == 0 {
-            "#1f77b4"
-        } else {
-            "#ff7f0e"
-        };
         for run in runs {
-            features.push(support::line_per_tile(&tile, color, run));
+            features.push(feature_line(run, &format!("tile {}/{}", tile.x, tile.y)));
         }
     }
     features

@@ -344,16 +344,12 @@ fn styled_line(run: &[Coord<i32>], role: &str, stroke: &str, width: u32) -> Feat
     )
 }
 
-pub fn line_per_tile(tile: &TileId, color: &str, run: &[Coord<i32>]) -> Feature {
-    styled_line(run, &format!("tile {}/{}", tile.x, tile.y), color, 2)
-}
-
-pub fn feature_line(role: &str, run: &[Coord<i32>]) -> Feature {
-    styled_line(run, role, "#1f77b4", 2)
+pub fn feature_line(run: &[Coord<i32>], role: &str) -> Feature {
+    styled_line(run, role, "#261fb5", 2)
 }
 
 pub fn input_feature(run: &[Coord<i32>]) -> Feature {
-    styled_line(run, "input", "#888888", 5)
+    styled_line(run, "input", "#f6fd31", 15)
 }
 
 /// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot
