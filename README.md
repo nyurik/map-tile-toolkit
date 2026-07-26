@@ -84,27 +84,29 @@ for feature in mosaic.iter_features() {
 # Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
-### Payloads and `geo-types`
+### Payloads
 
-The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` carries any
+The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` pairs a position with any
 `Copy + PartialEq` payload (an M value, an id) that rides through slicing and merging **unchanged** —
 nothing is interpolated, since no new vertices are cut.
 
 ```rust
-# #[cfg(feature = "geo")] {
-use geo_types::Coord;
-use map_tile_toolkit::SlicerAll;
+use map_tile_toolkit::{Measured, SlicerAll};
 
+// Each vertex carries a payload (here an id); it survives slicing untouched.
 let mut slicer = SlicerAll::new(25, 0)?;
-slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 20, y: 20 }, Coord { x: 60, y: 40 }])?;
+slicer.add_feature([
+    Measured::new(5, 5, 100),
+    Measured::new(20, 20, 200),
+    Measured::new(60, 40, 300),
+])?;
 for tile in slicer.iter_tiles() {
     for feature in tile.iter_features() {
-        for line in feature.iter_line_strings() {
-            let _ = (tile.tile_id(), line); // one LineString per run, in the tile's local frame
+        for run in feature.iter_polylines() {
+            let _ = run.iter().map(|v| (v.position, v.m)).collect::<Vec<_>>();
         }
     }
 }
-# }
 # Ok::<(), map_tile_toolkit::TileError>(())
 ```
 

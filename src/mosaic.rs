@@ -79,6 +79,7 @@ impl<V: Vertex> Mosaic<V> {
     /// - [`TileError::Conflict`] if the tile disagrees with already-added tiles on a shared border
     ///   segment. The mosaic is unchanged.
     /// - [`TileError::Overflow`] if a vertex overflows `i32` when rebased into the global frame.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add<L: AsRef<[V]>>(&mut self, tile: TileId, runs: &[L]) -> Result<(), TileError> {
         // `tile · extent` fits `i64`: both factors are within `i32`, so the product is below `2^62`.
         let e = i64::from(self.extent);

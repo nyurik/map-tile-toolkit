@@ -17,8 +17,14 @@ name = "simplify_slice"
 name = "slicing"
 harness = false
 
+[features]
+default = []
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+
 [dependencies]
 geo-types = "0.7.19"
+hotpath = { version = "0.21", optional = true }
 thiserror = "2"
 
 [dev-dependencies]
