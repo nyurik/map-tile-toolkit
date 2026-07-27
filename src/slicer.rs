@@ -1,12 +1,18 @@
 //! The public slicing API: [`SlicerAll`] (every tile a polyline touches) and [`SlicerOne`] (one fixed
 //! tile), both over the stateless [`Grid`] engine.
 //!
-//! Each polyline added with [`add_feature`](SlicerAll::add_feature) is an independent **feature**,
-//! sliced and recorded per tile; one polyline can yield several runs in a tile (it left and
-//! re-entered), which stay grouped as that tile's feature. Read back with borrowed iterators:
-//! [`SlicerAll::iter_tiles`] → [`TileView::iter_features`] → [`FeatureView::iter_polylines`], or
-//! [`SlicerOne::iter_features`] directly. Runs are in each tile's local frame (origin at the tile's
-//! `[0, 0]` corner, so in-tile vertices land in `0..extent`); [`merge`](crate::merge) is the inverse.
+//! Each polyline added with [`add_feature`](SlicerAll::add_feature) (or
+//! [`add_feature_with`](SlicerAll::add_feature_with), to attach a **per-feature** attribute) is an
+//! independent **feature**, sliced and recorded per tile; one polyline can yield several runs in a
+//! tile (it left and re-entered), which stay grouped as that tile's feature. Read back with borrowed
+//! iterators: [`SlicerAll::iter_tiles`] → [`TileView::iter_features`] → [`FeatureView::iter_polylines`]
+//! (and [`FeatureView::attr`] for the attribute), or [`SlicerOne::iter_features`] directly. Runs are
+//! in each tile's local frame (origin at the tile's `[0, 0]` corner, so in-tile vertices land in
+//! `0..extent`); [`merge`](crate::merge) is the inverse.
+//!
+//! Attributes are a second, optional generic axis (`A`, default `()`): orthogonal to the per-vertex
+//! [`Vertex`] payload, stored once per feature-piece, and — because `A = ()` is zero-sized — free
+//! unless used. A feature split across tiles carries a clone of its attribute into each.
 //!
 //! Storage: each tile is a flattened [`TileBuf`] — one `verts` arena with `u32` run/feature boundary
 //! offsets, not nested `Vec`s. [`SlicerAll`] holds `Vec<TileBuf>` (stable slots) plus a `BTreeMap`
@@ -22,31 +28,35 @@ use crate::grid::{Grid, RouteSink};
 use crate::tile::TileId;
 use crate::vertex::Vertex;
 
-/// One tile's accumulated geometry, flattened: all runs' vertices concatenated into `verts`, with run
-/// and feature boundaries as `u32` offsets instead of nested `Vec`s.
-///
-/// - run `r` is `verts[run_ends[r-1] .. run_ends[r]]` (with `run_ends[-1] ≡ 0`);
-/// - feature `f` is the runs `run_ends[feat_ends[f-1] .. feat_ends[f]]`.
-///
-/// Only non-empty features are recorded, so every `feat_ends` span holds ≥1 run. `open_step` is the
-/// [`SlicerAll`] step at which this tile was last written, compared against the current step (run
-/// continuity) and the feature's start (new feature vs. re-entry). Unused by [`SlicerOne`].
+/// One tile's accumulated geometry, flattened into a single vertex arena with `u32` boundary offsets
+/// instead of nested `Vec`s. Only non-empty features are recorded.
+/// V is the vertex type that must implement [Vertex] trait, defaults to `Coord<i32>`
+/// A is the attribute type that must be clonable, defaults to `()`
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TileBuf<V> {
+struct TileBuf<V, A> {
+    /// The tile this buffer holds.
     tile: TileId,
+    /// Every run's vertices concatenated, in the tile's local frame.
     verts: Vec<V>,
+    /// End offset into `verts` per run: run `r` is `verts[run_ends[r-1]..run_ends[r]]` (`run_ends[-1] ≡ 0`).
     run_ends: Vec<u32>,
+    /// End offset into `run_ends` per feature: feature `f` owns runs `run_ends[feat_ends[f-1]..feat_ends[f]]`, ≥1 each.
     feat_ends: Vec<u32>,
+    /// Per-feature attribute, parallel to `feat_ends`. `A = ()` never allocates, so the channel is free unless used.
+    feat_attrs: Vec<A>,
+    /// [`SlicerAll`] step this tile was last written at — vs. the current step (run continuity) and the
+    /// feature start (new feature vs. re-entry). Unused by [`SlicerOne`].
     open_step: u64,
 }
 
-impl<V> TileBuf<V> {
+impl<V, A> TileBuf<V, A> {
     fn new(tile: TileId) -> Self {
         Self {
             tile,
             verts: Vec::new(),
             run_ends: Vec::new(),
             feat_ends: Vec::new(),
+            feat_attrs: Vec::new(),
             open_step: 0,
         }
     }
@@ -61,27 +71,30 @@ impl<V> TileBuf<V> {
         self.run_ends.push(self.verts.len() as u32);
     }
 
-    /// Record non-empty `runs` as one new feature in this tile (each added polyline is independent).
+    /// Record non-empty `runs` as one new feature carrying `attr` in this tile (each added polyline
+    /// is independent).
     #[expect(
         clippy::cast_possible_truncation,
         reason = "run count per tile stays far below u32::MAX"
     )]
-    fn absorb(&mut self, runs: Vec<Vec<V>>) {
+    fn absorb(&mut self, runs: Vec<Vec<V>>, attr: A) {
         debug_assert!(!runs.is_empty(), "empty features are never recorded");
         for run in runs {
             self.push_run(run);
         }
         self.feat_ends.push(self.run_ends.len() as u32);
+        self.feat_attrs.push(attr);
     }
 }
 
 /// Iterate a tile's features from its flat offset arrays, reconstructing each as a [`FeatureView`].
-fn features_of<V: Vertex>(
-    buf: &TileBuf<V>,
-) -> impl Iterator<Item = FeatureView<'_, V>> + use<'_, V> {
+fn features_of<V: Vertex, A>(
+    buf: &TileBuf<V, A>,
+) -> impl Iterator<Item = FeatureView<'_, V, A>> + use<'_, V, A> {
     let verts = buf.verts.as_slice();
     let run_ends = buf.run_ends.as_slice();
     let feat_ends = buf.feat_ends.as_slice();
+    let feat_attrs = buf.feat_attrs.as_slice();
     (0..feat_ends.len()).map(move |f| {
         let rs = if f == 0 { 0 } else { feat_ends[f - 1] as usize };
         let re = feat_ends[f] as usize;
@@ -91,16 +104,17 @@ fn features_of<V: Vertex>(
             verts,
             start,
             run_ends: &run_ends[rs..re],
+            attr: &feat_attrs[f],
         }
     })
 }
 
 /// A borrowed view of one tile's accumulated features, yielded by [`SlicerAll::iter_tiles`].
-pub struct TileView<'a, V: Vertex> {
-    buf: &'a TileBuf<V>,
+pub struct TileView<'a, V: Vertex, A = ()> {
+    buf: &'a TileBuf<V, A>,
 }
 
-impl<'a, V: Vertex> TileView<'a, V> {
+impl<'a, V: Vertex, A> TileView<'a, V, A> {
     /// The tile this view is for.
     #[must_use]
     pub fn tile_id(&self) -> TileId {
@@ -108,26 +122,37 @@ impl<'a, V: Vertex> TileView<'a, V> {
     }
 
     /// Iterate this tile's features, in the order they were first added.
-    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'a, V>> + use<'a, V> {
+    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'a, V, A>> + use<'a, V, A> {
         features_of(self.buf)
     }
 }
 
 /// A borrowed view of one feature's clipped polylines within a tile, yielded by
 /// [`TileView::iter_features`] / [`SlicerOne::iter_features`].
-pub struct FeatureView<'a, V: Vertex> {
+pub struct FeatureView<'a, V: Vertex, A = ()> {
     /// The whole tile's vertex arena; polylines are subslices of it.
     verts: &'a [V],
     /// Vertex offset where this feature's first run begins.
     start: u32,
     /// End offsets (into `verts`) of this feature's runs.
     run_ends: &'a [u32],
+    /// This feature's per-feature attribute (duplicated into every tile it touches). `&()` when the
+    /// attribute channel is unused.
+    attr: &'a A,
 }
 
-impl<'a, V: Vertex> FeatureView<'a, V> {
+impl<'a, V: Vertex, A> FeatureView<'a, V, A> {
+    /// This feature's per-feature attribute in this tile — the value passed to
+    /// [`add_feature_with`](SlicerAll::add_feature_with), duplicated onto every tile the feature
+    /// touches. With the default `A = ()` this is a reference to the unit value.
+    #[must_use]
+    pub fn attr(&self) -> &'a A {
+        self.attr
+    }
+
     /// Iterate this feature's polylines (runs) in this tile, each a vertex slice in the tile's local
     /// frame. A feature yields several polylines where the input left the tile and re-entered.
-    pub fn iter_polylines(&self) -> impl Iterator<Item = &'a [V]> + use<'a, V> {
+    pub fn iter_polylines(&self) -> impl Iterator<Item = &'a [V]> + use<'a, V, A> {
         let verts = self.verts;
         let mut prev = self.start as usize;
         self.run_ends.iter().map(move |&end| {
@@ -142,19 +167,30 @@ impl<'a, V: Vertex> FeatureView<'a, V> {
 /// Slices integer polylines into per-tile pieces on an integer grid, accumulating every tile each
 /// polyline touches.
 ///
-/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]), so plain coordinates or
-/// payload-carrying vertices (e.g. an M value via [`Measured`](crate::Measured)) both work; the
-/// payload rides through slicing unchanged. Add each polyline as an independent feature with
-/// [`add_feature`](Self::add_feature) and read them back with [`iter_tiles`](Self::iter_tiles).
+/// Generic over two independent axes:
+/// - the [`Vertex`] type `V` (defaults to [`Coord<i32>`]) — plain coordinates or payload-carrying
+///   vertices (e.g. a **per-vertex** M value via [`Measured`](crate::Measured)); the payload rides
+///   through slicing unchanged;
+/// - a **per-feature** attribute type `A` (defaults to `()`) — an id, a property map, anything you
+///   want re-associated with each sliced piece. With `A = ()` the attribute channel is a zero-sized
+///   type and costs nothing.
+///
+/// The two are orthogonal: `SlicerAll<Measured<M>, Attrs>` carries per-vertex M *and* per-feature
+/// attributes without either taxing the other. Add a polyline with no attribute via
+/// [`add_feature`](Self::add_feature) (only when `A = ()`), or with one via
+/// [`add_feature_with`](Self::add_feature_with); read them back with
+/// [`iter_tiles`](Self::iter_tiles), reaching each piece's attribute through
+/// [`FeatureView::attr`]. A feature split across tiles has its attribute duplicated onto every tile
+/// it touches (so `A` must be [`Clone`]).
 ///
 /// The slicer never panics: bad input (an oversized polyline, or coordinates that overflow the tile
 /// math) yields an [`TileError`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlicerAll<V: Vertex = Coord<i32>> {
+pub struct SlicerAll<V: Vertex = Coord<i32>, A = ()> {
     grid: Grid,
     /// Per-tile buffers in insertion order; slots are stable (never moved) so `index` can address
     /// them by position.
-    tiles: Vec<TileBuf<V>>,
+    tiles: Vec<TileBuf<V, A>>,
     /// [`TileId`] → slot in `tiles`, ordered so reads come out by tile and find-or-insert is cheap.
     index: BTreeMap<TileId, u32>,
     /// Monotonic segment counter for the direct-build run continuity (see [`RouteSink::emit`]). A gap
@@ -168,9 +204,13 @@ pub struct SlicerAll<V: Vertex = Coord<i32>> {
     /// case for a dense polyline — skip the `index` lookup entirely. Slots are stable, so this never
     /// goes stale; [`clear`](Self::clear) resets it.
     last_slot: Option<(TileId, u32)>,
+    /// The attribute of the feature currently being routed (set by
+    /// [`add_feature_with`](Self::add_feature_with)), cloned into each tile the feature reaches.
+    /// `None` between features.
+    pending_attr: Option<A>,
 }
 
-impl<V: Vertex> SlicerAll<V> {
+impl<V: Vertex, A> SlicerAll<V, A> {
     fn from_grid(grid: Grid) -> Self {
         Self {
             grid,
@@ -179,6 +219,7 @@ impl<V: Vertex> SlicerAll<V> {
             step: 0,
             feature_start: 0,
             last_slot: None,
+            pending_attr: None,
         }
     }
 
@@ -208,8 +249,12 @@ impl<V: Vertex> SlicerAll<V> {
         self.grid.buffer()
     }
 
-    /// Add `polyline` as an independent feature: slice it into every tile it touches, storing its runs
-    /// as a fresh feature in each. Chainable.
+    /// Add `polyline` as an independent feature carrying `attr`: slice it into every tile it touches,
+    /// storing its runs as a fresh feature in each and duplicating `attr` onto every tile it reaches.
+    /// Chainable. Reach the attribute back through [`FeatureView::attr`].
+    ///
+    /// When `A = ()`, prefer [`add_feature`](Self::add_feature), which passes the unit attribute for
+    /// you.
     ///
     /// **Atomic:** on error the pieces written so far are rolled back, so a failed polyline leaves the
     /// accumulator unchanged and usable — safe to skip the offending input and keep adding. (Errors
@@ -220,14 +265,24 @@ impl<V: Vertex> SlicerAll<V> {
     ///
     /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
+    pub fn add_feature_with<P: AsRef<[V]>>(
+        &mut self,
+        polyline: P,
+        attr: A,
+    ) -> Result<&mut Self, TileError>
+    where
+        A: Clone,
+    {
         let grid = self.grid; // `Grid` is `Copy`, so the walk can borrow `self` mutably as the sink.
         // Savepoint for rollback: how many tiles existed, and the last step used, before this feature.
         // Every piece this feature writes lands in a tile created after `tiles_before`, or bumps an
         // existing tile's `open_step` past `step_before` — so the two mark exactly what to undo.
         let tiles_before = self.tiles.len();
         let step_before = self.step;
-        if let Err(err) = grid.route(polyline.as_ref(), self) {
+        self.pending_attr = Some(attr);
+        let result = grid.route(polyline.as_ref(), self);
+        self.pending_attr = None;
+        if let Err(err) = result {
             self.rollback_feature(tiles_before, step_before);
             return Err(err);
         }
@@ -243,6 +298,7 @@ impl<V: Vertex> SlicerAll<V> {
         for buf in &mut self.tiles[..tiles_before] {
             if buf.open_step > step_before {
                 buf.feat_ends.pop();
+                buf.feat_attrs.pop();
                 let runs_keep = buf.feat_ends.last().copied().unwrap_or(0) as usize;
                 let verts_keep = if runs_keep == 0 {
                     0
@@ -288,7 +344,7 @@ impl<V: Vertex> SlicerAll<V> {
 
     /// Iterate the touched tiles, ordered by [`TileId`], borrowing so the accumulator can keep
     /// growing afterwards. Each [`TileView`] exposes that tile's features.
-    pub fn iter_tiles(&self) -> impl Iterator<Item = TileView<'_, V>> {
+    pub fn iter_tiles(&self) -> impl Iterator<Item = TileView<'_, V, A>> {
         let tiles = self.tiles.as_slice();
         self.index.values().map(move |&slot| TileView {
             buf: &tiles[slot as usize],
@@ -314,10 +370,23 @@ impl<V: Vertex> SlicerAll<V> {
         self.step = 0;
         self.feature_start = 0;
         self.last_slot = None;
+        self.pending_attr = None;
     }
 }
 
-impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
+impl<V: Vertex> SlicerAll<V, ()> {
+    /// Add `polyline` as an independent feature with no attribute — shorthand for
+    /// [`add_feature_with`](Self::add_feature_with)`(polyline, ())`. Available only when `A = ()`.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
+        self.add_feature_with(polyline, ())
+    }
+}
+
+impl<V: Vertex, A: Clone> RouteSink<V> for SlicerAll<V, A> {
     /// A polyline boundary: burn one step so the first segment of this polyline cannot continue a run
     /// left open by the previous polyline (its runs stay separate, even in a shared tile), and record
     /// that step as this feature's start so `emit` knows which tiles it has already reached.
@@ -379,6 +448,14 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
             // feature already has a run here (it left and re-entered) → extend that run span.
             if buf.open_step < feature_start {
                 buf.feat_ends.push(buf.run_ends.len() as u32);
+                // A new feature span in this tile: record the current feature's attribute (cloned,
+                // so a feature spanning several tiles carries it into each).
+                buf.feat_attrs.push(
+                    self.pending_attr
+                        .as_ref()
+                        .expect("a feature is being routed")
+                        .clone(),
+                );
             } else {
                 *buf.feat_ends
                     .last_mut()
@@ -393,19 +470,20 @@ impl<V: Vertex> RouteSink<V> for SlicerAll<V> {
 
 /// Slices integer polylines into pieces for **one fixed tile**, accumulating only that tile.
 ///
-/// The single-tile counterpart to [`SlicerAll`]: [`add_feature`](Self::add_feature) works exactly the
-/// same, but each polyline is clipped only to this slicer's [`tile`](Self::tile). Because there is a
-/// single tile, the read API skips the tile level — [`iter_features`](Self::iter_features) yields the
-/// features directly.
+/// The single-tile counterpart to [`SlicerAll`]: [`add_feature`](Self::add_feature) /
+/// [`add_feature_with`](Self::add_feature_with) work exactly the same, but each polyline is clipped
+/// only to this slicer's [`tile`](Self::tile). Because there is a single tile, the read API skips the
+/// tile level — [`iter_features`](Self::iter_features) yields the features directly.
 ///
-/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]).
+/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]) and the per-feature attribute
+/// type `A` (defaults to `()`); see [`SlicerAll`] for both axes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlicerOne<V: Vertex = Coord<i32>> {
+pub struct SlicerOne<V: Vertex = Coord<i32>, A = ()> {
     grid: Grid,
-    buf: TileBuf<V>,
+    buf: TileBuf<V, A>,
 }
 
-impl<V: Vertex> SlicerOne<V> {
+impl<V: Vertex, A> SlicerOne<V, A> {
     fn from_grid(grid: Grid, tile: TileId) -> Self {
         Self {
             grid,
@@ -442,8 +520,12 @@ impl<V: Vertex> SlicerOne<V> {
         self.buf.tile
     }
 
-    /// Add `polyline` as an independent feature, clipped to this slicer's [`tile`](Self::tile).
-    /// Chainable. A feature is recorded only if something of `polyline` lands in the tile.
+    /// Add `polyline` as an independent feature carrying `attr`, clipped to this slicer's
+    /// [`tile`](Self::tile). Chainable. The feature (and its attribute) is recorded only if something
+    /// of `polyline` lands in the tile; otherwise `attr` is dropped. Reach it back through
+    /// [`FeatureView::attr`].
+    ///
+    /// When `A = ()`, prefer [`add_feature`](Self::add_feature).
     ///
     /// Atomic: the polyline is fully sliced first, so on error the accumulator is left unchanged.
     ///
@@ -451,17 +533,21 @@ impl<V: Vertex> SlicerOne<V> {
     ///
     /// [`TileError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
+    pub fn add_feature_with<P: AsRef<[V]>>(
+        &mut self,
+        polyline: P,
+        attr: A,
+    ) -> Result<&mut Self, TileError> {
         let runs = self.grid.slice_one(polyline.as_ref(), self.buf.tile)?;
         if !runs.is_empty() {
-            self.buf.absorb(runs);
+            self.buf.absorb(runs, attr);
         }
         Ok(self)
     }
 
     /// Iterate this tile's features, in the order they were first added. Each [`FeatureView`] exposes
-    /// that feature's clipped polylines.
-    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'_, V>> {
+    /// that feature's clipped polylines and its [`attr`](FeatureView::attr).
+    pub fn iter_features(&self) -> impl Iterator<Item = FeatureView<'_, V, A>> {
         features_of(&self.buf)
     }
 
@@ -480,5 +566,17 @@ impl<V: Vertex> SlicerOne<V> {
     /// Discard everything accumulated so far, keeping the extent/buffer/tile config.
     pub fn clear(&mut self) {
         self.buf = TileBuf::new(self.buf.tile);
+    }
+}
+
+impl<V: Vertex> SlicerOne<V, ()> {
+    /// Add `polyline` as an independent feature with no attribute — shorthand for
+    /// [`add_feature_with`](Self::add_feature_with)`(polyline, ())`. Available only when `A = ()`.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::Overflow`] if the tile's box or a kept vertex overflows `i32`.
+    pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
+        self.add_feature_with(polyline, ())
     }
 }

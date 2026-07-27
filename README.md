@@ -61,10 +61,12 @@ the top-left corner to the origin, flip `y`, round to `i32` — landing data in 
 ### Merging tiles back
 
 `Mosaic` is the stateful inverse of `SlicerAll`: add tiles (each tile's runs, in its local frame) and
-it reassembles whole features across borders in the global frame. Continuity is by shared border
-edge, so an inconsistent tile — one whose shared segment disagrees (coordinates or payload) with an
-already-added tile — is rejected with the conflicting tile ids, leaving the mosaic unchanged. `purge`
-drops a tile; `iter_features` walks every reassembled feature.
+it reassembles whole features across borders in the global frame. It rejects a tile that is
+inconsistent with those already added — a shared segment that disagrees (coordinates or payload), or
+a tile that owns an endpoint's cell yet fails to carry its edge (e.g. a line spanning into a neighbor
+the neighbor never corroborates) — naming the conflicting tile ids and leaving the mosaic unchanged.
+It needs only the `extent`, not the buffer. `purge` drops a tile; `iter_features` walks every
+reassembled feature.
 
 ```rust
 use geo_types::Coord;
@@ -85,6 +87,11 @@ for feature in mosaic.iter_features() {
 ```
 
 ### Payloads
+
+The slicers carry data on two independent axes: a **per-vertex** payload (the `Vertex` type) and a
+**per-feature** attribute (the `A` type). Use either, both, or neither.
+
+#### Per-vertex payload
 
 The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` pairs a position with any
 `Copy + PartialEq` payload (an M value, an id) that rides through slicing and merging **unchanged** —
@@ -109,6 +116,41 @@ for tile in slicer.iter_tiles() {
 }
 # Ok::<(), map_tile_toolkit::TileError>(())
 ```
+
+#### Per-feature attributes (MVT-style)
+
+Data that belongs to a whole feature — an optional id, a key/value property map — is *not*
+per-vertex, so it rides on the slicer's second generic axis `A` (default `()`, a zero-sized type
+that costs nothing) rather than in the vertex payload. Attach it with `add_feature_with(line, attr)`
+and read it back per tile-piece with `feature.attr()` — no side table, no per-vertex handles. `A`
+only needs to be `Clone`.
+
+```rust
+use geo_types::Coord;
+use map_tile_toolkit::SlicerAll;
+
+#[derive(Clone)]
+struct Attrs { id: Option<u64>, name: &'static str }
+
+let mut slicer = SlicerAll::<Coord<i32>, Attrs>::new(25, 0)?;
+slicer.add_feature_with(
+    [Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }],
+    Attrs { id: Some(1), name: "Main St" },
+)?;
+for tile in slicer.iter_tiles() {
+    for feature in tile.iter_features() {
+        let attrs = feature.attr(); // &Attrs, duplicated onto every tile the feature touches
+        let _ = (attrs.id, attrs.name);
+    }
+}
+# Ok::<(), map_tile_toolkit::TileError>(())
+```
+
+A feature that is split comes out two ways — within one tile its runs stay grouped as a single
+feature (render a `MultiLineString`); across tiles its attributes are duplicated onto each tile's
+piece. The two axes are orthogonal, so `SlicerAll<Measured<M>, Attrs>` carries per-vertex M *and*
+per-feature attributes at once. See [`examples/mvt_features.rs`](examples/mvt_features.rs) for the
+full round-trip emitting per-tile `GeoJSON` with ids and properties preserved.
 
 ## Development
 

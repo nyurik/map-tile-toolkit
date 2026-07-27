@@ -402,6 +402,170 @@
         "type": "LineString",
         "coordinates": [
           [
+            10.0,
+            10.0
+          ],
+          [
+            22.0,
+            14.0
+          ],
+          [
+            28.0,
+            14.0
+          ],
+          [
+            40.0,
+            10.0
+          ],
+          [
+            37.0,
+            21.0
+          ],
+          [
+            37.0,
+            27.0
+          ],
+          [
+            40.0,
+            40.0
+          ],
+          [
+            28.0,
+            36.0
+          ],
+          [
+            22.0,
+            36.0
+          ],
+          [
+            10.0,
+            40.0
+          ],
+          [
+            15.0,
+            27.0
+          ],
+          [
+            15.0,
+            21.0
+          ],
+          [
+            10.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "stroke": "#f6fd31",
+        "stroke-width": 15
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            25.0,
+            5.0
+          ],
+          [
+            37.0,
+            42.0
+          ],
+          [
+            6.0,
+            19.0
+          ],
+          [
+            44.0,
+            19.0
+          ],
+          [
+            13.0,
+            42.0
+          ],
+          [
+            25.0,
+            5.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "stroke": "#f6fd31",
+        "stroke-width": 15
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            10.0,
+            10.0
+          ],
+          [
+            40.0,
+            10.0
+          ],
+          [
+            40.0,
+            40.0
+          ],
+          [
+            10.0,
+            40.0
+          ],
+          [
+            10.0,
+            10.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "stroke": "#f6fd31",
+        "stroke-width": 15
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            10.0,
+            5.0
+          ],
+          [
+            40.0,
+            12.0
+          ],
+          [
+            22.0,
+            20.0
+          ],
+          [
+            10.0,
+            5.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "stroke": "#f6fd31",
+        "stroke-width": 15
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
             14.0,
             12.0
           ],
@@ -1063,8 +1227,60 @@
             40.0
           ],
           [
-            45.0,
-            44.0
+            10.0,
+            10.0
+          ],
+          [
+            22.0,
+            14.0
+          ],
+          [
+            28.0,
+            14.0
+          ],
+          [
+            40.0,
+            10.0
+          ],
+          [
+            37.0,
+            21.0
+          ],
+          [
+            37.0,
+            27.0
+          ],
+          [
+            40.0,
+            40.0
+          ],
+          [
+            10.0,
+            40.0
+          ],
+          [
+            15.0,
+            27.0
+          ],
+          [
+            15.0,
+            21.0
+          ],
+          [
+            10.0,
+            10.0
+          ],
+          [
+            40.0,
+            5.0
+          ],
+          [
+            65.0,
+            20.0
+          ],
+          [
+            15.0,
+            20.0
           ]
         ]
       },
@@ -1125,6 +1341,43 @@
         "type": "LineString",
         "coordinates": [
           [
+            6.0,
+            19.0
+          ],
+          [
+            44.0,
+            19.0
+          ],
+          [
+            13.0,
+            42.0
+          ],
+          [
+            25.0,
+            5.0
+          ],
+          [
+            37.0,
+            42.0
+          ],
+          [
+            6.0,
+            19.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "feature 9",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
             8.0,
             40.0
           ],
@@ -1135,7 +1388,7 @@
         ]
       },
       "properties": {
-        "role": "feature 9",
+        "role": "feature 10",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1160,7 +1413,7 @@
         ]
       },
       "properties": {
-        "role": "feature 10",
+        "role": "feature 11",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1193,7 +1446,7 @@
         ]
       },
       "properties": {
-        "role": "feature 11",
+        "role": "feature 12",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1218,7 +1471,7 @@
         ]
       },
       "properties": {
-        "role": "feature 12",
+        "role": "feature 13",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1234,20 +1487,24 @@
           ],
           [
             40.0,
-            5.0
+            10.0
           ],
           [
-            65.0,
-            20.0
+            40.0,
+            15.0
           ],
           [
-            15.0,
-            20.0
+            23.0,
+            10.0
+          ],
+          [
+            20.0,
+            10.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 13",
+        "role": "feature 14",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1266,13 +1523,13 @@
             22.0
           ],
           [
-            12.0,
-            44.0
+            15.0,
+            8.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 14",
+        "role": "feature 15",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1297,7 +1554,7 @@
         ]
       },
       "properties": {
-        "role": "feature 15",
+        "role": "feature 16",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1314,11 +1571,23 @@
           [
             40.0,
             12.0
+          ],
+          [
+            22.0,
+            20.0
+          ],
+          [
+            10.0,
+            5.0
+          ],
+          [
+            40.0,
+            12.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 16",
+        "role": "feature 17",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1337,13 +1606,34 @@
             22.0
           ],
           [
-            15.0,
-            8.0
+            12.0,
+            44.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 17",
+        "role": "feature 18",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            10.0,
+            40.0
+          ],
+          [
+            45.0,
+            44.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "feature 19",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1364,7 +1654,28 @@
         ]
       },
       "properties": {
-        "role": "feature 18",
+        "role": "feature 20",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            22.0,
+            36.0
+          ],
+          [
+            10.0,
+            40.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "feature 21",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1379,13 +1690,17 @@
             10.0
           ],
           [
-            20.0,
-            10.0
+            40.0,
+            20.0
+          ],
+          [
+            45.0,
+            5.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 19",
+        "role": "feature 22",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1426,7 +1741,7 @@
         ]
       },
       "properties": {
-        "role": "feature 20",
+        "role": "feature 23",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1447,7 +1762,7 @@
         ]
       },
       "properties": {
-        "role": "feature 21",
+        "role": "feature 24",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1472,7 +1787,7 @@
         ]
       },
       "properties": {
-        "role": "feature 22",
+        "role": "feature 25",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1493,7 +1808,7 @@
         ]
       },
       "properties": {
-        "role": "feature 23",
+        "role": "feature 26",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1514,7 +1829,7 @@
         ]
       },
       "properties": {
-        "role": "feature 24",
+        "role": "feature 27",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1539,7 +1854,7 @@
         ]
       },
       "properties": {
-        "role": "feature 25",
+        "role": "feature 28",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1560,7 +1875,7 @@
         ]
       },
       "properties": {
-        "role": "feature 26",
+        "role": "feature 29",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1585,7 +1900,7 @@
         ]
       },
       "properties": {
-        "role": "feature 27",
+        "role": "feature 30",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1606,7 +1921,28 @@
         ]
       },
       "properties": {
-        "role": "feature 28",
+        "role": "feature 31",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            28.0,
+            36.0
+          ],
+          [
+            22.0,
+            36.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "feature 32",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1622,24 +1958,16 @@
           ],
           [
             40.0,
-            15.0
+            40.0
           ],
           [
-            23.0,
-            10.0
-          ],
-          [
-            40.0,
-            20.0
-          ],
-          [
-            45.0,
-            5.0
+            28.0,
+            36.0
           ]
         ]
       },
       "properties": {
-        "role": "feature 29",
+        "role": "feature 33",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -1660,7 +1988,7 @@
         ]
       },
       "properties": {
-        "role": "feature 30",
+        "role": "feature 34",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
