@@ -8,8 +8,8 @@
 [![CI build status](https://github.com/nyurik/map-tile-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/nyurik/map-tile-toolkit/actions)
 [![Codecov](https://img.shields.io/codecov/c/github/nyurik/map-tile-toolkit)](https://app.codecov.io/gh/nyurik/map-tile-toolkit)
 
-Clip integer **polylines** (`LineString`s) into per-tile pieces on an integer tile
-grid, keeping the geometry's **original vertices**. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. No new vertexes are ever created. The tile may optionally include a buffer of `[0..extent/2]` size.
+Clip integer **polylines** into per-tile pieces on an integer tile
+grid, keeping the geometry's original vertices. No new vertexes are ever created. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. The tile may optionally include a buffer of `[0..extent/2)` size, which increases the number of vertices shared between neighboring tiles.
 
 ## Usage
 

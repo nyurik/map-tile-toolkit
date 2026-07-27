@@ -165,6 +165,12 @@ fn invalid_extent_is_rejected() {
 }
 
 #[test]
+fn empty_mosaic_yields_no_features() {
+    let mosaic = Mosaic::<Coord<i32>>::new(25).expect("valid config");
+    assert_eq!(mosaic.iter_features().count(), 0);
+}
+
+#[test]
 fn far_tile_overflows_instead_of_panicking() {
     let mut mosaic = Mosaic::new(4096).expect("valid config");
     let run = vec![Coord { x: 0, y: 0 }, Coord { x: 1, y: 0 }];

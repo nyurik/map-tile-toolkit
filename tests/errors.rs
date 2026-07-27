@@ -172,6 +172,29 @@ fn add_feature_is_atomic_on_error() {
 }
 
 #[test]
+fn rollback_leaves_untouched_tiles_alone() {
+    // A clean feature near the origin, then a failing one near i32::MIN — their tiles are disjoint.
+    // The failing feature never touches the clean tile, so its rollback must scan past that tile on
+    // the "not touched by this feature" branch (leaving it intact) while still dropping the far tiles
+    // it did create before erroring. The atomicity test above only exercises the *touched* branch.
+    let mut s = all(4096, 8).expect("valid config");
+    s.add_feature(line(vec![(0, 0), (100, 0)]))
+        .expect("clean feature near the origin");
+    let before = snapshot(&s);
+
+    assert_eq!(
+        s.add_feature(errors_after_emitting()).err(),
+        Some(TileError::Overflow),
+        "the far feature errors mid-walk"
+    );
+    assert_eq!(
+        snapshot(&s),
+        before,
+        "rolling back a feature that touches none of the pre-existing tiles leaves them intact"
+    );
+}
+
+#[test]
 fn clear_resets_for_reuse() {
     let mut s = all(25, 0).expect("valid config");
     s.add_feature(line(vec![(5, 5), (60, 40)])).expect("slice");
