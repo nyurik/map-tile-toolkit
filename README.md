@@ -8,40 +8,48 @@
 [![CI build status](https://github.com/nyurik/map-tile-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/nyurik/map-tile-toolkit/actions)
 [![Codecov](https://img.shields.io/codecov/c/github/nyurik/map-tile-toolkit)](https://app.codecov.io/gh/nyurik/map-tile-toolkit)
 
-Clip integer **polylines** (`LineString`) into per-tile pieces on an integer tile
-grid, keeping the geometry's **original vertices** — every vertex inside a tile, plus the first one
-just outside wherever the line crosses an edge — instead of cutting new vertices at the boundary.
+Clip integer **polylines** (`LineString`s) into per-tile pieces on an integer tile
+grid, keeping the geometry's **original vertices**. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. No new vertexes are ever created. The tile may optionally include a buffer of `[0..extent/2]` size.
 
 ## Usage
 
-`SlicerAll` accumulates every tile a polyline touches, even if there are no vertices in that tile. `SlicerOne` accumulates one fixed tile. Add
-each polyline as an independent **feature**, then read the pieces back through borrowed iterators —
-never owned `Vec`s. Nothing panics: bad input returns a `TileError`.
+* Each feature may contain feature-level and vertex-level attributes (generic).
+* `SlicerAll` accumulates every tile a polyline touches, even if there are no vertices in that tile.
+* `SlicerOne` accumulates one fixed tile.
+* `Mosaic` assembles tiles back into features, joining features that match on both sides of the edge, and rejecting inconsistent tiles. Mosaic does not require all original tiles to be added.
+
+Add each **feature** (polyline), then read the pieces back through borrowed iterators — never owned `Vec`s. Nothing panics: bad input returns a `TileError`.
 
 ```rust
-use geo_types::Coord;
-use map_tile_toolkit::SlicerAll;
+use geo_types::coord;
+use map_tile_toolkit::{SlicerAll, TileError};
 
-let line = [
-    Coord { x: 5, y: 5 },
-    Coord { x: 20, y: 20 },
-    Coord { x: 60, y: 40 },
-];
+fn example() -> Result<(), TileError> {
+    let line = [
+        coord!{ x: 5, y: 5 },
+        coord!{ x: 20, y: 20 },
+        coord!{ x: 60, y: 40 },
+    ];
 
-// `extent = 25` → 25-unit tiles; `buffer = 0` = tight clip box (must be < extent / 2).
-let mut slicer = SlicerAll::new(25, 0)?;
-slicer.add_feature(&line)?;
+    // `extent = 25` → 25-unit tiles;
+    // `buffer = 0` = tight clip box (must be < extent / 2).
+    let mut slicer = SlicerAll::new(25, 0)?;
+    slicer.add_feature(&line)?;
 
-// tiles → features → polylines, each polyline in that tile's local frame. A feature can yield
-// several polylines in one tile (the line left and re-entered).
-for tile in slicer.iter_tiles() {
-    for feature in tile.iter_features() {
-        for polyline in feature.iter_polylines() {
-            let _ = (tile.tile_id(), polyline); // polyline: &[Coord<i32>]
+    // tiles → features → polylines, each polyline in that tile's
+    // local frame. A feature can yield several polylines
+    // in one tile (the line left and re-entered).
+    for tile in slicer.iter_tiles() {
+        for feature in tile.iter_features() {
+            for polyline in feature.iter_polylines() {
+                // polyline: &[Coord<i32>]
+                let _ = (tile.tile_id(), polyline);
+            }
         }
     }
+
+    Ok(())
 }
-# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 `SlicerOne::new(extent, buffer, tile)` clips to one tile and skips the tile level (`iter_features`
@@ -65,25 +73,30 @@ it reassembles whole features across borders in the global frame. It rejects a t
 inconsistent with those already added — a shared segment that disagrees (coordinates or payload), or
 a tile that owns an endpoint's cell yet fails to carry its edge (e.g. a line spanning into a neighbor
 the neighbor never corroborates) — naming the conflicting tile ids and leaving the mosaic unchanged.
-It needs only the `extent`, not the buffer. `purge` drops a tile; `iter_features` walks every
+ `purge` drops a tile; `iter_features` walks every
 reassembled feature.
 
 ```rust
-use geo_types::Coord;
-use map_tile_toolkit::{Mosaic, SlicerAll};
+use geo_types::coord;
+use map_tile_toolkit::{Mosaic, SlicerAll, TileError};
 
-let mut slicer = SlicerAll::new(25, 0)?;
-slicer.add_feature([Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }])?;
+fn example() -> Result<(), TileError> {
+    let mut slicer = SlicerAll::new(25, 0)?;
+    slicer.add_feature([
+        coord!{ x: 5, y: 5 },
+        coord!{ x: 60, y: 40 }
+    ])?;
 
-let mut mosaic = Mosaic::new(slicer.extent())?;
-for tile in slicer.iter_tiles() {
-    let runs: Vec<&[Coord<i32>]> = tile.iter_features().flat_map(|f| f.iter_polylines()).collect();
-    mosaic.add(tile.tile_id(), &runs).expect("consistent tiles never conflict");
+    let mut mosaic = Mosaic::new(slicer.extent())?;
+    for tile in slicer.iter_tiles() {
+        let runs: Vec<_> = tile.iter_features().flat_map(|f| f.iter_polylines()).collect();
+        mosaic.add(tile.tile_id(), &runs).expect("consistent tiles never conflict");
+    }
+    for feature in mosaic.iter_features() {
+        let _ = feature; // Vec<Coord<i32>> in global coordinates
+    }
+    Ok(())
 }
-for feature in mosaic.iter_features() {
-    let _ = feature; // Vec<Coord<i32>> in global coordinates
-}
-# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 ### Payloads
@@ -98,23 +111,25 @@ The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` pa
 nothing is interpolated, since no new vertices are cut.
 
 ```rust
-use map_tile_toolkit::{Measured, SlicerAll};
+use map_tile_toolkit::{Measured, SlicerAll, TileError};
 
-// Each vertex carries a payload (here an id); it survives slicing untouched.
-let mut slicer = SlicerAll::new(25, 0)?;
-slicer.add_feature([
-    Measured::new(5, 5, 100),
-    Measured::new(20, 20, 200),
-    Measured::new(60, 40, 300),
-])?;
-for tile in slicer.iter_tiles() {
-    for feature in tile.iter_features() {
-        for run in feature.iter_polylines() {
-            let _ = run.iter().map(|v| (v.position, v.m)).collect::<Vec<_>>();
+fn example() -> Result<(), TileError> {
+    // Each vertex carries a payload (here an id); it survives slicing untouched.
+    let mut slicer = SlicerAll::new(25, 0)?;
+    slicer.add_feature([
+        Measured::new(5, 5, 100),
+        Measured::new(20, 20, 200),
+        Measured::new(60, 40, 300),
+    ])?;
+    for tile in slicer.iter_tiles() {
+        for feature in tile.iter_features() {
+            for run in feature.iter_polylines() {
+                let _ = run.iter().map(|v| (v.position, v.m)).collect::<Vec<_>>();
+            }
         }
     }
+    Ok(())
 }
-# Ok::<(), map_tile_toolkit::TileError>(())
 ```
 
 #### Per-feature attributes (MVT-style)
@@ -126,24 +141,29 @@ and read it back per tile-piece with `feature.attr()` — no side table, no per-
 only needs to be `Clone`.
 
 ```rust
-use geo_types::Coord;
-use map_tile_toolkit::SlicerAll;
+use geo_types::{Coord, coord};
+use map_tile_toolkit::{SlicerAll, TileError};
 
 #[derive(Clone)]
-struct Attrs { id: Option<u64>, name: &'static str }
-
-let mut slicer = SlicerAll::<Coord<i32>, Attrs>::new(25, 0)?;
-slicer.add_feature_with(
-    [Coord { x: 5, y: 5 }, Coord { x: 60, y: 40 }],
-    Attrs { id: Some(1), name: "Main St" },
-)?;
-for tile in slicer.iter_tiles() {
-    for feature in tile.iter_features() {
-        let attrs = feature.attr(); // &Attrs, duplicated onto every tile the feature touches
-        let _ = (attrs.id, attrs.name);
-    }
+struct Attrs {
+    id: Option<u64>,
+    name: &'static str
 }
-# Ok::<(), map_tile_toolkit::TileError>(())
+
+fn example() -> Result<(), TileError> {
+    let mut slicer = SlicerAll::new(25, 0)?;
+    slicer.add_feature_with(
+        [coord! { x: 5, y: 5 }, coord! { x: 60, y: 40 }],
+        Attrs { id: Some(1), name: "Main St" },
+    )?;
+    for tile in slicer.iter_tiles() {
+        for feature in tile.iter_features() {
+            let attrs = feature.attr(); // &Attrs, duplicated onto every tile the feature touches
+            let _ = (attrs.id, attrs.name);
+        }
+    }
+    Ok(())
+}
 ```
 
 A feature that is split comes out two ways — within one tile its runs stay grouped as a single
