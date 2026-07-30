@@ -29,7 +29,7 @@ mod support;
 
 /// Every fixture's polylines, files sorted for a stable order.
 fn all_fixture_polylines() -> Vec<Vec<Coord<i32>>> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/polylines/fixtures");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("fixtures dir exists")
         .filter_map(|e| e.ok().map(|e| e.path()))

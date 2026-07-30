@@ -31,7 +31,7 @@ mod support;
 mod files {
     use test_each_file::test_each_path;
 
-    test_each_path! { for ["geojson"] in "./tests/bad-fixtures" => super::one_bad_fixture }
+    test_each_path! { for ["geojson"] in "./tests/polylines/bad-fixtures" => super::one_bad_fixture }
 }
 
 /// Parse `"tile x/y"` into a [`TileId`].

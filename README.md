@@ -175,11 +175,11 @@ full round-trip emitting per-tile `GeoJSON` with ids and properties preserved.
 ## Development
 
 This project uses [just](https://github.com/casey/just#readme) (`cargo install just`); run `just` for
-the command list and `just test` to test. Tests are data-driven: each `tests/fixtures/*.geojson`
+the command list and `just test` to test. Tests are data-driven: each `tests/polylines/fixtures/*.geojson`
 polyline is sliced by both paths (asserted byte-identical) and snapshotted as a `.geojson`
 `FeatureCollection` (original line plus every per-tile piece) that renders on a map. Run `just bless`
-to regenerate snapshots. To inspect them, load `tests/fixtures/grid.geojson` (the tile grid, offset
-0.5px to sit between integer coordinates) and the `tests/snapshots/*.geojson` files in QGIS or any
+to regenerate snapshots. To inspect them, load `tests/polylines/fixtures/grid.geojson` (the tile grid, offset
+0.5px to sit between integer coordinates) and the `tests/polylines/snapshots/*.geojson` files in QGIS or any
 `GeoJSON` viewer.
 
 ## License

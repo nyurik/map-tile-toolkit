@@ -6,9 +6,12 @@
 //! box and re-enters splits into separate pieces only where a vertex is *dropped*: a single-segment
 //! excursion out and back keeps both its (outside) endpoints, so it stays one connected piece.
 
+use core::cmp::Ordering;
+
 use geo_types::Coord;
 
 use crate::TileError;
+use crate::geom::orient;
 use crate::vertex::Vertex;
 
 /// Is coordinate `c` inside the closed rectangle `[min, max]`?
@@ -36,22 +39,16 @@ pub(crate) fn segment_intersects(
     if inside(a, min, max) || inside(b, min, max) {
         return true;
     }
-    // Both endpoints outside and the bounding boxes overlap: the segment meets the box iff its
-    // corners are not all strictly on one side of the segment's supporting line.
-    let (dx, dy) = (
-        i128::from(b.x) - i128::from(a.x),
-        i128::from(b.y) - i128::from(a.y),
-    );
-    let side = |x: i32, y: i32| {
-        dx * (i128::from(y) - i128::from(a.y)) - dy * (i128::from(x) - i128::from(a.x))
-    };
+    // Both endpoints outside and the bounding boxes overlap: the segment meets the box iff its four
+    // corners are not all strictly on one side of the segment's supporting line (each side is the
+    // orientation of `a → b → corner`).
     let s = [
-        side(min.x, min.y),
-        side(max.x, min.y),
-        side(min.x, max.y),
-        side(max.x, max.y),
+        orient(a, b, min),
+        orient(a, b, Coord { x: max.x, y: min.y }),
+        orient(a, b, Coord { x: min.x, y: max.y }),
+        orient(a, b, max),
     ];
-    !(s.iter().all(|&v| v > 0) || s.iter().all(|&v| v < 0))
+    !(s.iter().all(|&v| v == Ordering::Greater) || s.iter().all(|&v| v == Ordering::Less))
 }
 
 /// Re-express vertex `v` in the tile-local frame whose `[0, 0]` corner is `origin`: its position

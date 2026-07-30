@@ -2,7 +2,7 @@
 # See https://pre-commit.com/hooks.html for more hooks
 
 exclude: |
-  (?x)^(
+  (?x)^.*(
     \.snap\.geojson |
     \.snap
   )$
