@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::Path;
 
-use geo_types::{Coord, Geometry, LineString, MultiLineString};
+use geo_types::{Coord, Geometry, LineString, MultiLineString, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
 use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
 use serde_json::json;
@@ -350,6 +350,114 @@ pub fn feature_line(run: &[Coord<i32>], role: &str) -> Feature {
 
 pub fn input_feature(run: &[Coord<i32>]) -> Feature {
     styled_line(run, "input", "#f6fd31", 15)
+}
+
+// ---- Polygon fixtures & rendering (shared by the polygon snapshot tests) ----
+
+/// Parse a polygon fixture: a `FeatureCollection` of `Polygon` features (no holes yet). Returns each
+/// polygon's exterior ring as integer coordinates (whole-number lon/lat, truncated to `i32`).
+/// Interior rings are rejected for now — holes are added in a later phase.
+pub fn load_polygon_fixture(path: &Path) -> Vec<Vec<Coord<i32>>> {
+    let text = fs::read_to_string(path).expect("readable fixture");
+    let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
+        panic!("polygon fixture must be a FeatureCollection: {}", path.display());
+    };
+    let rings: Vec<Vec<Coord<i32>>> = fc
+        .features
+        .into_iter()
+        .map(|f| {
+            let geom = Geometry::<f64>::try_from(f.geometry.expect("feature has geometry"))
+                .expect("geometry converts");
+            match geom {
+                Geometry::Polygon(p) => {
+                    assert!(
+                        p.interiors().is_empty(),
+                        "polygon fixtures have no holes yet: {}",
+                        path.display()
+                    );
+                    p.exterior()
+                        .0
+                        .iter()
+                        .map(|c| Coord {
+                            x: c.x as i32,
+                            y: c.y as i32,
+                        })
+                        .collect()
+                }
+                other => panic!(
+                    "polygon fixtures must use Polygon features, not {other:?} ({})",
+                    path.display()
+                ),
+            }
+        })
+        .collect();
+    assert!(
+        !rings.is_empty(),
+        "polygon fixture has no features: {}",
+        path.display()
+    );
+    rings
+}
+
+/// Inclusive tile-coordinate bounds covering every vertex of `rings`, padded by one tile so a per-tile
+/// scan also visits the empty tiles just outside the geometry. Works for polyline or polygon rings.
+#[must_use]
+pub fn padded_tile_span(rings: &[Vec<Coord<i32>>]) -> (TileId, TileId) {
+    let mut lo = TileId::new(i32::MAX, i32::MAX);
+    let mut hi = TileId::new(i32::MIN, i32::MIN);
+    let e = EXTENT as i32;
+    for ring in rings {
+        for &c in ring {
+            let (tx, ty) = (c.x.div_euclid(e), c.y.div_euclid(e));
+            lo = TileId::new(lo.x.min(tx), lo.y.min(ty));
+            hi = TileId::new(hi.x.max(tx), hi.y.max(ty));
+        }
+    }
+    (
+        TileId::new(lo.x - 1, lo.y - 1),
+        TileId::new(hi.x + 1, hi.y + 1),
+    )
+}
+
+/// A filled GeoJSON `Polygon` feature for one integer ring, styled so it renders on a map, tagged with
+/// `role`.
+fn styled_polygon(ring: &[Coord<i32>], role: &str, fill: &str, stroke: &str) -> Feature {
+    let exterior = LineString(
+        ring.iter()
+            .map(|c| Coord {
+                x: f64::from(c.x),
+                y: f64::from(c.y),
+            })
+            .collect(),
+    );
+    let geom = Geometry::Polygon(Polygon::new(exterior, vec![]));
+    feature(
+        &geom,
+        vec![
+            ("role", json!(role)),
+            ("fill", json!(fill)),
+            ("fill-opacity", json!(0.35)),
+            ("stroke", json!(stroke)),
+            ("stroke-width", json!(2)),
+        ],
+    )
+}
+
+/// The original input polygon (bright yellow), the reference every per-tile piece should tile back to.
+pub fn input_polygon(ring: &[Coord<i32>]) -> Feature {
+    styled_polygon(ring, "input", "#f6fd31", "#b5a300")
+}
+
+/// One tile's clipped ring, filled and colored by tile parity so neighbors contrast, tagged
+/// `tile x/y`.
+pub fn tile_polygon(ring: &[Coord<i32>], tile: TileId) -> Feature {
+    let role = format!("tile {}/{}", tile.x, tile.y);
+    let fill = if (tile.x + tile.y).rem_euclid(2) == 0 {
+        "#261fb5"
+    } else {
+        "#b5211f"
+    };
+    styled_polygon(ring, &role, fill, "#111111")
 }
 
 /// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot
