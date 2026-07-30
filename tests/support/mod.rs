@@ -377,7 +377,10 @@ fn ring_i32(ls: &LineString<f64>) -> Vec<Coord<i32>> {
 pub fn load_polygon_fixture(path: &Path) -> Vec<FixturePolygon> {
     let text = fs::read_to_string(path).expect("readable fixture");
     let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
-        panic!("polygon fixture must be a FeatureCollection: {}", path.display());
+        panic!(
+            "polygon fixture must be a FeatureCollection: {}",
+            path.display()
+        );
     };
     let polygons: Vec<FixturePolygon> = fc
         .features
@@ -446,7 +449,10 @@ fn styled_polygon(
     fill: &str,
     stroke: &str,
 ) -> Feature {
-    let poly = Polygon::new(ring_f64(exterior), holes.iter().map(|h| ring_f64(h)).collect());
+    let poly = Polygon::new(
+        ring_f64(exterior),
+        holes.iter().map(|h| ring_f64(h)).collect(),
+    );
     feature(
         &Geometry::Polygon(poly),
         vec![

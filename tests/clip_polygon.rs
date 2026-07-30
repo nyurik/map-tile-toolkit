@@ -50,7 +50,8 @@ struct TiledFeature {
 /// Clip every polygon (exterior + holes) to a single `tile` with a fresh [`PolygonSlicerOne`],
 /// returning the surviving per-tile features in the global frame.
 fn clip_tile(polygons: &[FixturePolygon], buffer: u16, tile: TileId) -> Vec<TiledFeature> {
-    let mut slicer = PolygonSlicerOne::<Coord<i32>>::new(EXTENT, buffer, tile).expect("valid config");
+    let mut slicer =
+        PolygonSlicerOne::<Coord<i32>>::new(EXTENT, buffer, tile).expect("valid config");
     for p in polygons {
         let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
         slicer.add_feature(&p.exterior, &holes).expect("clip");

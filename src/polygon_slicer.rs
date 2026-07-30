@@ -14,7 +14,7 @@
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polygon::clip_ring;
+use crate::clip_polygon::{RingClip, clip_ring};
 use crate::clip_polyline::to_local;
 use crate::grid::Grid;
 use crate::tile::TileId;
@@ -108,19 +108,24 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
             .ok_or(TileError::Overflow)?;
 
         // Clip the exterior first — if it misses the tile entirely, the whole feature is absent here.
-        let Some(ext) = clip_ring(exterior, min, max)? else {
-            return Ok(self);
+        let ext = match clip_ring(exterior, min, max)? {
+            RingClip::Outside => return Ok(self),
+            RingClip::Covers(ring) | RingClip::Clipped(ring) => ring,
         };
         let mut rings = vec![Ring {
             verts: localize(&ext, origin)?,
             is_hole: false,
         }];
         for hole in holes {
-            if let Some(clipped) = clip_ring(hole, min, max)? {
-                rings.push(Ring {
+            match clip_ring(hole, min, max)? {
+                // A hole that covers the whole tile leaves nothing to draw here — drop the feature
+                // entirely rather than emit a fill exactly cancelled by its hole.
+                RingClip::Covers(_) => return Ok(self),
+                RingClip::Clipped(clipped) => rings.push(Ring {
                     verts: localize(&clipped, origin)?,
                     is_hole: true,
-                });
+                }),
+                RingClip::Outside => {}
             }
         }
         self.features.push(PolyFeature { rings, attr });
@@ -275,6 +280,31 @@ mod tests {
         assert!(!rings[0].is_hole());
         assert!(rings[1].is_hole());
         assert_eq!(rings[1].vertices(), hole.as_slice());
+    }
+
+    #[test]
+    fn tile_fully_inside_hole_records_nothing() {
+        // Exterior covers tiles 0..2 on each axis; the hole covers tile (1,1) [25,49] entirely. That
+        // tile is all hole, so there is nothing to draw — no feature is recorded (rather than a fill
+        // exactly cancelled by its hole).
+        let ext = ring(&[(2, 2), (72, 2), (72, 72), (2, 72), (2, 2)]);
+        let hole = ring(&[(22, 22), (22, 52), (52, 52), (52, 22), (22, 22)]);
+
+        let mut inside = PolygonSlicerOne::<Coord<i32>>::new(25, 0, TileId::new(1, 1)).unwrap();
+        inside.add_feature(&ext, &[&hole]).unwrap();
+        assert!(
+            inside.is_empty(),
+            "a tile entirely inside a hole records nothing"
+        );
+
+        // A neighbor the hole only partially covers still keeps its (holed) fill.
+        let mut edge = PolygonSlicerOne::<Coord<i32>>::new(25, 0, TileId::new(0, 1)).unwrap();
+        edge.add_feature(&ext, &[&hole]).unwrap();
+        assert_eq!(
+            edge.len(),
+            1,
+            "a partially-holed tile still records a feature"
+        );
     }
 
     #[test]
