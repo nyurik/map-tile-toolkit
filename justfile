@@ -142,8 +142,7 @@ fmt:
 fmt-toml *args:  (cargo-install 'cargo-sort')
     cargo sort --workspace --grouped {{args}}
 
-# Reformat the input GeoJSON fixtures (tests/fixtures + tests/bad-fixtures) with the
-# json-stringify-pretty-compact npm package. Snapshot .geojson files are left untouched.
+# Reformat all GeoJSON tests
 fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
     #!/usr/bin/env bash
     set -euo pipefail
@@ -159,7 +158,7 @@ fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
     EOF
     # The shell expands the file list (absolute paths); run node from the temp dir so the bare import
     # resolves against the throwaway install.
-    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}"/tests/{fixtures,bad-fixtures}/*.geojson)
+    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson)
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')

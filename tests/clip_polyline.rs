@@ -1,6 +1,6 @@
 //! Insta GeoJSON snapshots for the integer polyline slicer.
 //!
-//! Each fixture in `tests/fixtures/*.geojson` is a `FeatureCollection` with one or more `LineString`
+//! Each fixture in `tests/polylines/fixtures/*.geojson` is a `FeatureCollection` with one or more `LineString`
 //! features (whole-number coordinates in valid lon/lat range so the fixtures and snapshots render on
 //! a map); each feature is an independent polyline. Every fixture is sliced two ways and the two
 //! must be **byte identical**:
@@ -35,8 +35,8 @@ use crate::support::{EXTENT, feature_line};
 /// near-edge vertices and crossing segments also land in the neighboring tiles.
 fn slicers() -> [(support::Cfg, &'static str); 2] {
     [
-        (support::grid(), "snapshots"),
-        (support::grid_buffered(), "snapshots-5"),
+        (support::grid(), "polylines/snapshots"),
+        (support::grid_buffered(), "polylines/snapshots-5"),
     ]
 }
 
@@ -44,7 +44,7 @@ mod files {
     use test_each_file::test_each_path;
 
     // Generate one test per input fixture.
-    test_each_path! { for ["geojson"] in "./tests/fixtures" => super::slice_one_fixture }
+    test_each_path! { for ["geojson"] in "./tests/polylines/fixtures" => super::slice_one_fixture }
 }
 
 /// Inclusive tile-coordinate bounds covering every vertex of `polylines`, padded by one tile so the
@@ -121,7 +121,7 @@ fn save_big_geometry() {
         &support::to_f64(&support::big_polyline()),
         vec![],
     )]);
-    std::fs::write("tests/fixtures/big-geometry.geojson", bytes).expect("writes");
+    std::fs::write("tests/polylines/fixtures/big-geometry.geojson", bytes).expect("writes");
 }
 
 /// The single-pass `slice_all` must still agree with per-tile `slice` on a large geometry that

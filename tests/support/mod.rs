@@ -69,7 +69,7 @@ pub fn permutations(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// Tile extent for the small fixtures (matches the `tests/fixtures/grid.geojson` grid).
+/// Tile extent for the small fixtures (matches the `tests/polylines/fixtures/grid.geojson` grid).
 #[must_use]
 pub fn grid() -> Cfg {
     slicer(EXTENT, 0)
@@ -208,9 +208,9 @@ pub fn load_fixture_geoms(path: &Path) -> Polylines {
     load_fixture(path).into_iter().map(|f| f.line).collect()
 }
 
-/// Every `tests/fixtures/*.geojson` as `(name, polylines)`, sorted by name for stable ordering.
+/// Every `tests/polylines/fixtures/*.geojson` as `(name, polylines)`, sorted by name for stable ordering.
 pub fn load_all_fixtures() -> Vec<(String, Polylines)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/polylines/fixtures");
     let mut out: Vec<(String, Polylines)> = fs::read_dir(&dir)
         .expect("fixtures dir exists")
         .filter_map(Result::ok)
