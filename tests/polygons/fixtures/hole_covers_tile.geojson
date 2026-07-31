@@ -1,5 +1,6 @@
 {
   "type": "FeatureCollection",
+  "name": "hole_covers_tile",
   "features": [
     {
       "type": "Feature",
@@ -11,7 +12,7 @@
       "geometry": {
         "type": "Polygon",
         "coordinates": [
-          [[2, 2], [72, 2], [72, 72], [2, 72], [2, 2]],
+          [[7, 7], [67, 7], [67, 67], [7, 68], [7, 7]],
           [[22, 22], [22, 52], [52, 52], [52, 22], [22, 22]]
         ]
       }
