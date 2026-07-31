@@ -1,0 +1,75 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.0,
+              8.0
+            ],
+            [
+              66.0,
+              8.0
+            ],
+            [
+              66.0,
+              66.0
+            ],
+            [
+              8.0,
+              66.0
+            ],
+            [
+              8.0,
+              8.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "input",
+        "fill": "#f6fd31",
+        "fill-opacity": 0.35,
+        "stroke": "#b5a300",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            8.0,
+            8.0
+          ],
+          [
+            66.0,
+            8.0
+          ],
+          [
+            66.0,
+            66.0
+          ],
+          [
+            8.0,
+            66.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "ring 0",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    }
+  ]
+}

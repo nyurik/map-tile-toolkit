@@ -157,37 +157,49 @@ whether any *edge* touches `B`:
 
 ## 7. Mosaic reassembly of polygons (no tag bit)
 
-`Mosaic` knows `extent + buffer`, so it re-derives which vertices are synthetic **geometrically**,
-by re-running the keep-rule in reverse:
+`PolygonMosaic` knows `extent + buffer`, so it re-derives each tile's box `B(tile)` and keeps only the
+ring **edges that touch `B`**, dropping the rest:
 
 ```
-for a vertex v in a tile's ring, with box B(tile):
-    inside B                                   → original (keep)
-    outside B but an incident edge touches B   → original crossing vertex (keep)
-    outside B and neither edge touches B        → SYNTHETIC (drop)
+for a cyclic edge p→q in a tile's ring, with box B(tile):
+    edge touches B   → keep  (a real ring edge, authoritative here)
+    edge misses B    → drop  (synthetic filler, or redundant here — owned by another tile)
 ```
 
-This is **exact, not heuristic**, because of a symmetry: the slicer *never emits a deep-outside
-original vertex* (it drops them), so the only "outside-`B`, no-incident-edge-touches-`B`" vertices
-that can appear are the synthetic corners/fill we injected — **provided** the §5 strictly-outside-`B`
-invariant holds (fill boxes on `B⁺`, detour edges never grazing `B`). No per-vertex flag, `V` stays
-fully generic.
+This is **exact, not heuristic**, and splits cleanly:
 
-Dropping the synthetic vertices splits each tile's ring back into exactly the **original arcs** a
-polyline would have produced, ending at original crossing vertices the neighbor tile shares. So:
+- **Completeness.** Every real ring edge `p→q` is kept by the tile that owns `p`'s cell: that cell lies
+  in `B` (core ⊆ box), so the edge starts inside `B` and touches it. No real edge is ever lost — it
+  survives in at least the one tile that owns its start. (An edge missing `B` here but real elsewhere is
+  simply redundant, re-emitted by its owner; dropping it here is harmless.)
+- **Soundness.** Every synthetic edge — the `B⁺` corners, the fill boxes, and the gap-bridging detours —
+  is routed strictly *outside* `B` (the §5 invariant: fill on `B⁺`, detours never grazing `B`), so it
+  never touches `B` and is dropped.
 
-> **Polygon reassembly = drop-synthetic pre-filter, then the *existing* polyline `stitch`.**
+**Why edges, not vertices.** An earlier design dropped synthetic *vertices* (outside `B` with neither
+incident edge touching `B`). That is insufficient: a `0`-corner detour bridges a dropped gap with a
+**direct chord between two _original_ crossing vertices** (both legitimately kept), so the chord is a
+synthetic *edge* with no synthetic *vertex* for a per-vertex test to catch — it would survive, pollute
+the edge set, and (having an endpoint in a neighbor's core) raise a false `TileError::Conflict`. Testing
+the **edge's** relationship to `B` catches it: the chord lies outside `B`, so it misses and is dropped.
+No per-vertex flag either way — `V` stays fully generic.
 
-- Every original ring edge is emitted by whatever tile(s) it passes through; a border-crossing edge
-  `[last-inside → E]` is emitted identically by both neighbors. Union of original directed edges,
-  deduped, = the original ring edge set → re-chain → closed rings, holes and orientation intact.
-- Interior-fill boxes and `One` containment fills are 100% synthetic → dropped entirely → correct
-  (a reassembled polygon's interior is implied by winding; we don't need the fill tiles back).
-- The existing core-completeness / payload conflict checks run **on the original edges only** (drop
-  synthetic first), so synthetic corners can't raise a false `TileError::Conflict`.
+Keeping only touching edges splits each tile's ring into exactly the **original arcs** a polyline would
+have produced, ending at original crossing vertices the neighbor tile shares. So:
+
+> **Polygon reassembly = keep edges touching `B`, then the *existing* polyline `stitch`.**
+
+- Union of the kept original directed edges, deduped, = the original ring edge set → re-chain → closed
+  rings, holes and orientation intact.
+- Interior-fill boxes and `One` containment fills are 100% synthetic → every edge misses `B` → dropped
+  entirely → correct (a reassembled polygon's interior is implied by winding; we don't need the fill
+  tiles back).
+- The existing core-completeness / payload conflict checks run **on the kept edges only** (filter
+  first), so synthetic geometry can raise no false `TileError::Conflict`.
 
 Filtering happens per-tile at `add` time, before the global edge dedup, so a synthetic edge is never
-inserted into the global map and coincidences with other tiles' vertices are irrelevant.
+inserted into the global map and coincidences with other tiles' vertices are irrelevant. The rule is
+purely tile-local, hence inherently order-independent.
 
 ## 8. Performance plan
 

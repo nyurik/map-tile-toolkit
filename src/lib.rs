@@ -28,4 +28,4 @@ mod polygon_slicer;
 pub use polygon_slicer::{PolyFeatureView, PolygonSlicerOne, RingView};
 
 mod mosaic;
-pub use mosaic::Mosaic;
+pub use mosaic::{Mosaic, PolygonMosaic};
