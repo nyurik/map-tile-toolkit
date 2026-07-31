@@ -1,6 +1,0 @@
----
-source: tests/polygon_mosaic.rs
-expression: "reassembly_geojson(&polygons, &features)"
-extension: geojson
-snapshot_kind: binary
----

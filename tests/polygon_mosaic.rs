@@ -7,12 +7,12 @@
 //! are self-consistent, so none conflict) and reassemble the **same** rings, whose directed-edge set
 //! must equal the input polygons' edge set — proving the mosaic dropped the synthetic clip-boundary
 //! corners and re-chained the original edges back into the original rings. It runs at buffer 0 and
-//! buffer 5; both recover the exact same global geometry, so both assert one shared per-fixture
-//! snapshot.
+//! buffer 5; both recover the exact same global geometry.
 //!
-//! Reassembly is compared by **directed-edge set**: the mosaic re-chains by connectivity, so rings that
-//! touch at a shared vertex may come back split/joined differently, but the geometry — the set of
-//! edges — is identical to the input.
+//! Correctness is asserted directly — `reassembled == input` by **directed-edge set** — rather than
+//! against a golden file: the mosaic re-chains by connectivity, so rings that touch at a shared vertex
+//! may come back split/joined differently (an implementation detail the edge-set check is invariant to),
+//! but the geometry — the set of edges — is identical to the input.
 //!
 //! Exhaustive order-independence of the underlying edge index is proven for polylines in `mosaic.rs`;
 //! here a small tile set still gets every permutation, while the few larger ones get a deterministic
