@@ -1,0 +1,6 @@
+---
+source: tests/mosaic.rs
+expression: "reassembly_geojson(polylines, &features)"
+extension: geojson
+snapshot_kind: binary
+---

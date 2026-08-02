@@ -355,10 +355,7 @@ impl Grid {
     /// The closed integer bounds `(min, max)` of `tile`'s clip box (in output space), grown by
     /// `buffer` on each side. All arithmetic is checked; [`TileError::Overflow`] means the tile lies
     /// outside the representable range for this `extent`.
-    pub(crate) fn tile_buffered_bounds(
-        self,
-        tile: TileId,
-    ) -> Result<(Coord<i32>, Coord<i32>), TileError> {
+    fn tile_buffered_bounds(self, tile: TileId) -> Result<(Coord<i32>, Coord<i32>), TileError> {
         let base_x = tile.x.checked_mul(self.extent).ok_or(TileError::Overflow)?;
         let base_y = tile.y.checked_mul(self.extent).ok_or(TileError::Overflow)?;
         // Distance from the base corner to the far corner of the buffered box: extent - 1 + buffer.
