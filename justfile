@@ -7,6 +7,8 @@ just := quote(just_executable())
 binstall_args := if env('CI', '') != '' {'--no-confirm --no-track --disable-telemetry'} else {''}
 # location of the coverage output, used by CI
 coverage_lcov := 'target/llvm-cov/lcov.info'
+# All targets except benches (running gungraun benches needs Valgrind; see `bench`/`bench-check`).
+non_bench_targets := '--lib --bins --tests --examples'
 
 # if running in CI, treat warnings as errors by setting CARGO_BUILD_WARNINGS to 'deny' unless it is already set
 # Use `CI=true just ci-test` to run the same tests as in GitHub CI.
@@ -83,7 +85,7 @@ ci-coverage: env-info && \
     mkdir -p {{quote(parent_directory(coverage_lcov))}}
 
 # Run all tests as expected by CI
-ci-test: env-info test-fmt clippy test test-doc (bench '--test') && assert-git-is-clean
+ci-test: env-info test-fmt clippy test test-doc bench-check && assert-git-is-clean
 
 # Compile default features with minimal dependencies on the configured MSRV
 ci-test-msrv:
@@ -109,7 +111,7 @@ coverage:  (_coverage '--open')
 # Clean, collect, and aggregate coverage using the requested report arguments
 _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
     cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --workspace --all-features --all-targets
+    cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
     if rustup toolchain list | grep nightly &> /dev/null; then cargo +nightly llvm-cov --no-report --doctests --workspace --all-features; fi
     cargo llvm-cov report --include-build-script {{report_args}}
 
@@ -202,10 +204,14 @@ release *args='':  (cargo-install 'release-plz')
 semver *args:  (cargo-install 'cargo-semver-checks')
     cargo semver-checks --all-features {{args}}
 
-# Run all tests
+# Run all tests (every target except benches — running gungraun benches needs Valgrind; see `bench`)
 test:
-    cargo test --workspace --all-features --all-targets
+    cargo test --workspace --all-features {{non_bench_targets}}
     cargo test --doc --workspace --all-features
+
+# Compile-check the benchmarks without running them
+bench-check:
+    cargo bench --no-run --workspace --all-features
 
 # Test documentation generation
 test-doc:  (docs '')
