@@ -18,9 +18,11 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
-# Run slicing benchmarks; optional criterion filter, e.g. `just bench big`, `just bench single`
+# Run slicing benchmarks (gungraun/Valgrind instruction counts); needs `valgrind` + `cargo install
+# gungraun-runner`. Optional substring filter, e.g. `just bench big`, `just bench single`, `just bench
+# all` (passed to gungraun as the glob `*<filter>*` over benchmark module paths).
 bench filter='':
-    cargo bench {{if filter != '' {'-- ' + filter} else {''} }}
+    cargo bench {{ if filter != '' { "-- '*" + filter + "*'" } else { '' } }}
 
 # Run only the large-polyline benchmarks (many / a few / a single tile)
 bench-big: (bench 'big')
@@ -143,7 +145,7 @@ fmt-toml *args:  (cargo-install 'cargo-sort')
     cargo sort --workspace --grouped {{args}}
 
 # Reformat all GeoJSON tests
-fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
+fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm') (assert-cmd 'jq')
     #!/usr/bin/env bash
     set -euo pipefail
     tmp="$(mktemp -d)"
@@ -156,9 +158,19 @@ fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
       writeFileSync(p, stringify(JSON.parse(readFileSync(p, 'utf8'))) + '\n');
     console.log(`Formatted ${process.argv.length - 2} GeoJSON files`);
     EOF
+    # Round every number nested anywhere inside features[].geometry.coordinates to an integer.
+    round_coords() {
+      for p in "$@"; do
+        jq '.features[].geometry.coordinates |= walk(if type == "number" then round else . end)' "$p" > "$p.tmp"
+        mv "$p.tmp" "$p"
+      done
+    }
+    round_coords "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
+    round_coords "{{justfile_directory()}}"/tests/polygons/fixtures/*.geojson
     # The shell expands the file list (absolute paths); run node from the temp dir so the bare import
     # resolves against the throwaway install.
-    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson)
+    cd "$tmp"
+    node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')

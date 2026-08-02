@@ -1,10 +1,12 @@
-//! Stateful reassembly of sliced tiles back into whole features — the accumulating inverse of
-//! [`SlicerAll`](crate::SlicerAll).
+//! Stateful reassembly of sliced tiles back into whole features — the accumulating inverse of the
+//! slicers.
 //!
-//! Feed [`Mosaic::add`] each tile's runs in its local frame; the mosaic rebases them into the global
-//! frame (`local + tile·extent`) and links geometry across borders by shared **directed edges**.
-//! [`add`](Mosaic::add) rejects a tile that is inconsistent with those already present — naming the
-//! ones it conflicts with, and leaving the mosaic unchanged — in two ways:
+//! [`Mosaic`] rejoins **polyline** tiles ([`SlicerAll`](crate::SlicerAll)); [`PolygonMosaic`] rejoins
+//! **polygon** tiles ([`PolygonSlicerOne`](crate::PolygonSlicerOne)). Both take each tile's geometry
+//! in its local frame, rebase it into the global frame (`local + tile·extent`), and link geometry
+//! across borders by shared **directed edges**. [`add`](Mosaic::add) rejects a tile inconsistent with
+//! those already present — naming the ones it conflicts with, and leaving the mosaic unchanged — in
+//! two ways:
 //!
 //! - **Payload:** slicing duplicates a border-crossing segment identically (position **and** payload)
 //!   in every tile that carries it, so a shared edge whose vertices *disagree* is a conflict. (A single
@@ -17,11 +19,24 @@
 //!   two tiles share, and the whole overlap must match; any *disagreement* there surfaces here too,
 //!   because the differing vertex lands in some tile's core. Only a pure *omission* of redundant
 //!   overlap geometry goes unflagged — and that is harmless, since the core tile still supplies the
-//!   edge and duplicates collapse on reassembly. So the mosaic needs only the `extent`, never the
-//!   buffer.
+//!   edge and duplicates collapse on reassembly.
 //!
-//! [`iter_features`](Mosaic::iter_features) re-chains the distinct edges into maximal polylines
+//! [`iter_features`](Mosaic::iter_features) re-chains the distinct edges into maximal chains
 //! (`stitch`) — the same reconstruction a from-scratch merge of all tiles would produce.
+//!
+//! The two mosaics differ only in how a tile's input becomes directed edges:
+//!
+//! - [`Mosaic`] uses every consecutive vertex pair of each **run**. It needs only the `extent`.
+//! - [`PolygonMosaic`] takes each tile's **rings** and keeps only the edges that **touch** the tile's
+//!   buffered box `B` (design doc §7). This drops all the slicer's synthetic geometry — the
+//!   clip-boundary corners, fill boxes, and gap-bridging chords, which are routed strictly *outside*
+//!   `B` — while every real ring edge survives in the tile that owns its start vertex (whose cell lies
+//!   in `B`, so the edge touches `B` there). The *same* edge machinery then reassembles the rings, with
+//!   orientation and holes falling out of the directed edges. Testing the edge rather than the vertex
+//!   is what catches a bridge chord drawn directly between two *original* crossing vertices, which no
+//!   per-vertex tag could. Because it re-derives `B`, it needs the `buffer` as well as the `extent`. A
+//!   tile lying entirely inside a polygon (an all-synthetic fill) contributes no edges — correct, since
+//!   a reassembled polygon's interior is implied by its winding, not by fill tiles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -43,72 +58,37 @@ struct Edge<V> {
 /// A directed edge keyed by its endpoint positions.
 type EdgeKey = (Coord<i32>, Coord<i32>);
 
-/// Reassembles tiled features back into whole features as tiles are [added](Self::add).
-///
-/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]). Needs only the `extent` the
-/// tiles were sliced at — never the buffer (see the module docs). A payload-carrying vertex (e.g.
-/// [`Measured`](crate::Measured)) additionally makes payload [`Conflict`](TileError::Conflict)s
-/// meaningful.
+/// The shared global directed-edge index behind both mosaics: it holds the cross-tile edge map and
+/// per-tile bookkeeping, detects conflicts, and re-chains features — everything except how a tile's
+/// raw geometry is turned into directed edges (runs for [`Mosaic`], synthetic-filtered rings for
+/// [`PolygonMosaic`]).
 #[derive(Debug, Clone)]
-pub struct Mosaic<V: Vertex = Coord<i32>> {
-    extent: u32,
+struct EdgeIndex<V: Vertex> {
     /// Global directed-edge index, keyed by endpoint positions. Every tile at a key holds the same
-    /// vertices (conflicts are rejected on `add`).
+    /// vertices (conflicts are rejected on commit).
     edges: HashMap<EdgeKey, Edge<V>>,
     /// The edge keys each tile contributed, for `O(tile)` purge and self-exclusion when re-adding.
     tile_edges: BTreeMap<TileId, Vec<EdgeKey>>,
 }
 
-impl<V: Vertex> Mosaic<V> {
-    /// Create an empty mosaic for tiles sliced at `extent`.
-    ///
-    /// # Errors
-    ///
-    /// [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
-    pub fn new(extent: u32) -> Result<Self, TileError> {
-        if extent == 0 || extent > i32::MAX.cast_unsigned() {
-            return Err(TileError::InvalidExtent);
-        }
-        Ok(Self {
-            extent,
+impl<V: Vertex> EdgeIndex<V> {
+    fn new() -> Self {
+        Self {
             edges: HashMap::new(),
             tile_edges: BTreeMap::new(),
-        })
-    }
-
-    /// The extent every tile is sliced at.
-    #[must_use]
-    pub fn extent(&self) -> u32 {
-        self.extent
-    }
-
-    /// Add `tile`'s runs (in its local frame) to the mosaic. `runs` is anything sliceable to `[V]`
-    /// (e.g. `&[&[V]]` collected from a tile's features). Re-adding a tile replaces its contents. A
-    /// tile with no ≥2-vertex run contributes nothing.
-    ///
-    /// # Errors
-    ///
-    /// - [`TileError::Conflict`] if the tile disagrees with already-added tiles on a shared border
-    ///   segment. The mosaic is unchanged.
-    /// - [`TileError::Overflow`] if a vertex overflows `i32` when rebased into the global frame.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn add<L: AsRef<[V]>>(&mut self, tile: TileId, runs: &[L]) -> Result<(), TileError> {
-        // `tile · extent` fits `i64`: both factors are within `i32`, so the product is below `2^62`.
-        let e = i64::from(self.extent);
-        let off_x = i64::from(tile.x) * e;
-        let off_y = i64::from(tile.y) * e;
-        // Rebase to the global frame and collect this tile's distinct directed edges. Nothing is
-        // mutated yet, so an overflow (or a later conflict) leaves the mosaic untouched.
-        let mut new_edges: HashMap<EdgeKey, (V, V)> = HashMap::new();
-        for run in runs {
-            let g = rebase(run.as_ref(), off_x, off_y)?;
-            for w in g.windows(2) {
-                let key = (w[0].position(), w[1].position());
-                if key.0 != key.1 {
-                    new_edges.entry(key).or_insert((w[0], w[1]));
-                }
-            }
         }
+    }
+
+    /// Replace `tile`'s contribution with `new_edges` (its distinct directed edges, already rebased
+    /// into the global frame), after rejecting any conflict with the other tiles. `ext` is the signed
+    /// extent, used to map an endpoint to its owner tile for the membership check. On conflict nothing
+    /// is mutated.
+    fn commit(
+        &mut self,
+        tile: TileId,
+        new_edges: HashMap<EdgeKey, (V, V)>,
+        ext: i32,
+    ) -> Result<(), TileError> {
         // Conflict scan against *other* tiles (this tile's own prior data is replaced, not compared).
         let mut conflicts = BTreeSet::new();
         // (a) Payload conflict: another tile carries the same edge (identical positions) but different
@@ -125,7 +105,6 @@ impl<V: Vertex> Mosaic<V> {
         // edge means the tiles came from inconsistent data. Checked both ways so detection is
         // order-independent. (Any *disagreement* in a buffer overlap surfaces here too — the differing
         // vertex lands in some core — so only a harmless omission of a redundant overlap edge slips.)
-        let ext = self.extent.cast_signed();
         // This tile must carry every already-present edge that names it as an endpoint-tile.
         for (key, existing) in &self.edges {
             if (tile_of(key.0, ext) == tile || tile_of(key.1, ext) == tile)
@@ -173,7 +152,7 @@ impl<V: Vertex> Mosaic<V> {
     }
 
     /// Remove `tile` and all geometry it contributed. Returns whether the tile was present.
-    pub fn purge(&mut self, tile: TileId) -> bool {
+    fn purge(&mut self, tile: TileId) -> bool {
         let Some(keys) = self.tile_edges.remove(&tile) else {
             return false;
         };
@@ -188,9 +167,8 @@ impl<V: Vertex> Mosaic<V> {
         true
     }
 
-    /// Iterate every reassembled feature — geometry stitched across tile borders into maximal
-    /// polylines, in the global frame. A single iterator over the whole mosaic; deterministic order.
-    pub fn iter_features(&self) -> impl Iterator<Item = Vec<V>> {
+    /// Re-chain the distinct edges into maximal chains, in the global frame (deterministic order).
+    fn iter_features(&self) -> impl Iterator<Item = Vec<V>> {
         let mut ordered: Vec<&Edge<V>> = self.edges.values().collect();
         ordered.sort_unstable_by_key(|edge| {
             let (a, b) = (edge.a.position(), edge.b.position());
@@ -200,43 +178,142 @@ impl<V: Vertex> Mosaic<V> {
         stitch(&runs).into_iter()
     }
 
-    /// Whether `tile` is currently in the mosaic.
-    #[must_use]
-    pub fn contains(&self, tile: TileId) -> bool {
+    fn contains(&self, tile: TileId) -> bool {
         self.tile_edges.contains_key(&tile)
     }
 
-    /// The number of tiles currently in the mosaic.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.tile_edges.len()
     }
 
-    /// Whether no tile has been added yet.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.tile_edges.is_empty()
     }
 
-    /// Discard every tile, keeping the extent.
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.edges.clear();
         self.tile_edges.clear();
     }
 }
 
-/// Rebase every vertex of `run` by `(off_x, off_y)` in `i64` (the offset is `tile · extent`, below
-/// `2^62`, and a vertex adds at most another `i32`, so the sum stays within `i64`), range-checking
-/// each result back into `i32`.
+/// Reassembles tiled **polyline** features back into whole features as tiles are [added](Self::add).
+///
+/// Generic over the [`Vertex`] type `V` (defaults to [`Coord<i32>`]). Needs only the `extent` the
+/// tiles were sliced at — never the buffer (see the module docs). A payload-carrying vertex (e.g.
+/// [`Measured`](crate::Measured)) additionally makes payload [`Conflict`](TileError::Conflict)s
+/// meaningful.
+#[derive(Debug, Clone)]
+pub struct Mosaic<V: Vertex = Coord<i32>> {
+    extent: u32,
+    index: EdgeIndex<V>,
+}
+
+impl<V: Vertex> Mosaic<V> {
+    /// Create an empty mosaic for tiles sliced at `extent`.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    pub fn new(extent: u32) -> Result<Self, TileError> {
+        if extent == 0 || extent > i32::MAX.cast_unsigned() {
+            return Err(TileError::InvalidExtent);
+        }
+        Ok(Self {
+            extent,
+            index: EdgeIndex::new(),
+        })
+    }
+
+    /// The extent every tile is sliced at.
+    #[must_use]
+    pub fn extent(&self) -> u32 {
+        self.extent
+    }
+
+    /// Add `tile`'s runs (in its local frame) to the mosaic. `runs` is anything sliceable to `[V]`
+    /// (e.g. `&[&[V]]` collected from a tile's features). Re-adding a tile replaces its contents. A
+    /// tile with no ≥2-vertex run contributes nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`TileError::Conflict`] if the tile disagrees with already-added tiles on a shared border
+    ///   segment. The mosaic is unchanged.
+    /// - [`TileError::Overflow`] if a vertex overflows `i32` when rebased into the global frame.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub fn add<L: AsRef<[V]>>(&mut self, tile: TileId, runs: &[L]) -> Result<(), TileError> {
+        let (off_x, off_y) = tile_offset(tile, self.extent);
+        // Rebase to the global frame and collect this tile's distinct directed edges. Nothing is
+        // mutated yet, so an overflow (or a later conflict) leaves the mosaic untouched.
+        let mut new_edges: HashMap<EdgeKey, (V, V)> = HashMap::new();
+        for run in runs {
+            let g = rebase(run.as_ref(), off_x, off_y)?;
+            for w in g.windows(2) {
+                let key = (w[0].position(), w[1].position());
+                if key.0 != key.1 {
+                    new_edges.entry(key).or_insert((w[0], w[1]));
+                }
+            }
+        }
+        self.index
+            .commit(tile, new_edges, self.extent.cast_signed())
+    }
+
+    /// Remove `tile` and all geometry it contributed. Returns whether the tile was present.
+    pub fn purge(&mut self, tile: TileId) -> bool {
+        self.index.purge(tile)
+    }
+
+    /// Iterate every reassembled feature — geometry stitched across tile borders into maximal
+    /// polylines, in the global frame. A single iterator over the whole mosaic; deterministic order.
+    pub fn iter_features(&self) -> impl Iterator<Item = Vec<V>> {
+        self.index.iter_features()
+    }
+
+    /// Whether `tile` is currently in the mosaic.
+    #[must_use]
+    pub fn contains(&self, tile: TileId) -> bool {
+        self.index.contains(tile)
+    }
+
+    /// The number of tiles currently in the mosaic.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Whether no tile has been added yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    /// Discard every tile, keeping the extent.
+    pub fn clear(&mut self) {
+        self.index.clear();
+    }
+}
+
+/// The global-frame offset `(tile.x·extent, tile.y·extent)` in `i64` (both factors within `i32`, so
+/// the product is below `2^62`).
+fn tile_offset(tile: TileId, extent: u32) -> (i64, i64) {
+    let e = i64::from(extent);
+    (i64::from(tile.x) * e, i64::from(tile.y) * e)
+}
+
+/// Rebase one vertex by `(off_x, off_y)` in `i64` (the offset is `tile · extent`, below `2^62`, and a
+/// vertex adds at most another `i32`, so the sum stays within `i64`), range-checking back into `i32`.
+fn rebase_vertex<V: Vertex>(v: V, off_x: i64, off_y: i64) -> Result<V, TileError> {
+    let p = v.position();
+    Ok(v.with_position(Coord {
+        x: i32::try_from(i64::from(p.x) + off_x).map_err(|_| TileError::Overflow)?,
+        y: i32::try_from(i64::from(p.y) + off_y).map_err(|_| TileError::Overflow)?,
+    }))
+}
+
+/// Rebase every vertex of `run` by `(off_x, off_y)`, range-checking each result back into `i32`.
 fn rebase<V: Vertex>(run: &[V], off_x: i64, off_y: i64) -> Result<Vec<V>, TileError> {
     run.iter()
-        .map(|&v| {
-            let p = v.position();
-            Ok(v.with_position(Coord {
-                x: i32::try_from(i64::from(p.x) + off_x).map_err(|_| TileError::Overflow)?,
-                y: i32::try_from(i64::from(p.y) + off_y).map_err(|_| TileError::Overflow)?,
-            }))
-        })
+        .map(|&v| rebase_vertex(v, off_x, off_y))
         .collect()
 }
 

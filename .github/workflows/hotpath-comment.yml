@@ -6,7 +6,7 @@ name: Hotpath Comment
 
 on:
   workflow_run:
-    workflows: ["Hotpath Profile"]
+    workflows: [ 'Hotpath Profile' ]
     types: [ completed ]
 
 permissions:
@@ -14,8 +14,7 @@ permissions:
   pull-requests: write
 
 defaults:
-  run:
-    shell: bash
+  run: { shell: bash }
 
 env:
   COMMENT_MARKER: '<!-- hotpath-comment -->'
@@ -46,24 +45,26 @@ jobs:
           set -euo pipefail
           PR_NUMBER=$(cat /tmp/metrics/pr_number.txt)
           CASE=$(cat /tmp/metrics/case.txt)
-          {
-            echo "<details><summary>Hotpath performance — <code>$CASE</code></summary>"
-            echo
-            if [ -s /tmp/metrics/base.json ]; then
-              hotpath-utils profile-pr \
-                --head-metrics /tmp/metrics/head.json \
-                --base-metrics /tmp/metrics/base.json \
-                --pr-number "$PR_NUMBER" \
-                --benchmark-id "$CASE" \
-                --dry-run
-            else
-              echo "No base profile to compare against (the base branch predates hotpath). Head-only run recorded."
-            fi
-            echo
-            echo "</details>"
-            echo
-            echo "$COMMENT_MARKER"
-          } > /tmp/comment.md
+          cat > /tmp/comment.md <<EOF
+          <details><summary>Hotpath performance — <code>$CASE</code></summary>
+
+          EOF
+          if [ -s /tmp/metrics/base.json ]; then
+            hotpath-utils profile-pr \
+              --head-metrics /tmp/metrics/head.json \
+              --base-metrics /tmp/metrics/base.json \
+              --pr-number "$PR_NUMBER" \
+              --benchmark-id "$CASE" \
+              --dry-run >> /tmp/comment.md
+          else
+            echo "No base profile to compare against (the base branch predates hotpath). Head-only run recorded." >> /tmp/comment.md
+          fi
+          cat >> /tmp/comment.md <<EOF
+
+          </details>
+
+          $COMMENT_MARKER
+          EOF
 
       - name: Post or update PR comment
         env:

@@ -10,8 +10,7 @@ on:
         default: '600'
 
 defaults:
-  run:
-    shell: bash
+  run: { shell: bash }
 
 # A newer nightly run supersedes an in-flight one on the same ref.
 concurrency:

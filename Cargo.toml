@@ -28,9 +28,9 @@ hotpath = { version = "0.22.0", optional = true }
 thiserror = "2"
 
 [dev-dependencies]
-criterion = "0.8.2"
 geo = "0.33.1"
 geojson = { version = "1.0.0", features = ["geo-types"] }
+gungraun = "0.19"
 insta = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 test_each_file = "0.3.7"
@@ -39,6 +39,10 @@ wkt = "0.14"
 # Release build with debug symbols, used by `just flamegraph-*` for readable profiles.
 [profile.profiling]
 inherits = "release"
+debug = true
+
+# gungraun (Valgrind/Callgrind) benchmarks need debug info to map instruction counts to source.
+[profile.bench]
 debug = true
 
 [lints.rust]

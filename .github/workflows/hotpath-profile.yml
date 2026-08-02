@@ -8,31 +8,29 @@ name: Hotpath Profile
 on:
   pull_request:
     paths:
-      - "src/**"
-      - "examples/**"
-      - "Cargo.toml"
-      - ".github/workflows/hotpath.yml"
+      - 'src/**'
+      - 'examples/**'
+      - 'Cargo.toml'
+      - '.github/workflows/hotpath.yml'
 
 permissions:
   contents: read
 
 defaults:
-  run:
-    shell: bash
+  run: { shell: bash }
 
 env:
   # The `examples/profile.rs` case to profile and how many iterations to run it for. `big-all-multi`
   # is the primary SlicerAll path (many tiles); allocation counts are deterministic, timing is not.
   CASE: big-all-multi
-  ITERS: "5000"
+  ITERS: '5000'
 
 jobs:
   profile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
