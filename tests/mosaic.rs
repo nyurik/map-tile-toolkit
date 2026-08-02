@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use geo_types::Coord;
 use map_tile_toolkit::{Mosaic, TileError, TileId};
 
-use crate::support::{Cfg, feature_line, permutations};
+use crate::support::{Cfg, permutations};
 
 mod support;
 
@@ -64,29 +64,21 @@ fn edge_set(runs: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
 #[test]
 fn every_permutation_reassembles_all_fixtures() {
     let polylines = all_fixture_polylines();
-
-    // Reassembly is a pure function of the edge set, so every insertion order — and both buffer sizes —
-    // yields byte-identical GeoJSON. `allow_duplicates!` lets all those runs assert against one shared
-    // `reassembled.geojson` snapshot; the single block spans both `validate_mosaic` calls.
-    insta::allow_duplicates! {
-        for (label, cfg) in [
-            ("buffer 0", support::grid()),
-            ("buffer 5", support::grid_buffered()),
-        ] {
-            validate_mosaic(label, &cfg, &polylines);
-        }
+    for (label, cfg) in [
+        ("buffer 0", support::grid()),
+        ("buffer 5", support::grid_buffered()),
+    ] {
+        validate_mosaic(label, &cfg, &polylines);
     }
 }
 
 /// Slice all fixtures into per-tile (local-frame) runs — exactly what a caller feeds back — then check
-/// that **every** tile-insertion order reassembles the exact same features (order-independence), that
-/// those features match the input (edge set), and that the result matches the shared
-/// `reassembled.geojson` snapshot.
+/// that **every** tile-insertion order reassembles the exact same features (order-independence) and
+/// that those features match the input by directed-edge set.
 ///
-/// Reassembly is a pure function of the edge set, so all orders (and both buffers) produce identical
-/// features; the per-order check is a cheap equality against the first, and the snapshot is asserted
-/// once here. Must be called inside an `insta::allow_duplicates!` block, so both buffer sizes can
-/// assert that one shared snapshot.
+/// Correctness is asserted directly (`reassembled == input`), not against a golden file: reassembly is
+/// a pure function of the edge set, so all orders (and both buffers) produce identical features, and the
+/// edge-set equality is invariant to how `stitch` happens to split/join chains at shared junctions.
 fn validate_mosaic(label: &str, cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) {
     let tiles = support::slice_all_runs(cfg, polylines);
     assert!(!tiles.is_empty(), "{label}: fixtures produced no tiles");
@@ -117,36 +109,13 @@ fn validate_mosaic(label: &str, cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) {
         }
     }
 
-    // Correctness against the input, then the golden GeoJSON. Both buffers reach here with identical
-    // features, so both assert the one snapshot (the `allow_duplicates!` block permits the repeat).
+    // Correctness against the input: the reassembled geometry is the combined input geometry.
     let features = canonical.expect("at least one permutation");
     assert_eq!(
         edge_set(&features),
         edge_set(polylines),
         "{label}: reassembly did not reconstruct the combined input geometry"
     );
-    insta::with_settings!(
-        { snapshot_path => "snapshots-mosaic", prepend_module_to_snapshot => false },
-        { insta::assert_binary_snapshot!("reassembled.geojson", reassembly_geojson(polylines, &features)); }
-    );
-}
-
-/// Serialize a reassembly as a GeoJSON `FeatureCollection`, mirroring the clip snapshots: the original
-/// input polylines in gray, then every reassembled feature colored by parity. Reassembled features are
-/// sorted by their coordinates so the file is stable and easy to eyeball — each colored line must lie
-/// exactly on the gray input, since reassembly is in the input's own global space.
-fn reassembly_geojson(input: &[Vec<Coord<i32>>], features: &[Vec<Coord<i32>>]) -> Vec<u8> {
-    let mut fc: Vec<_> = input
-        .iter()
-        .map(|line| support::input_feature(line))
-        .collect();
-
-    let mut sorted = features.to_vec();
-    sorted.sort_by_key(|run| run.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>());
-    for (i, run) in sorted.iter().enumerate() {
-        fc.push(feature_line(run, &format!("feature {i}")));
-    }
-    support::feature_collection_bytes(fc)
 }
 
 // --- Behaviors this valid-data file doesn't cover: payload conflicts live in mvalue.rs, membership

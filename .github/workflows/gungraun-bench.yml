@@ -58,7 +58,7 @@ jobs:
         run: |
           git checkout ${{ github.event.pull_request.base.sha }}
           cargo bench --bench slicing --no-run 2>/dev/null || true
-          cargo bench --bench slicing -- --save-baseline base 2>&1 \
+          cargo bench --bench slicing -- --save-baseline=base 2>&1 \
             | tee /tmp/metrics/base.log \
             || echo "base has no gungraun bench; head-only" | tee /tmp/metrics/base.log
 
@@ -68,7 +68,7 @@ jobs:
         run: |
           git checkout ${{ github.sha }}
           cargo bench --bench slicing --no-run 2>/dev/null || true
-          cargo bench --bench slicing -- --baseline base 2>&1 | tee /tmp/metrics/head_raw.log
+          cargo bench --bench slicing -- --baseline=base 2>&1 | tee /tmp/metrics/head_raw.log
           # Drop cargo's compile/progress chatter: keep from the first gungraun benchmark line onward.
           sed -n '/slicing::/,$p' /tmp/metrics/head_raw.log > /tmp/metrics/head.log \
             || cp /tmp/metrics/head_raw.log /tmp/metrics/head.log
