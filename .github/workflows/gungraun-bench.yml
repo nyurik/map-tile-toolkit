@@ -1,0 +1,83 @@
+name: Gungraun Bench
+
+# Measures the slicing benchmarks' **CPU instruction counts** (gungraun / Valgrind Callgrind) for the
+# base and head of a PR. Read-only: it only uploads the captured results as an artifact. A separate,
+# write-capable "Gungraun Comment" workflow posts them to the PR, so this job never holds a write token
+# and is safe to run on fork PRs.
+#
+# This is informational — it reports instruction deltas, it does NOT gate merges. No regression limits
+# are configured, so gungraun always exits 0; the run steps are `continue-on-error` as a belt-and-braces
+# so a Valgrind/runner hiccup can't red-X the PR. (Don't mark this a required status check.)
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'tests/support/**'
+      - 'Cargo.toml'
+      - '.github/workflows/gungraun-bench.yml'
+
+permissions: { contents: read }
+
+defaults:
+  run: { shell: bash }
+
+env:
+  # Keep the captured logs free of ANSI colour so the PR comment renders cleanly.
+  CARGO_TERM_COLOR: never
+  NO_COLOR: '1'
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Install version-matched gungraun-runner
+        run: |
+          set -euo pipefail
+          VER=$(cargo metadata --format-version 1 \
+            | jq -r '.packages[] | select(.name == "gungraun") | .version' | head -n1)
+          echo "gungraun dev-dependency is $VER — installing the matching runner"
+          cargo install gungraun-runner --version "=$VER"
+
+      - run: mkdir -p /tmp/metrics
+
+      # Base baseline. On the PR that introduces this bench the base still has the old (criterion) bench,
+      # so no gungraun baseline is written and the head run below just reports absolute counts.
+      - name: Base baseline
+        continue-on-error: true
+        run: |
+          git checkout ${{ github.event.pull_request.base.sha }}
+          cargo bench --bench slicing --no-run 2>/dev/null || true
+          cargo bench --bench slicing -- --save-baseline base 2>&1 \
+            | tee /tmp/metrics/base.log \
+            || echo "base has no gungraun bench; head-only" | tee /tmp/metrics/base.log
+
+      # Head: instruction counts, diffed against the base baseline when one exists.
+      - name: Head instruction counts
+        continue-on-error: true
+        run: |
+          git checkout ${{ github.sha }}
+          cargo bench --bench slicing --no-run 2>/dev/null || true
+          cargo bench --bench slicing -- --baseline base 2>&1 | tee /tmp/metrics/head_raw.log
+          # Drop cargo's compile/progress chatter: keep from the first gungraun benchmark line onward.
+          sed -n '/slicing::/,$p' /tmp/metrics/head_raw.log > /tmp/metrics/head.log \
+            || cp /tmp/metrics/head_raw.log /tmp/metrics/head.log
+
+      - name: Save PR metadata
+        run: echo "${{ github.event.pull_request.number }}" > /tmp/metrics/pr_number.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gungraun-metrics
+          path: /tmp/metrics/
+          retention-days: 1

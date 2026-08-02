@@ -7,6 +7,8 @@ just := quote(just_executable())
 binstall_args := if env('CI', '') != '' {'--no-confirm --no-track --disable-telemetry'} else {''}
 # location of the coverage output, used by CI
 coverage_lcov := 'target/llvm-cov/lcov.info'
+# All targets except benches (running gungraun benches needs Valgrind; see `bench`/`bench-check`).
+non_bench_targets := '--lib --bins --tests --examples'
 
 # if running in CI, treat warnings as errors by setting CARGO_BUILD_WARNINGS to 'deny' unless it is already set
 # Use `CI=true just ci-test` to run the same tests as in GitHub CI.
@@ -18,9 +20,11 @@ export RUST_BACKTRACE := env('RUST_BACKTRACE', if ci_mode == '1' {'1'} else {'0'
 @_default:
     {{just}} --list
 
-# Run slicing benchmarks; optional criterion filter, e.g. `just bench big`, `just bench single`
+# Run slicing benchmarks (gungraun/Valgrind instruction counts); needs `valgrind` + `cargo install
+# gungraun-runner`. Optional substring filter, e.g. `just bench big`, `just bench single`, `just bench
+# all` (passed to gungraun as the glob `*<filter>*` over benchmark module paths).
 bench filter='':
-    cargo bench {{if filter != '' {'-- ' + filter} else {''} }}
+    cargo bench {{ if filter != '' { "-- '*" + filter + "*'" } else { '' } }}
 
 # Run only the large-polyline benchmarks (many / a few / a single tile)
 bench-big: (bench 'big')
@@ -81,7 +85,7 @@ ci-coverage: env-info && \
     mkdir -p {{quote(parent_directory(coverage_lcov))}}
 
 # Run all tests as expected by CI
-ci-test: env-info test-fmt clippy test test-doc (bench '--test') && assert-git-is-clean
+ci-test: env-info test-fmt clippy test test-doc bench-check && assert-git-is-clean
 
 # Compile default features with minimal dependencies on the configured MSRV
 ci-test-msrv:
@@ -107,7 +111,7 @@ coverage:  (_coverage '--open')
 # Clean, collect, and aggregate coverage using the requested report arguments
 _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
     cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --workspace --all-features --all-targets
+    cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
     if rustup toolchain list | grep nightly &> /dev/null; then cargo +nightly llvm-cov --no-report --doctests --workspace --all-features; fi
     cargo llvm-cov report --include-build-script {{report_args}}
 
@@ -143,7 +147,7 @@ fmt-toml *args:  (cargo-install 'cargo-sort')
     cargo sort --workspace --grouped {{args}}
 
 # Reformat all GeoJSON tests
-fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
+fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm') (assert-cmd 'jq')
     #!/usr/bin/env bash
     set -euo pipefail
     tmp="$(mktemp -d)"
@@ -156,9 +160,19 @@ fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm')
       writeFileSync(p, stringify(JSON.parse(readFileSync(p, 'utf8'))) + '\n');
     console.log(`Formatted ${process.argv.length - 2} GeoJSON files`);
     EOF
+    # Round every number nested anywhere inside features[].geometry.coordinates to an integer.
+    round_coords() {
+      for p in "$@"; do
+        jq '.features[].geometry.coordinates |= walk(if type == "number" then round else . end)' "$p" > "$p.tmp"
+        mv "$p.tmp" "$p"
+      done
+    }
+    round_coords "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
+    round_coords "{{justfile_directory()}}"/tests/polygons/fixtures/*.geojson
     # The shell expands the file list (absolute paths); run node from the temp dir so the bare import
     # resolves against the throwaway install.
-    (cd "$tmp" && node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson)
+    cd "$tmp"
+    node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')
@@ -190,10 +204,14 @@ release *args='':  (cargo-install 'release-plz')
 semver *args:  (cargo-install 'cargo-semver-checks')
     cargo semver-checks --all-features {{args}}
 
-# Run all tests
+# Run all tests (every target except benches — running gungraun benches needs Valgrind; see `bench`)
 test:
-    cargo test --workspace --all-features --all-targets
+    cargo test --workspace --all-features {{non_bench_targets}}
     cargo test --doc --workspace --all-features
+
+# Compile-check the benchmarks without running them
+bench-check:
+    cargo bench --no-run --workspace --all-features
 
 # Test documentation generation
 test-doc:  (docs '')

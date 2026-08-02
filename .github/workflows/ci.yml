@@ -59,7 +59,7 @@ jobs:
   # This job checks if any of the previous jobs failed or were canceled.
   # This approach also allows some jobs to be skipped if they are not needed.
   ci-passed:
-    permissions: {}
+    permissions: { }
     needs: [ test, test-msrv ]
     if: always()
     runs-on: ubuntu-latest
