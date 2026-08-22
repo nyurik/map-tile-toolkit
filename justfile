@@ -181,6 +181,7 @@ fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm') (assert-cmd 'jq')
     # resolves against the throwaway install.
     cd "$tmp"
     node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
+    node fmt.mjs "{{justfile_directory()}}"/tests/polygons/fixtures/*.geojson
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')
