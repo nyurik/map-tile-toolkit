@@ -110,10 +110,18 @@ coverage:  (_coverage '--open')
 
 # Clean, collect, and aggregate coverage using the requested report arguments
 _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
-    cargo llvm-cov clean --workspace
-    cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
-    if rustup toolchain list | grep nightly &> /dev/null; then cargo +nightly llvm-cov --no-report --doctests --workspace --all-features; fi
-    cargo llvm-cov report --include-build-script {{report_args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if rustup toolchain list | grep nightly &> /dev/null; then
+        cargo +nightly llvm-cov clean --workspace
+        cargo +nightly llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
+        cargo +nightly llvm-cov --no-report --doctests --workspace --all-features
+        cargo +nightly llvm-cov report --include-build-script {{report_args}}
+    else
+        cargo llvm-cov clean --workspace
+        cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
+        cargo llvm-cov report --include-build-script {{report_args}}
+    fi
 
 # Build and open code documentation
 docs *args='--open':
