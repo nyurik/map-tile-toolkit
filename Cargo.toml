@@ -24,13 +24,13 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
 geo-types = "0.7.19"
-hotpath = { version = "0.23.1", optional = true }
+hotpath = { version = "0.26.1", optional = true }
 thiserror = "2"
 
 [dev-dependencies]
 geo = "0.33.1"
 geojson = { version = "1.0.0", features = ["geo-types"] }
-gungraun = "0.19"
+gungraun = "0.20"
 insta = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 test_each_file = "0.3.7"
