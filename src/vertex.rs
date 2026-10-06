@@ -66,3 +66,31 @@ impl<M: Copy + PartialEq> Vertex for Measured<M> {
         Self { position, ..self }
     }
 }
+
+/// A [`Vertex`] the **polygon** slicer can also synthesize at a chosen position, for the clip-boundary
+/// corner vertices it must insert to keep a clipped ring closed.
+///
+/// These synthetic vertices live strictly outside the tile's buffered box (so they are invisible to a
+/// renderer that clips to the tile) and are dropped when [`Mosaic`](crate::Mosaic) reassembles, so
+/// their payload is pure filler — hence `Default`. Kept separate from [`Vertex`] so the polyline path
+/// never sees the extra bound.
+pub trait PolyVertex: Vertex {
+    /// A synthetic vertex at `position`, carrying a default (filler) payload.
+    #[must_use]
+    fn synthetic_at(position: Coord<i32>) -> Self;
+}
+
+impl PolyVertex for Coord<i32> {
+    fn synthetic_at(position: Coord<i32>) -> Self {
+        position
+    }
+}
+
+impl<M: Copy + PartialEq + Default> PolyVertex for Measured<M> {
+    fn synthetic_at(position: Coord<i32>) -> Self {
+        Self {
+            position,
+            m: M::default(),
+        }
+    }
+}
