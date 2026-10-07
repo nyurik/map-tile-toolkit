@@ -8,8 +8,8 @@
 [![CI build status](https://github.com/nyurik/map-tile-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/nyurik/map-tile-toolkit/actions)
 [![Codecov](https://img.shields.io/codecov/c/github/nyurik/map-tile-toolkit)](https://app.codecov.io/gh/nyurik/map-tile-toolkit)
 
-Clip integer **polylines** into per-tile pieces on an integer tile
-grid, keeping the geometry's original vertices. No new vertexes are ever created. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. The tile may optionally include a buffer of `[0..extent/2)` size, which increases the number of vertices shared between neighboring tiles.
+Clip integer **polylines** and **polygons** into per-tile pieces on an integer tile
+grid, keeping the geometry's original vertices. No new vertexes are ever created on a line. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. The tile may optionally include a buffer of `[0..extent/2)` size, which increases the number of vertices shared between neighboring tiles. Polygon rings are closed with synthetic corners strictly outside the buffered tile (see [Polygons](#polygons)).
 
 ## Usage
 
@@ -99,6 +99,66 @@ fn example() -> Result<(), TileError> {
 }
 ```
 
+### Polygons
+
+`PolygonSlicerOne::new(extent, buffer, tile)` clips polygons (an exterior ring plus holes) to one
+tile. `PolygonSlicerAll::new(extent, buffer)` slices whole **multipolygon** features into every tile
+they reach, and yields for each tile exactly what `PolygonSlicerOne` yields there. Original vertices
+are kept; where a ring leaves the tile, the gap is bridged by synthetic corners just outside the
+buffered box, so each ring stays closed and correctly wound but is valid only inside the box — fine
+for renderers that clip to the tile (MVT), not for consumers that need OGC-valid output.
+`PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
+
+Tiles a feature covers entirely are never materialized: `PolygonSlicerAll` reports them as
+`FillRun { y, x: Range<i32> }` row spans, so a polygon covering 10⁸ tiles costs one run per row, and
+time and memory grow with its perimeter rather than its area.
+
+Slicing preserves each ring's winding. `signed_area_2x` gives a ring's exact orientation, so
+normalize it once per feature if the output needs a fixed convention. MVT needs exteriors with a
+positive area in its y-down tile coordinates, and holes with a negative one.
+
+```rust
+use geo_types::coord;
+use map_tile_toolkit::{PolygonSlicerAll, TileError, signed_area_2x};
+
+fn example() -> Result<(), TileError> {
+    let mut exterior = vec![
+        coord! { x: 5, y: 5 }, coord! { x: 120, y: 5 },
+        coord! { x: 120, y: 120 }, coord! { x: 5, y: 120 },
+    ];
+    let mut hole = vec![
+        coord! { x: 40, y: 40 }, coord! { x: 40, y: 60 },
+        coord! { x: 60, y: 60 }, coord! { x: 60, y: 40 },
+    ];
+    // MVT winding: exterior positive, holes negative.
+    if signed_area_2x(&exterior) < 0 { exterior.reverse(); }
+    if signed_area_2x(&hole) > 0 { hole.reverse(); }
+
+    let mut slicer = PolygonSlicerAll::new(25, 2)?;
+    // One feature is a multipolygon: each polygon is its rings, exterior first.
+    slicer.add_feature([[exterior.as_slice(), hole.as_slice()]])?;
+    for feature in slicer.iter_features() {
+        // Tiles a ring edge touches: tile → polygons → rings
+        // (each ring closed, in the tile's local frame).
+        for tile in feature.iter_tiles() {
+            for polygon in tile.iter_polygons() {
+                for ring in polygon.iter_rings() {
+                    let _ = (tile.tile_id(), ring.is_hole(), ring.vertices());
+                }
+            }
+        }
+        // Tiles entirely inside the feature, as row spans.
+        for run in feature.iter_fill_runs() {
+            let _ = (run.y, run.x); // tiles (x, y) for x in run.x
+        }
+    }
+    Ok(())
+}
+```
+
+A per-worker slicer can be reused across features: `clear()` keeps every buffer's capacity, so it
+stops allocating once warmed up. `add_feature` is atomic, like the polyline slicers.
+
 ### Payloads
 
 The slicers carry data on two independent axes: a **per-vertex** payload (the `Vertex` type) and a
@@ -177,7 +237,10 @@ full round-trip emitting per-tile `GeoJSON` with ids and properties preserved.
 This project uses [just](https://github.com/casey/just#readme) (`cargo install just`); run `just` for
 the command list and `just test` to test. Tests are data-driven: each `tests/polylines/fixtures/*.geojson`
 polyline is sliced by both paths (asserted byte-identical) and snapshotted as a `.geojson`
-`FeatureCollection` (original line plus every per-tile piece) that renders on a map. Run `just bless`
+`FeatureCollection` (original line plus every per-tile piece) that renders on a map. Polygon fixtures
+in `tests/polygons/fixtures/` are snapshotted per tile by `PolygonSlicerOne` (`snapshots*/`) and by
+`PolygonSlicerAll` (`snapshots-all*/`, with fill runs drawn as green rectangles), and every
+`PolygonSlicerAll` tile is checked against `PolygonSlicerOne`. Run `just bless`
 to regenerate snapshots. To inspect them, load `tests/polylines/fixtures/grid.geojson` (the tile grid, offset
 0.5px to sit between integer coordinates) and the `tests/polylines/snapshots/*.geojson` files in QGIS or any
 `GeoJSON` viewer.

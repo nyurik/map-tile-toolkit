@@ -1,5 +1,6 @@
-//! The public **polygon** slicing API. Currently [`PolygonSlicerOne`] (one fixed tile); the
-//! all-tiles variant and `Mosaic` reassembly are layered on the same [`clip_ring`] engine (see
+//! The single-tile **polygon** slicer, [`PolygonSlicerOne`], over the [`clip_ring`] engine; the
+//! all-tiles [`PolygonSlicerAll`](crate::PolygonSlicerAll) produces identical rings per tile from the
+//! same ring-closing core, and [`PolygonMosaic`](crate::PolygonMosaic) reassembles them (see
 //! `docs/polygon-slicer.md`).
 //!
 //! A polygon is an exterior ring plus zero or more interior rings (holes). Each ring is clipped to
