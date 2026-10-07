@@ -55,7 +55,9 @@ flamegraph-all: \
         (flamegraph 'big-all-single') \
         (flamegraph 'big-one-multi') \
         (flamegraph 'big-one-few') \
-        (flamegraph 'big-one-single')
+        (flamegraph 'big-one-single') \
+        (flamegraph 'poly-all-multi') \
+        (flamegraph 'poly-all-huge')
 
 # Fuzz a target with cargo-fuzz (needs nightly), e.g. `just fuzz slice_equivalence -- -max_total_time=60`
 fuzz target='slice_equivalence' *args:  (cargo-install 'cargo-fuzz')

@@ -55,14 +55,7 @@ fn all_tiles(polygons: &[FixturePolygon], extent: u32, buffer: u16) -> Sliced {
 }
 
 fn rings_of(polygons: &[FixturePolygon]) -> Vec<Vec<&[Coord<i32>]>> {
-    polygons
-        .iter()
-        .map(|p| {
-            std::iter::once(p.exterior.as_slice())
-                .chain(p.holes.iter().map(Vec::as_slice))
-                .collect()
-        })
-        .collect()
+    polygons.iter().map(support::rings).collect()
 }
 
 /// Gather every feature's output, checking the structural promises along the way: edge tiles and
@@ -263,13 +256,7 @@ fn edge_set<'a>(
 /// (fill runs carry no original edge, so they are not needed).
 fn fixture_reassembles(path: &Path) {
     let features = support::load_polygon_features(path);
-    let input: Vec<&[Coord<i32>]> = features
-        .iter()
-        .flatten()
-        .flat_map(|p| {
-            std::iter::once(p.exterior.as_slice()).chain(p.holes.iter().map(Vec::as_slice))
-        })
-        .collect();
+    let input: Vec<&[Coord<i32>]> = features.iter().flatten().flat_map(support::rings).collect();
     for buffer in [0, 5] {
         let mut all = PolygonSlicerAll::<Coord<i32>>::new(EXTENT, buffer).expect("config");
         for f in &features {
@@ -503,14 +490,11 @@ fn random_star_multipolygons_match_one() {
 fn huge_polygon_fills_by_runs() {
     const N: i32 = 1 << 14;
     const E: i32 = 4096;
-    let (lo, hi) = (100, N * E - 100);
-    let exterior = [(lo, lo), (hi, lo), (hi, hi), (lo, hi)].map(|(x, y)| Coord { x, y });
-    // Hole edges sit mid-tile in columns/rows N/2 ± 10, so it has 19 × 19 tiles strictly inside.
-    let (h0, h1) = ((N / 2 - 10) * E + 2000, (N / 2 + 10) * E + 2000);
-    let hole = [(h0, h0), (h0, h1), (h1, h1), (h1, h0)].map(|(x, y)| Coord { x, y });
-
+    // The exterior sits 100 units inside the outer tiles; the hole's edges sit mid-tile in
+    // columns/rows N/2 ± 10, so it has 19 × 19 tiles strictly inside.
+    let polygon = support::huge_square();
     let mut all = PolygonSlicerAll::<Coord<i32>>::new(E as u32, 64).expect("config");
-    all.add_feature([[&exterior[..], &hole[..]]])
+    all.add_feature([support::rings(&polygon)])
         .expect("huge polygon slices");
     let feature = all.iter_features().next().expect("one feature");
 
@@ -527,10 +511,6 @@ fn huge_polygon_fills_by_runs() {
 
     // Spot-check against the single-tile oracle: an edge tile of each ring, a filled tile, and a
     // tile inside the hole.
-    let polygon = FixturePolygon {
-        exterior: exterior.to_vec(),
-        holes: vec![hole.to_vec()],
-    };
     let one = |tile| one_tile(std::slice::from_ref(&polygon), E as u32, 64, tile);
     for tile in [
         TileId::new(0, 0),

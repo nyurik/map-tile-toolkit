@@ -12,7 +12,7 @@ use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
-use map_tile_toolkit::{FillRun, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{FillRun, PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileId};
 use serde_json::json;
 
 pub const EXTENT: u32 = 25;
@@ -37,6 +37,22 @@ impl Cfg {
     #[must_use]
     pub fn one(self, tile: TileId) -> SlicerOne<Coord<i32>> {
         SlicerOne::new(self.extent, self.buffer, tile)
+            .expect("invalid slicer config in test support")
+    }
+}
+
+impl Cfg {
+    /// A fresh all-tiles polygon slicer for this config (panics on a bad literal config).
+    #[must_use]
+    pub fn poly_all(self) -> PolygonSlicerAll<Coord<i32>> {
+        PolygonSlicerAll::new(self.extent, self.buffer)
+            .expect("invalid slicer config in test support")
+    }
+
+    /// A fresh single-tile polygon slicer bound to `tile` (panics on a bad literal config).
+    #[must_use]
+    pub fn poly_one(self, tile: TileId) -> PolygonSlicerOne<Coord<i32>> {
+        PolygonSlicerOne::new(self.extent, self.buffer, tile)
             .expect("invalid slicer config in test support")
     }
 }
@@ -259,6 +275,61 @@ pub fn big_polyline() -> Geometry<i32> {
         }
     }
     Geometry::LineString(LineString(coords))
+}
+
+/// A large, deterministic polygon for benchmarking: a jagged blob of ~3.6k vertices (radius
+/// 150–200 around `(220, 270)`, so roughly the [`big_polyline`] footprint) with a ~900-vertex hole
+/// — many vertices, many edge tiles, and a wide fully covered interior.
+#[must_use]
+pub fn big_polygon() -> FixturePolygon {
+    let blob = |n: i32, (cx, cy): (f64, f64), r: f64, jitter: f64| -> Vec<Coord<i32>> {
+        (0..n)
+            .map(|k| {
+                let angle = std::f64::consts::TAU * f64::from(k) / f64::from(n);
+                let radius = r + jitter * f64::from((k * 37) % 50) / 50.0;
+                Coord {
+                    x: (cx + radius * angle.cos()).round() as i32,
+                    y: (cy + radius * angle.sin()).round() as i32,
+                }
+            })
+            .collect()
+    };
+    let mut hole = blob(900, (240.0, 250.0), 40.0, 12.0);
+    hole.reverse(); // holes wind opposite to the exterior
+    FixturePolygon {
+        exterior: blob(3600, (220.0, 270.0), 150.0, 50.0),
+        holes: vec![hole],
+    }
+}
+
+/// A z14-like "ocean": a square covering 16384 × 16384 tiles of extent 4096 (2^28 tiles) with a
+/// 21 × 21-tile hole, so nearly every tile is fully covered.
+#[must_use]
+pub fn huge_square() -> FixturePolygon {
+    const N: i32 = 1 << 14;
+    const E: i32 = 4096;
+    let ring = |lo: i32, hi: i32| {
+        vec![
+            Coord { x: lo, y: lo },
+            Coord { x: hi, y: lo },
+            Coord { x: hi, y: hi },
+            Coord { x: lo, y: hi },
+        ]
+    };
+    let mut hole = ring((N / 2 - 10) * E + 2000, (N / 2 + 10) * E + 2000);
+    hole.reverse();
+    FixturePolygon {
+        exterior: ring(100, N * E - 100),
+        holes: vec![hole],
+    }
+}
+
+/// The rings of a polygon, exterior first — the per-polygon input [`PolygonSlicerAll`] takes.
+#[must_use]
+pub fn rings(p: &FixturePolygon) -> Vec<&[Coord<i32>]> {
+    std::iter::once(p.exterior.as_slice())
+        .chain(p.holes.iter().map(Vec::as_slice))
+        .collect()
 }
 
 /// Convert a polyline geometry to integer coordinates (fixtures use whole numbers).
