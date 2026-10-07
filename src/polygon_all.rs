@@ -224,14 +224,29 @@ impl<V: PolyVertex> Input<V> {
     }
 }
 
+/// A horizontal run of tiles lying **entirely inside** a feature: row `y`, columns `x.start..x.end`.
+///
+/// No ring edge touches these tiles' buffered boxes, so each is uniformly covered — render it as a
+/// solid fill of its buffered box (where [`PolygonSlicerOne`](crate::PolygonSlicerOne) emits one
+/// all-synthetic box ring per covering polygon). Runs are maximal, never overlap the feature's edge
+/// tiles, and come in row-major order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FillRun {
+    /// The tile row.
+    pub y: i32,
+    /// The tile columns, end-exclusive.
+    pub x: Range<i32>,
+}
+
 /// Where each feature's geometry lands, in flat arenas (no per-tile allocations): tile-local ring
-/// vertices, ring/polygon/tile end offsets.
+/// vertices, ring/polygon/tile end offsets, and fill runs.
 #[derive(Debug, Clone)]
 struct Pieces<V> {
     verts: Vec<V>,
     ring_ends: Vec<u32>,
     poly_ends: Vec<u32>,
     tiles: Vec<TileEntry>,
+    runs: Vec<FillRun>,
 }
 
 /// One edge tile of one feature: its id and the end of its polygons in `poly_ends`.
@@ -242,12 +257,13 @@ struct TileEntry {
 }
 
 /// Arena lengths before a feature, to roll back to on error.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Savepoint {
     verts: usize,
     ring_ends: usize,
     poly_ends: usize,
     tiles: usize,
+    runs: usize,
 }
 
 impl<V> Pieces<V> {
@@ -257,6 +273,7 @@ impl<V> Pieces<V> {
             ring_ends: self.ring_ends.len(),
             poly_ends: self.poly_ends.len(),
             tiles: self.tiles.len(),
+            runs: self.runs.len(),
         }
     }
 
@@ -265,15 +282,27 @@ impl<V> Pieces<V> {
         self.ring_ends.truncate(s.ring_ends);
         self.poly_ends.truncate(s.poly_ends);
         self.tiles.truncate(s.tiles);
+        self.runs.truncate(s.runs);
     }
 
     fn clear(&mut self) {
-        self.rollback(Savepoint {
-            verts: 0,
-            ring_ends: 0,
-            poly_ends: 0,
-            tiles: 0,
-        });
+        self.rollback(Savepoint::default());
+    }
+
+    /// Record covered tiles `start..end` of row `y`, extending the row's previous run when they abut.
+    /// `row_runs` is where this row's runs begin, so runs never merge across rows or features.
+    fn fill(&mut self, y: i32, start: i64, end: i64, row_runs: usize) -> Result<(), TileError> {
+        if start >= end {
+            return Ok(());
+        }
+        let start = i32::try_from(start).map_err(|_| TileError::Overflow)?;
+        let end = i32::try_from(end).map_err(|_| TileError::Overflow)?;
+        let row_len = self.runs.len() - row_runs;
+        match self.runs.last_mut() {
+            Some(run) if row_len > 0 && run.x.end == start => run.x.end = end,
+            _ => self.runs.push(FillRun { y, x: start..end }),
+        }
+        Ok(())
     }
 }
 
@@ -429,7 +458,9 @@ impl Scratch {
     }
 
     /// One tile row: walk its edge tiles left to right, retiring each crossing from the winding rays
-    /// (and toggling its ring's containment) once the sweep passes it.
+    /// (and toggling its ring's containment) once the sweep passes it. Between consecutive crossings
+    /// the containment state is constant, so while some polygon covers it, every tile there that is
+    /// not an edge tile is filled — one run, however many tiles.
     fn sweep_row<V: PolyVertex>(
         &mut self,
         grid: Grid,
@@ -444,23 +475,37 @@ impl Scratch {
         self.by_x.sort_unstable_by_key(|&i| cs[i as usize].right_of);
         fenwick_build(&mut self.fenwick, cs.iter().map(|c| c.sign()));
 
+        let row_runs = out.runs.len();
         let (mut k, mut h) = (0, 0);
+        // The first tile not yet emitted or filled.
+        let mut next = i64::MIN;
         loop {
-            // Tiles up to `bound` all see the same crossings on their winding rays.
+            // Tiles `next..=bound` all see the same crossings on their winding rays.
             let bound = self
                 .by_x
                 .get(k)
                 .map_or(i64::MAX, |&i| cs[i as usize].right_of);
+            let covered = !self.covering.is_empty();
             while let Some(hit) = hits.get(h)
                 && i64::from(hit.tx) <= bound
             {
+                let tx = i64::from(hit.tx);
+                if covered {
+                    out.fill(ty, next, tx, row_runs)?;
+                }
                 let end = h + hits[h..].partition_point(|x| x.tx == hit.tx);
                 self.tile(grid, input, TileId::new(hit.tx, ty), &hits[h..end], cs, out)?;
-                h = end;
+                (h, next) = (end, tx + 1);
             }
             if k == self.by_x.len() {
+                // Past every crossing each ring's parity is even again: nothing covers.
                 return Ok(());
             }
+            // `bound` is a crossing's `right_of` (|·| ≤ 2^32), so `+ 1` cannot overflow.
+            if covered {
+                out.fill(ty, next, bound + 1, row_runs)?;
+            }
+            next = bound + 1;
             // Tiles past `bound` have these crossings on their left.
             while let Some(&i) = self.by_x.get(k)
                 && cs[i as usize].right_of == bound
@@ -660,6 +705,14 @@ fn excursion_winding(
     }
 }
 
+/// One recorded feature: the ends of its edge tiles and fill runs in [`Pieces`], and its attribute.
+#[derive(Debug, Clone)]
+struct FeatureEntry<A> {
+    tiles_end: u32,
+    runs_end: u32,
+    attr: A,
+}
+
 /// Slices integer **multipolygon** features into every tile they reach, keeping original vertices.
 ///
 /// The polygon counterpart to [`SlicerAll`](crate::SlicerAll), and the all-tiles counterpart to
@@ -680,8 +733,8 @@ fn excursion_winding(
 pub struct PolygonSlicerAll<V: PolyVertex = Coord<i32>, A = ()> {
     grid: Grid,
     pieces: Pieces<V>,
-    /// Per recorded feature: the end of its tiles in `pieces.tiles`, and its attribute.
-    features: Vec<(u32, A)>,
+    /// Per recorded feature: where its tiles and fill runs end, and its attribute.
+    features: Vec<FeatureEntry<A>>,
     input: Input<V>,
     scratch: Scratch,
 }
@@ -702,6 +755,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
                 ring_ends: Vec::new(),
                 poly_ends: Vec::new(),
                 tiles: Vec::new(),
+                runs: Vec::new(),
             },
             features: Vec::new(),
             input: Input {
@@ -753,14 +807,23 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
         self.scratch.route(self.grid, &self.input)?;
         self.scratch.index_crossings(self.grid, &self.input)?;
         let save = self.pieces.savepoint();
-        let recorded = self
+        let ends = self
             .scratch
             .sweep(self.grid, &self.input, &mut self.pieces)
-            .and_then(|()| offset(self.pieces.tiles.len()));
-        match recorded {
-            Ok(tiles_end) => {
-                if self.pieces.tiles.len() > save.tiles {
-                    self.features.push((tiles_end, attr));
+            .and_then(|()| {
+                Ok((
+                    offset(self.pieces.tiles.len())?,
+                    offset(self.pieces.runs.len())?,
+                ))
+            });
+        match ends {
+            Ok((tiles_end, runs_end)) => {
+                if self.pieces.tiles.len() > save.tiles || self.pieces.runs.len() > save.runs {
+                    self.features.push(FeatureEntry {
+                        tiles_end,
+                        runs_end,
+                        attr,
+                    });
                 }
                 Ok(self)
             }
@@ -774,11 +837,18 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     /// Iterate the recorded features, in the order added.
     pub fn iter_features(&self) -> impl Iterator<Item = PolygonFeatureView<'_, V, A>> {
         let pieces = &self.pieces;
-        let ends = &self.features;
-        (0..ends.len()).map(move |f| PolygonFeatureView {
-            pieces,
-            tiles: if f == 0 { 0 } else { ends[f - 1].0 as usize }..ends[f].0 as usize,
-            attr: &ends[f].1,
+        let features = &self.features;
+        (0..features.len()).map(move |f| {
+            let (tiles_start, runs_start) = f
+                .checked_sub(1)
+                .map_or((0, 0), |p| (features[p].tiles_end, features[p].runs_end));
+            let feature = &features[f];
+            PolygonFeatureView {
+                pieces,
+                tiles: tiles_start as usize..feature.tiles_end as usize,
+                runs: &pieces.runs[runs_start as usize..feature.runs_end as usize],
+                attr: &feature.attr,
+            }
         })
     }
 
@@ -822,6 +892,7 @@ impl<V: PolyVertex> PolygonSlicerAll<V, ()> {
 pub struct PolygonFeatureView<'a, V: PolyVertex, A = ()> {
     pieces: &'a Pieces<V>,
     tiles: Range<usize>,
+    runs: &'a [FillRun],
     attr: &'a A,
 }
 
@@ -840,6 +911,12 @@ impl<'a, V: PolyVertex, A> PolygonFeatureView<'a, V, A> {
         self.tiles
             .clone()
             .map(move |index| PolygonTileView { pieces, index })
+    }
+
+    /// Iterate the feature's fully covered tiles as [`FillRun`]s, in row-major order. Storage is per
+    /// run, not per tile, so a feature covering millions of tiles costs one run per row of them.
+    pub fn iter_fill_runs(&self) -> impl Iterator<Item = FillRun> + use<'a, V, A> {
+        self.runs.iter().cloned()
     }
 }
 
