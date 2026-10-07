@@ -14,6 +14,7 @@ mod clip_polyline;
 
 // Exact integer geometry predicates (orientation, point-in-ring) shared across clipping and polygons.
 mod geom;
+pub use geom::signed_area_2x;
 
 // Low-level per-tile polygon-ring clipping (keep-original with synthetic clip-boundary corners).
 mod clip_polygon;

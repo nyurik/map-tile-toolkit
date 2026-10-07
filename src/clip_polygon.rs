@@ -8,8 +8,14 @@
 //! excursion it replaces — it reproduces the excursion's winding around the box centre — so the fill
 //! inside the box is exact even when a ring wraps the tile. All synthetic geometry lies strictly
 //! outside `B`, which lets [`Mosaic`](crate::Mosaic) recognise and drop it geometrically.
+//!
+//! [`close_ring`] is the shared core: given which edges touch the box and a way to measure an
+//! excursion's winding, it closes the kept arcs. [`clip_ring`] (the single-tile clip) finds the
+//! touching edges and windings by walking the whole ring; the all-tiles slicer feeds it the edges its
+//! routing pass found and windings from its per-row crossing index, so both produce identical rings.
 
 use core::cmp::Ordering;
+use core::iter;
 
 use geo_types::Coord;
 
@@ -72,108 +78,146 @@ fn corner(slot: u8, min: Coord<i32>, max: Coord<i32>) -> Result<Coord<i32>, Tile
     })
 }
 
-/// Signed crossings of the polyline with the ray `{ y = cy, x > max_x }` — the part of the `+x` ray
-/// from the box centre that lies outside the box. `+1` for an upward crossing, `-1` for downward
-/// (half-open in `y`, so a shared vertex is counted once). This is the winding of the (open) path
-/// around the box centre; since every excursion and every detour lives outside the box, only the
-/// outside portion of the ray can be crossed.
-fn ray_crossings(poly: &[Coord<i32>], cy: i32, max_x: i32) -> i32 {
+/// Signed crossing of segment `a → b` with the ray `{ y = cy, x > max_x }` — the part of the `+x` ray
+/// from the box centre that lies outside the box: `+1` upward, `-1` downward, `0` if it misses
+/// (half-open in `y`, so a vertex shared by two edges is counted once). Summed along a path this is
+/// the path's winding around the box centre; since every excursion and every detour lives outside the
+/// box, only the outside portion of the ray can be crossed.
+fn ray_crossing(a: Coord<i32>, b: Coord<i32>, cy: i32, max_x: i32) -> i64 {
+    if (a.y > cy) == (b.y > cy) {
+        return 0;
+    }
+    // Crossing `x` compared to `max_x` without division: `x − max_x = num / dy`.
+    let dy = i128::from(b.y) - i128::from(a.y);
+    let num = (i128::from(a.x) - i128::from(max_x)) * dy
+        + (i128::from(b.x) - i128::from(a.x)) * (i128::from(cy) - i128::from(a.y));
+    // `x > max_x` iff `num` and `dy` share a sign (their product is positive).
+    if num.signum() * dy.signum() > 0 {
+        if b.y > a.y { 1 } else { -1 }
+    } else {
+        0
+    }
+}
+
+/// [`ray_crossing`] summed over a path's consecutive points.
+fn ray_crossings(path: impl IntoIterator<Item = Coord<i32>>, cy: i32, max_x: i32) -> i64 {
+    let mut path = path.into_iter();
+    let Some(mut prev) = path.next() else {
+        return 0;
+    };
     let mut w = 0;
-    for win in poly.windows(2) {
-        let (a, b) = (win[0], win[1]);
-        if (a.y > cy) != (b.y > cy) {
-            // Crossing `x` compared to `max_x` without division: `x − max_x = num / dy`.
-            let dy = i128::from(b.y) - i128::from(a.y);
-            let num = (i128::from(a.x) - i128::from(max_x)) * dy
-                + (i128::from(b.x) - i128::from(a.x)) * (i128::from(cy) - i128::from(a.y));
-            // `x > max_x` iff `num` and `dy` share a sign (their product is positive).
-            if (num.signum() * dy.signum()) > 0 {
-                w += if b.y > a.y { 1 } else { -1 };
-            }
-        }
+    for p in path {
+        w += ray_crossing(prev, p, cy, max_x);
+        prev = p;
     }
     w
 }
 
-/// Corner points visited walking `advance` slots (CCW if positive, CW if negative) from `start`,
-/// emitting the `B⁺` corner at every even slot passed except the final one (where the detour's other
-/// endpoint sits). `advance == 0` yields no corners (a direct chord).
-fn corners_by_advance(
-    start: u8,
-    advance: i32,
-    min: Coord<i32>,
-    max: Coord<i32>,
-) -> Result<Vec<Coord<i32>>, TileError> {
-    let mut out = Vec::new();
-    if advance == 0 {
-        return Ok(out);
-    }
-    let forward = advance > 0;
-    let steps = advance.unsigned_abs();
+/// Corner slots visited walking `advance` slots (CCW if positive, CW if negative) from `start`: every
+/// even slot passed except the final one (where the detour's other endpoint sits). `advance == 0`
+/// yields none (a direct chord).
+fn corner_slots(start: u8, advance: i64) -> impl Iterator<Item = u8> {
+    // One slot CCW (`+1`) or CW (`+7 ≡ −1`) around the 8-slot loop, staying in `u8`.
+    let step = if advance > 0 { 1 } else { 7 };
     let mut s = start;
-    for step in 1..=steps {
-        // Step one slot around the 8-slot loop, CCW (`+1`) or CW (`+7 ≡ −1`), staying in `u8`.
-        s = if forward { (s + 1) % 8 } else { (s + 7) % 8 };
-        if step != steps && s.is_multiple_of(2) {
-            out.push(corner(s, min, max)?);
-        }
-    }
-    Ok(out)
+    (1..advance.unsigned_abs()).filter_map(move |_| {
+        s = (s + step) % 8;
+        s.is_multiple_of(2).then_some(s)
+    })
 }
 
-/// The box's centre `y` (overflow-safe midpoint).
-fn center_y(min: Coord<i32>, max: Coord<i32>) -> i32 {
+/// How many corners [`corner_slots`] yields, in O(1): of the `|advance| − 1` intermediate slots,
+/// every other one is a corner, starting with the first when `start` is odd.
+fn corner_count(start: u8, advance: i64) -> u64 {
+    let n = advance.unsigned_abs().saturating_sub(1);
+    if start.is_multiple_of(2) {
+        n / 2
+    } else {
+        n.div_ceil(2)
+    }
+}
+
+/// The box's centre `y` (overflow-safe midpoint) — the height of the winding ray.
+pub(crate) fn center_y(min: Coord<i32>, max: Coord<i32>) -> i32 {
     i32::midpoint(min.y, max.y)
 }
 
-/// The synthetic detour corners bridging the dropped gap from exit vertex `u` to entry vertex `v`
-/// (both outside the box). `excursion` is `[u, dropped…, v]`; the detour is built to reproduce its
-/// winding around the box centre, so it is homotopic to the excursion in the box exterior.
-fn detour<V: PolyVertex>(
+/// How to bridge one dropped gap between kept arcs.
+enum Bridge {
+    /// Keep the gap's original vertices verbatim (no more of them than a detour would need).
+    Keep,
+    /// Replace the gap with the synthetic `B⁺` corners from [`corner_slots`]`(start, advance)`.
+    Detour { start: u8, advance: i64 },
+}
+
+/// Decide how to bridge a gap of `gap_len` dropped vertices from exit vertex `u` to entry vertex `v`
+/// (both outside the box) whose excursion winds `w_exc` times around the box centre ([`ray_crossing`]
+/// summed over its edges). The detour reproduces that winding, so it is homotopic to the excursion in
+/// the box exterior: the CCW corner path from `u`'s slot to `v`'s is the reference, and whole `∂B⁺`
+/// loops (±8 slots each) make up the winding difference.
+///
+/// Every gap vertex is outside the box (both its edges miss it — that's why it was dropped), so keeping
+/// the gap verbatim reproduces the real excursion with its exact winding, entirely outside the box.
+/// Synthesizing only ever trades those originals for `B⁺` corners, so it's worth doing only when it
+/// *saves* vertices — a longer excursion that would otherwise drag its far geometry into this tile.
+/// Either way `Mosaic` recovers the real geometry from the tiles that own it.
+fn plan_bridge(
     u: Coord<i32>,
     v: Coord<i32>,
-    excursion: &[Coord<i32>],
+    w_exc: i64,
+    gap_len: usize,
     min: Coord<i32>,
     max: Coord<i32>,
     cy: i32,
-) -> Result<Vec<V>, TileError> {
+) -> Result<Bridge, TileError> {
     let su = slot(outcode(u, min, max));
     let sv = slot(outcode(v, min, max));
-    let base_ccw = i32::from((sv + 8 - su) % 8); // 0..8, CCW distance su → sv
-
-    // Reference detour (CCW, no extra loops) and its winding.
-    let ref_corners = corners_by_advance(su, base_ccw, min, max)?;
-    let mut ref_poly = Vec::with_capacity(ref_corners.len() + 2);
-    ref_poly.push(u);
-    ref_poly.extend_from_slice(&ref_corners);
-    ref_poly.push(v);
-    let w_ref = ray_crossings(&ref_poly, cy, max.x);
-    let w_exc = ray_crossings(excursion, cy, max.x);
-
-    // Add whole `∂B⁺` loops so the detour's winding matches the excursion's (each loop = ±8 slots).
-    let advance = base_ccw + (w_exc - w_ref) * 8;
-    let corners = corners_by_advance(su, advance, min, max)?;
-
-    debug_assert!(
-        {
-            let mut check = Vec::with_capacity(corners.len() + 2);
-            check.push(u);
-            check.extend_from_slice(&corners);
-            check.push(v);
-            ray_crossings(&check, cy, max.x) == w_exc
-        },
-        "detour winding must match the excursion it replaces"
-    );
-
-    Ok(corners.into_iter().map(V::synthetic_at).collect())
+    let base = i64::from((sv + 8 - su) % 8); // 0..8, CCW distance su → sv
+    // Winding of the reference detour (at most three corners).
+    let mut w_ref = 0;
+    let mut prev = u;
+    for s in corner_slots(su, base) {
+        let c = corner(s, min, max)?;
+        w_ref += ray_crossing(prev, c, cy, max.x);
+        prev = c;
+    }
+    w_ref += ray_crossing(prev, v, cy, max.x);
+    let advance = (w_exc - w_ref)
+        .checked_mul(8)
+        .and_then(|loops| loops.checked_add(base))
+        .ok_or(TileError::Overflow)?;
+    let keep = u64::try_from(gap_len).is_ok_and(|g| g <= corner_count(su, advance));
+    Ok(if keep {
+        Bridge::Keep
+    } else {
+        Bridge::Detour { start: su, advance }
+    })
 }
 
-/// The `B⁺` fill box as a closed ring oriented like `orient` (a solid tile fill), all synthetic.
-fn fill_box<V: PolyVertex>(
+/// Append to `out` the distinct vertices of `ring` in cyclic order — consecutive duplicate positions
+/// and a repeated closing vertex dropped, so zero-length edges can't distort the clip (matching the
+/// polyline slicer's handling of consecutive duplicates). Returns how many were appended.
+pub(crate) fn push_distinct<V: Vertex>(ring: &[V], out: &mut Vec<V>) -> usize {
+    let start = out.len();
+    for &v in ring {
+        if out.len() == start || out.last().map(Vertex::position) != Some(v.position()) {
+            out.push(v);
+        }
+    }
+    while out.len() - start >= 2 && out.last().map(Vertex::position) == Some(out[start].position())
+    {
+        out.pop();
+    }
+    out.len() - start
+}
+
+/// Append the `B⁺` fill box as a closed ring oriented like `orient` (a solid tile fill), all synthetic.
+pub(crate) fn push_fill_box<V: PolyVertex>(
+    out: &mut Vec<V>,
     orient: Ordering,
     min: Coord<i32>,
     max: Coord<i32>,
-) -> Result<Vec<V>, TileError> {
+) -> Result<(), TileError> {
     let sw = corner(0, min, max)?;
     let se = corner(2, min, max)?;
     let ne = corner(4, min, max)?;
@@ -184,7 +228,96 @@ fn fill_box<V: PolyVertex>(
     } else {
         [sw, se, ne, nw, sw]
     };
-    Ok(seq.into_iter().map(V::synthetic_at).collect())
+    out.extend(seq.into_iter().map(V::synthetic_at));
+    Ok(())
+}
+
+/// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), appended
+/// to `out` in the ring's own coordinate frame.
+///
+/// `ring` holds the ring's distinct vertices in cyclic order (see [`push_distinct`]); edge `i` runs
+/// `ring[i] → ring[(i + 1) % m]`. `touching` lists, ascending and non-empty, the edges that touch the
+/// box `[min, max]` — a vertex is kept iff an incident edge touches. `winding(first, count)` must return
+/// [`ray_crossing`] summed over the `count` consecutive edges from edge `first` (cyclically), for this
+/// box's ray; the caller supplies it so the single-tile clip can walk the edges while the all-tiles
+/// slicer answers from its per-row crossing index. `arcs` is caller-owned scratch.
+///
+/// Output starts at the first arc in index order, so it is a pure function of the inputs.
+///
+/// # Errors
+///
+/// [`TileError::Overflow`] if a synthetic corner can't be placed strictly outside the box.
+pub(crate) fn close_ring<V: PolyVertex>(
+    ring: &[V],
+    touching: &[u32],
+    min: Coord<i32>,
+    max: Coord<i32>,
+    mut winding: impl FnMut(usize, usize) -> i64,
+    arcs: &mut Vec<(usize, usize)>,
+    out: &mut Vec<V>,
+) -> Result<(), TileError> {
+    let m = ring.len();
+    // Kept arcs as inclusive vertex spans `(start, end)`, `end` unwrapped (it may pass `m` by wrapping
+    // to the ring's start). Edge `t` keeps vertices `t` and `t + 1`, so two touching edges at most two
+    // apart keep one contiguous arc (the edge between them is a single-segment out-and-back bridge).
+    arcs.clear();
+    for &t in touching {
+        let t = t as usize;
+        match arcs.last_mut() {
+            Some((_, end)) if t <= *end + 1 => *end = t + 1,
+            _ => arcs.push((t, t + 1)),
+        }
+    }
+    // The last arc may run on, across the ring's seam, into the first.
+    let mut first = 0;
+    if let (Some(&(s0, e0)), Some(last)) = (arcs.first(), arcs.len().checked_sub(1))
+        && last > 0
+        && arcs[last].1 + 1 >= s0 + m
+    {
+        arcs[last].1 = e0 + m;
+        first = 1;
+    }
+    let arcs = &arcs[first..];
+    if let [(s, e)] = *arcs
+        && e - s + 1 >= m
+    {
+        // Every vertex is kept: the ring is returned verbatim, re-closed.
+        out.extend_from_slice(ring);
+        out.push(ring[0]);
+        return Ok(());
+    }
+
+    let cy = center_y(min, max);
+    let ring_start = out.len();
+    for (j, &(s, e)) in arcs.iter().enumerate() {
+        out.extend((s..=e).map(|i| ring[i % m]));
+        // Bridge the gap to the next arc (cyclically): the dropped vertices `e+1 .. next`.
+        let next = arcs.get(j + 1).map_or(arcs[0].0 + m, |a| a.0);
+        let (u, v) = (ring[e % m].position(), ring[next % m].position());
+        let w_exc = winding(e % m, next - e);
+        match plan_bridge(u, v, w_exc, next - e - 1, min, max, cy)? {
+            Bridge::Keep => out.extend((e + 1..next).map(|i| ring[i % m])),
+            Bridge::Detour { start, advance } => {
+                let before = out.len();
+                for s in corner_slots(start, advance) {
+                    out.push(V::synthetic_at(corner(s, min, max)?));
+                }
+                debug_assert_eq!(
+                    ray_crossings(
+                        iter::once(u)
+                            .chain(out[before..].iter().map(Vertex::position))
+                            .chain(iter::once(v)),
+                        cy,
+                        max.x
+                    ),
+                    w_exc,
+                    "detour winding must match the excursion it replaces"
+                );
+            }
+        }
+    }
+    out.push(out[ring_start]); // close the ring
+    Ok(())
 }
 
 /// The outcome of clipping one ring to a tile box.
@@ -206,130 +339,48 @@ pub(crate) enum RingClip<V> {
 ///
 /// # Errors
 ///
-/// [`TileError::Overflow`] if the tile sits so close to the `i32` edge that a synthetic corner can't
-/// be placed strictly outside the box.
+/// - [`TileError::Overflow`] if the tile sits so close to the `i32` edge that a synthetic corner can't
+///   be placed strictly outside the box.
+/// - [`TileError::PolylineTooLarge`] if the ring has more than `u32::MAX` distinct vertices.
 pub(crate) fn clip_ring<V: PolyVertex>(
     ring: &[V],
     min: Coord<i32>,
     max: Coord<i32>,
 ) -> Result<RingClip<V>, TileError> {
-    if ring.len() < 3 {
-        return Ok(RingClip::Outside);
-    }
-    // Distinct-position vertices in cyclic order (drop consecutive duplicates and the repeated closing
-    // vertex), so zero-length edges can't distort the clip — matching the polyline slicer's handling
-    // of consecutive duplicates.
     let mut pts: Vec<V> = Vec::with_capacity(ring.len());
-    for &v in ring {
-        if pts.last().map(Vertex::position) != Some(v.position()) {
-            pts.push(v);
-        }
-    }
-    while pts.len() >= 2 && pts[0].position() == pts[pts.len() - 1].position() {
-        pts.pop();
-    }
-    let m = pts.len();
+    let m = push_distinct(ring, &mut pts);
     if m < 3 {
         return Ok(RingClip::Outside);
     }
-    let pos = |i: usize| pts[i].position();
-
-    // Which edges (`pts[i] → pts[i+1]`, cyclic) touch the box.
-    let touches: Vec<bool> = (0..m)
-        .map(|i| segment_intersects(pos(i), pos((i + 1) % m), min, max))
+    let pos = |i: usize| pts[i % m].position();
+    let edges = u32::try_from(m).map_err(|_| TileError::PolylineTooLarge)?;
+    let touching: Vec<u32> = (0..edges)
+        .filter(|&i| segment_intersects(pos(i as usize), pos(i as usize + 1), min, max))
         .collect();
 
-    if !touches.iter().any(|&t| t) {
+    if touching.is_empty() {
         // No edge touches the box → the tile is uniformly inside or outside the ring.
-        let ring_pts: Vec<Coord<i32>> = (0..m).map(pos).collect();
+        let ring_pts: Vec<Coord<i32>> = pts.iter().map(Vertex::position).collect();
         return if point_in_ring(min, &ring_pts) {
-            Ok(RingClip::Covers(fill_box(
-                ring_orientation(&ring_pts),
-                min,
-                max,
-            )?))
+            let mut fill = Vec::with_capacity(5);
+            push_fill_box(&mut fill, ring_orientation(&pts), min, max)?;
+            Ok(RingClip::Covers(fill))
         } else {
             Ok(RingClip::Outside)
         };
     }
 
-    // A vertex is kept iff an incident edge touches the box (same rule as the polyline clip).
-    let kept: Vec<bool> = (0..m)
-        .map(|i| touches[(i + m - 1) % m] || touches[i])
-        .collect();
-
-    if kept.iter().all(|&k| k) {
-        // Whole ring is near/inside the box: keep it verbatim, re-closed.
-        let mut out: Vec<V> = pts.clone();
-        out.push(pts[0]);
-        return Ok(RingClip::Clipped(out));
-    }
-
-    // Start at an arc boundary (a kept vertex whose predecessor is dropped) so the cyclic walk splits
-    // cleanly into arcs and the gaps between them.
-    let Some(start) = (0..m).find(|&i| kept[i] && !kept[(i + m - 1) % m]) else {
-        let mut out: Vec<V> = pts.clone();
-        out.push(pts[0]);
-        return Ok(RingClip::Clipped(out));
-    };
-
-    // Collect kept arcs and the dropped gaps between them, in cyclic order from `start`.
-    let mut arcs: Vec<Vec<usize>> = Vec::new();
-    let mut gaps: Vec<Vec<usize>> = Vec::new();
-    let mut cur_arc: Vec<usize> = Vec::new();
-    let mut cur_gap: Vec<usize> = Vec::new();
-    let mut in_arc = true;
-    for step in 0..m {
-        let idx = (start + step) % m;
-        if kept[idx] {
-            if !in_arc {
-                gaps.push(std::mem::take(&mut cur_gap));
-                in_arc = true;
-            }
-            cur_arc.push(idx);
-        } else {
-            if in_arc {
-                arcs.push(std::mem::take(&mut cur_arc));
-                in_arc = false;
-            }
-            cur_gap.push(idx);
-        }
-    }
-    // The walk ends inside the final (wrap-around) gap, since `start`'s predecessor is dropped.
-    if !cur_arc.is_empty() {
-        arcs.push(cur_arc);
-    }
-    gaps.push(cur_gap);
-
     let cy = center_y(min, max);
-    let mut out: Vec<V> = Vec::new();
-    for j in 0..arcs.len() {
-        for &vi in &arcs[j] {
-            out.push(pts[vi]);
-        }
-        // Bridge the gap to the next arc (cyclically). Every gap vertex is outside the box (both its
-        // edges miss it — that's why it was dropped), so keeping the gap verbatim reproduces the real
-        // excursion with its exact winding, entirely outside the box. Synthesizing a winding-matched
-        // detour only ever trades those originals for `B⁺` corners, so it's worth doing only when it
-        // *saves* vertices: keep the originals whenever the gap is no larger than the detour would be,
-        // and synthesize only for a longer excursion (which would otherwise drag its far geometry into
-        // this tile). Either way `Mosaic` recovers the real geometry from the tiles that own it.
-        let gap = &gaps[j];
-        let u = pos(*arcs[j].last().expect("arcs are non-empty"));
-        let next = &arcs[(j + 1) % arcs.len()];
-        let v = pos(next[0]);
-        let mut excursion = Vec::with_capacity(gap.len() + 2);
-        excursion.push(u);
-        excursion.extend(gap.iter().map(|&gi| pos(gi)));
-        excursion.push(v);
-        let synthesized = detour::<V>(u, v, &excursion, min, max, cy)?;
-        if gap.len() <= synthesized.len() {
-            out.extend(gap.iter().map(|&gi| pts[gi]));
-        } else {
-            out.extend(synthesized);
-        }
-    }
-    out.push(out[0]); // close the ring
+    let mut out = Vec::new();
+    close_ring(
+        &pts,
+        &touching,
+        min,
+        max,
+        |first, count| ray_crossings((first..=first + count).map(pos), cy, max.x),
+        &mut Vec::new(),
+        &mut out,
+    )?;
     Ok(RingClip::Clipped(out))
 }
 
