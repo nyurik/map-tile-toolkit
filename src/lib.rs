@@ -28,5 +28,8 @@ pub use slicer::{FeatureView, SlicerAll, SlicerOne, TileView};
 mod polygon_slicer;
 pub use polygon_slicer::{PolyFeatureView, PolygonSlicerOne, RingView};
 
+mod polygon_all;
+pub use polygon_all::{PolygonFeatureView, PolygonSlicerAll, PolygonTileView, PolygonView};
+
 mod mosaic;
 pub use mosaic::{Mosaic, PolygonMosaic};

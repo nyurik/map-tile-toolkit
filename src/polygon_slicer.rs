@@ -196,8 +196,8 @@ impl<'a, V: PolyVertex, A> PolyFeatureView<'a, V, A> {
 
 /// A borrowed view of one clipped ring.
 pub struct RingView<'a, V: PolyVertex> {
-    verts: &'a [V],
-    is_hole: bool,
+    pub(crate) verts: &'a [V],
+    pub(crate) is_hole: bool,
 }
 
 impl<'a, V: PolyVertex> RingView<'a, V> {

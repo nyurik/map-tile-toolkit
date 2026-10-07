@@ -44,6 +44,31 @@ fn fits_i32(v: i64) -> bool {
     i32::try_from(v).is_ok()
 }
 
+/// The smallest integer `≥ x`, where `x` is the point at which segment `a`–`b` crosses the horizontal
+/// line at height `y` (`a.y ≠ b.y`, `y` between them). Exact: `x = a.x + dx·t/dy` is evaluated as a
+/// rounded-up integer quotient in `i64` when the factors fit `i32`, widening to `i128` otherwise —
+/// the same fast path / fallback split as [`orient`]. The result lies between `a.x` and `b.x`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the offset is dx·t/dy with |t| ≤ |dy|, so it fits i64"
+)]
+pub(crate) fn crossing_x_ceil(a: Coord<i32>, b: Coord<i32>, y: i32) -> i64 {
+    let dx = i64::from(b.x) - i64::from(a.x);
+    let mut dy = i64::from(b.y) - i64::from(a.y);
+    let mut t = i64::from(y) - i64::from(a.y);
+    // A positive divisor lets `div_euclid` floor; ceil(n/d) = −floor(−n/d).
+    if dy < 0 {
+        dy = -dy;
+        t = -t;
+    }
+    let offset = if fits_i32(dx) && fits_i32(t) {
+        -(-(dx * t)).div_euclid(dy)
+    } else {
+        (-(-(i128::from(dx) * i128::from(t))).div_euclid(i128::from(dy))) as i64
+    };
+    i64::from(a.x) + offset
+}
+
 /// Twice the signed area of `ring` (the shoelace sum `Σ xᵢ·yᵢ₊₁ − xᵢ₊₁·yᵢ`), exact for any `i32`
 /// ring. Works whether or not the ring repeats its first vertex, and is `0` for a degenerate ring.
 ///
@@ -160,6 +185,25 @@ mod tests {
             ),
             Ordering::Equal
         );
+    }
+
+    #[test]
+    fn crossing_x_ceil_is_exact() {
+        // x = 0 + 10·(1/3) = 3.33… → 4; reversed direction gives the same point.
+        assert_eq!(crossing_x_ceil(c(0, 0), c(10, 3), 1), 4);
+        assert_eq!(crossing_x_ceil(c(10, 3), c(0, 0), 1), 4);
+        // Exact integer crossings stay put, negative offsets round toward +∞.
+        assert_eq!(crossing_x_ceil(c(0, 0), c(10, 2), 1), 5);
+        assert_eq!(crossing_x_ceil(c(0, 0), c(-10, 3), 1), -3);
+        // Full-`i32` spans take the `i128` path.
+        let x = crossing_x_ceil(c(i32::MIN, i32::MIN), c(i32::MAX, i32::MAX), 0);
+        assert_eq!(x, 0);
+        // The anti-diagonal `x + y = −1` crosses `y = 1` exactly at `x = −2`; one unit to the right
+        // of an exact crossing must not round further.
+        let x = crossing_x_ceil(c(i32::MIN, i32::MAX), c(i32::MAX, i32::MIN), 1);
+        assert_eq!(x, -2);
+        let x = crossing_x_ceil(c(i32::MIN, i32::MAX), c(i32::MAX - 1, i32::MIN), 1);
+        assert_eq!(x, -2); // the slightly steeper line crosses just left of −2
     }
 
     #[test]
