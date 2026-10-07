@@ -1,8 +1,9 @@
 //! Insta GeoJSON snapshots for the integer **polygon** slicer, mirroring `clip_polyline.rs`.
 //!
 //! Each fixture in `tests/polygons/fixtures/*.geojson` is a `FeatureCollection` with one or more
-//! `Polygon` features (whole-number coordinates in valid lon/lat range so fixtures and snapshots
-//! render on a map). No holes yet. Every fixture is clipped, one tile at a time with
+//! `Polygon` or `MultiPolygon` features (whole-number coordinates in valid lon/lat range so fixtures
+//! and snapshots render on a map); a `MultiPolygon` is clipped as its separate parts. Every fixture
+//! is clipped, one tile at a time with
 //! [`PolygonSlicerOne`], across the whole tile span the polygon could reach (padded by one tile) —
 //! this single per-tile pass already fills tiles that sit fully inside the polygon (the containment
 //! case) as well as border tiles.

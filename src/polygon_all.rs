@@ -966,3 +966,58 @@ impl<'a, V: PolyVertex> PolygonView<'a, V> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fenwick_matches_brute_force() {
+        let values = [3, -1, 4, 1, -5, 9, 2, -6, 5, 3, -5];
+        let mut current = values.to_vec();
+        let mut tree = Vec::new();
+        fenwick_build(&mut tree, values.iter().copied());
+        for (i, delta) in [(4, 5), (0, -3), (10, 7), (6, -2)] {
+            fenwick_add(&mut tree, i, delta);
+            current[i] += delta;
+            for end in 0..=current.len() {
+                assert_eq!(
+                    fenwick_prefix(&tree, end),
+                    current[..end].iter().sum::<i64>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_keeps_capacity() {
+        let ring = [(5, 5), (190, 5), (190, 190), (5, 190)].map(|(x, y)| Coord { x, y });
+        let hole = [(60, 60), (60, 120), (120, 120), (120, 60)].map(|(x, y)| Coord { x, y });
+        let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 2).expect("config");
+        s.add_feature([[&ring[..], &hole[..]]]).expect("slice");
+        let capacities = |s: &PolygonSlicerAll<Coord<i32>>| {
+            [
+                s.pieces.verts.capacity(),
+                s.pieces.ring_ends.capacity(),
+                s.pieces.tiles.capacity(),
+                s.pieces.runs.capacity(),
+                s.features.capacity(),
+                s.input.pts.capacity(),
+                s.scratch.hits.capacity(),
+                s.scratch.crossings.capacity(),
+            ]
+        };
+        let warm = capacities(&s);
+        let output = format!("{:?}", s.pieces);
+        s.clear();
+        assert!(s.is_empty());
+        assert_eq!(capacities(&s), warm, "clear keeps every buffer");
+        s.add_feature([[&ring[..], &hole[..]]]).expect("slice");
+        assert_eq!(
+            capacities(&s),
+            warm,
+            "a warmed-up slicer does not grow for the same feature"
+        );
+        assert_eq!(format!("{:?}", s.pieces), output);
+    }
+}

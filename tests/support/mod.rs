@@ -12,7 +12,7 @@ use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
-use map_tile_toolkit::{SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{FillRun, SlicerAll, SlicerOne, TileId};
 use serde_json::json;
 
 pub const EXTENT: u32 = 25;
@@ -372,9 +372,9 @@ fn ring_i32(ls: &LineString<f64>) -> Vec<Coord<i32>> {
         .collect()
 }
 
-/// Parse a polygon fixture: a `FeatureCollection` of `Polygon` features (an exterior ring plus
-/// optional interior rings / holes).
-pub fn load_polygon_fixture(path: &Path) -> Vec<FixturePolygon> {
+/// Parse a polygon fixture into its features: a `FeatureCollection` of `Polygon` or `MultiPolygon`
+/// features, each yielding its polygons (an exterior ring plus optional interior rings / holes).
+pub fn load_polygon_features(path: &Path) -> Vec<Vec<FixturePolygon>> {
     let text = fs::read_to_string(path).expect("readable fixture");
     let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
         panic!(
@@ -382,30 +382,52 @@ pub fn load_polygon_fixture(path: &Path) -> Vec<FixturePolygon> {
             path.display()
         );
     };
-    let polygons: Vec<FixturePolygon> = fc
+    let polygon = |p: &Polygon<f64>| FixturePolygon {
+        exterior: ring_i32(p.exterior()),
+        holes: p.interiors().iter().map(ring_i32).collect(),
+    };
+    let features: Vec<Vec<FixturePolygon>> = fc
         .features
         .into_iter()
         .map(|f| {
             let geom = Geometry::<f64>::try_from(f.geometry.expect("feature has geometry"))
                 .expect("geometry converts");
             match geom {
-                Geometry::Polygon(p) => FixturePolygon {
-                    exterior: ring_i32(p.exterior()),
-                    holes: p.interiors().iter().map(ring_i32).collect(),
-                },
+                Geometry::Polygon(p) => vec![polygon(&p)],
+                Geometry::MultiPolygon(mp) => mp.0.iter().map(polygon).collect(),
                 other => panic!(
-                    "polygon fixtures must use Polygon features, not {other:?} ({})",
+                    "polygon fixtures must use Polygon or MultiPolygon features, not {other:?} ({})",
                     path.display()
                 ),
             }
         })
         .collect();
     assert!(
-        !polygons.is_empty(),
+        !features.is_empty(),
         "polygon fixture has no features: {}",
         path.display()
     );
-    polygons
+    features
+}
+
+/// Every polygon of a fixture, a `MultiPolygon` feature contributing each of its parts — for the
+/// single-tile slicer, which takes one polygon per feature.
+pub fn load_polygon_fixture(path: &Path) -> Vec<FixturePolygon> {
+    load_polygon_features(path).into_iter().flatten().collect()
+}
+
+/// A fill run's tiles as one rectangle over their core cells (green), tagged `fill y/x0..x1`.
+pub fn fill_run_polygon(run: &FillRun, extent: u32) -> Feature {
+    let e = extent as i32;
+    let (x0, x1, y0, y1) = (
+        run.x.start * e,
+        run.x.end * e - 1,
+        run.y * e,
+        run.y * e + e - 1,
+    );
+    let rect = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)].map(|(x, y)| Coord { x, y });
+    let role = format!("fill {}/{}..{}", run.y, run.x.start, run.x.end);
+    styled_polygon(&rect, &[], &role, "#1fb53a", "#0b6b1f")
 }
 
 /// Inclusive tile-coordinate bounds covering every vertex of `rings`, padded by one tile so a per-tile

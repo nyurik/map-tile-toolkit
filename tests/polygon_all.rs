@@ -2,14 +2,23 @@
 //! span, an edge tile's pieces must equal what a single-tile slicer produces there for each of the
 //! feature's polygons, a fill-run tile must be one the single-tile slicer fills with whole-tile boxes
 //! only, and every other tile must be one it leaves empty.
+//!
+//! Also here: per-fixture GeoJSON snapshots of the all-tiles output (input polygons, every edge-tile
+//! piece, and each fill run as one green rectangle) at buffer 0 (`polygons/snapshots-all/`) and 5
+//! (`polygons/snapshots-all-5/`); fill coverage against an independent `geo` point-in-polygon of each
+//! tile centre; reassembly of the edge tiles with [`PolygonMosaic`]; and the large-input bounds.
 
 #![allow(clippy::pedantic, reason = "test tool")]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
-use geo_types::Coord;
-use map_tile_toolkit::{FillRun, PolygonSlicerAll, PolygonSlicerOne, TileId};
+use geo::Contains;
+use geo_types::{Coord, LineString, Point, Polygon};
+use insta::assert_binary_snapshot;
+use map_tile_toolkit::{
+    FillRun, Measured, PolygonMosaic, PolygonSlicerAll, PolygonSlicerOne, TileId,
+};
 
 mod support;
 
@@ -131,6 +140,20 @@ fn only_fill_boxes(pieces: &Pieces, extent: u32) -> bool {
 /// Assert the all-tiles slicer agrees with the single-tile oracle on every tile of the span.
 fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
     let all = all_tiles(polygons, extent, buffer);
+    // Consecutive duplicate vertices are dropped, so repeating every vertex changes nothing.
+    let dup = |ring: &[Coord<i32>]| ring.iter().flat_map(|&c| [c, c]).collect::<Vec<_>>();
+    let duped: Vec<FixturePolygon> = polygons
+        .iter()
+        .map(|p| FixturePolygon {
+            exterior: dup(&p.exterior),
+            holes: p.holes.iter().map(|h| dup(h)).collect(),
+        })
+        .collect();
+    assert_eq!(
+        all,
+        all_tiles(&duped, extent, buffer),
+        "{label}: duplicated vertices"
+    );
     let (lo, hi) = span(polygons, extent);
     let in_span = |t: &TileId| (lo.x..=hi.x).contains(&t.x) && (lo.y..=hi.y).contains(&t.y);
     assert!(
@@ -159,10 +182,17 @@ fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
 mod files {
     use test_each_file::test_each_path;
 
-    test_each_path! { for ["geojson"] in "./tests/polygons/fixtures" => super::fixture_matches_one }
+    test_each_path! { for ["geojson"] in "./tests/polygons/fixtures" => super::fixture }
 }
 
-fn fixture_matches_one([path]: [&Path; 1]) {
+fn fixture([path]: [&Path; 1]) {
+    fixture_matches_one(path);
+    fixture_fill_matches_geo(path);
+    fixture_reassembles(path);
+    snapshot_fixture(path);
+}
+
+fn fixture_matches_one(path: &Path) {
     let polygons = support::load_polygon_fixture(path);
     let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
     for buffer in [0, 5] {
@@ -171,6 +201,199 @@ fn fixture_matches_one([path]: [&Path; 1]) {
     // Finer grids make the same geometry wrap many more tiles.
     for (extent, buffer) in [(7, 0), (7, 3), (4, 1), (1, 0)] {
         check(&polygons, extent, buffer, stem);
+    }
+}
+
+/// The tile centre (a point of its core cell) in the global frame.
+fn center(tile: TileId, extent: u32) -> Point<f64> {
+    let e = extent as i32;
+    Point::new(f64::from(tile.x * e + e / 2), f64::from(tile.y * e + e / 2))
+}
+
+fn geo_polygon(p: &FixturePolygon) -> Polygon<f64> {
+    let ring = |r: &[Coord<i32>]| {
+        LineString::from(
+            r.iter()
+                .map(|c| (f64::from(c.x), f64::from(c.y)))
+                .collect::<Vec<_>>(),
+        )
+    };
+    Polygon::new(ring(&p.exterior), p.holes.iter().map(|h| ring(h)).collect())
+}
+
+/// Every tile no edge touches is filled iff its centre lies in some polygon, by `geo`'s independent
+/// point-in-polygon.
+fn fixture_fill_matches_geo(path: &Path) {
+    let polygons = support::load_polygon_fixture(path);
+    let geo: Vec<Polygon<f64>> = polygons.iter().map(geo_polygon).collect();
+    for (extent, buffer) in [(EXTENT, 0), (EXTENT, 5), (7, 1), (3, 0)] {
+        let all = all_tiles(&polygons, extent, buffer);
+        let (lo, hi) = span(&polygons, extent);
+        for y in lo.y..=hi.y {
+            for x in lo.x..=hi.x {
+                let tile = TileId::new(x, y);
+                if all.tiles.contains_key(&tile) {
+                    continue;
+                }
+                let inside = geo.iter().any(|p| p.contains(&center(tile, extent)));
+                assert_eq!(
+                    all.fills.contains(&tile),
+                    inside,
+                    "{}: extent {extent} buffer {buffer} tile {tile:?}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Directed-edge set of closed rings, skipping zero-length edges.
+fn edge_set<'a>(
+    rings: impl IntoIterator<Item = &'a [Coord<i32>]>,
+) -> HashSet<(Coord<i32>, Coord<i32>)> {
+    rings
+        .into_iter()
+        .flat_map(|r| r.windows(2))
+        .filter(|w| w[0] != w[1])
+        .map(|w| (w[0], w[1]))
+        .collect()
+}
+
+/// The edge tiles of every feature reassemble with [`PolygonMosaic`] into the input rings' edges
+/// (fill runs carry no original edge, so they are not needed).
+fn fixture_reassembles(path: &Path) {
+    let features = support::load_polygon_features(path);
+    let input: Vec<&[Coord<i32>]> = features
+        .iter()
+        .flatten()
+        .flat_map(|p| {
+            std::iter::once(p.exterior.as_slice()).chain(p.holes.iter().map(Vec::as_slice))
+        })
+        .collect();
+    for buffer in [0, 5] {
+        let mut all = PolygonSlicerAll::<Coord<i32>>::new(EXTENT, buffer).expect("config");
+        for f in &features {
+            all.add_feature(rings_of(f)).expect("slice");
+        }
+        let mut per_tile: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> = BTreeMap::new();
+        for f in all.iter_features() {
+            for t in f.iter_tiles() {
+                let rings = t
+                    .iter_polygons()
+                    .flat_map(|p| p.iter_rings().map(|r| r.vertices().to_vec()));
+                per_tile.entry(t.tile_id()).or_default().extend(rings);
+            }
+        }
+        let mut mosaic = PolygonMosaic::<Coord<i32>>::new(EXTENT, buffer).expect("config");
+        for (tile, rings) in &per_tile {
+            mosaic
+                .add(*tile, rings)
+                .expect("the slicer's own tiles never conflict");
+        }
+        let rebuilt: Vec<Vec<Coord<i32>>> = mosaic.iter_features().collect();
+        assert_eq!(
+            edge_set(rebuilt.iter().map(Vec::as_slice)),
+            edge_set(input.iter().copied()),
+            "{} (buffer {buffer})",
+            path.display()
+        );
+    }
+}
+
+/// Snapshot the all-tiles output (each GeoJSON feature added as one feature) at both buffers.
+fn snapshot_fixture(path: &Path) {
+    let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
+    let features = support::load_polygon_features(path);
+    for (buffer, dir) in [
+        (0, "polygons/snapshots-all"),
+        (5, "polygons/snapshots-all-5"),
+    ] {
+        let mut all = PolygonSlicerAll::<Coord<i32>>::new(EXTENT, buffer).expect("config");
+        for f in &features {
+            all.add_feature(rings_of(f)).expect("slice");
+        }
+        let mut out: Vec<_> = features
+            .iter()
+            .flatten()
+            .map(|p| support::input_polygon(&p.exterior, &p.holes))
+            .collect();
+        for f in all.iter_features() {
+            for t in f.iter_tiles() {
+                let origin = t.tile_id().origin(EXTENT).expect("tile in range");
+                for p in t.iter_polygons() {
+                    let mut rings = p
+                        .iter_rings()
+                        .map(|r| r.vertices().iter().map(|&c| c + origin).collect::<Vec<_>>());
+                    let exterior = rings.next().expect("exterior");
+                    out.push(support::tile_polygon(
+                        &exterior,
+                        &rings.collect::<Vec<_>>(),
+                        t.tile_id(),
+                    ));
+                }
+            }
+            out.extend(
+                f.iter_fill_runs()
+                    .map(|run| support::fill_run_polygon(&run, EXTENT)),
+            );
+        }
+        let bytes = support::feature_collection_bytes(out);
+        insta::with_settings!({
+            snapshot_path => dir,
+            prepend_module_to_snapshot => false,
+        }, {
+            let name = if buffer > 0 { format!("{stem}-{buffer}.geojson") } else { format!("{stem}.geojson") };
+            assert_binary_snapshot!(&name, bytes);
+        });
+    }
+}
+
+#[test]
+fn payload_and_attribute_ride_through() {
+    // Each vertex carries its index as an M value; synthetic corners carry the default (0).
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/polygons/fixtures/big_fill.geojson");
+    let polygons = support::load_polygon_fixture(&path);
+    let mut m = 0;
+    let mut measured = |ring: &[Coord<i32>]| -> Vec<Measured<u32>> {
+        ring.iter()
+            .map(|c| {
+                m += 1;
+                Measured::new(c.x, c.y, m)
+            })
+            .collect()
+    };
+    let rings: Vec<Vec<Vec<Measured<u32>>>> = polygons
+        .iter()
+        .map(|p| {
+            std::iter::once(measured(&p.exterior))
+                .chain(p.holes.iter().map(|h| measured(h)))
+                .collect()
+        })
+        .collect();
+
+    let mut all = PolygonSlicerAll::<Measured<u32>, &str>::new(EXTENT, 3).expect("config");
+    all.add_feature_with(&rings, "lake").expect("slice");
+    assert_eq!(all.len(), 1);
+    let feature = all.iter_features().next().expect("feature");
+    assert_eq!(*feature.attr(), "lake");
+    assert!(feature.iter_fill_runs().count() > 0);
+    for t in feature.iter_tiles() {
+        let mut one =
+            PolygonSlicerOne::<Measured<u32>>::new(EXTENT, 3, t.tile_id()).expect("config");
+        for p in &rings {
+            let holes: Vec<&[Measured<u32>]> = p[1..].iter().map(Vec::as_slice).collect();
+            one.add_feature(&p[0], &holes).expect("clip");
+        }
+        let expected: Vec<Vec<Vec<Measured<u32>>>> = one
+            .iter_features()
+            .map(|f| f.iter_rings().map(|r| r.vertices().to_vec()).collect())
+            .collect();
+        let got: Vec<Vec<Vec<Measured<u32>>>> = t
+            .iter_polygons()
+            .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
+            .collect();
+        assert_eq!(got, expected, "{:?}", t.tile_id());
     }
 }
 

@@ -1,7 +1,9 @@
 //! The public API never panics: invalid input yields a typed [`TileError`] instead.
 
 use geo_types::Coord;
-use map_tile_toolkit::{SlicerAll, SlicerOne, TileError, TileId};
+use map_tile_toolkit::{
+    PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileError, TileId,
+};
 
 /// A polyline as a `Vec<Coord<i32>>`.
 fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
@@ -234,4 +236,147 @@ fn empty_and_degenerate_inputs_are_ok() {
     let mut one = one(25, 0, TileId::new(0, 0));
     one.add_feature(&dot).expect("single-point polyline is ok");
     assert!(one.is_empty());
+}
+
+// ---- PolygonSlicerAll ----
+
+/// One polygon (exterior only) from integer corner pairs.
+fn poly(coords: Vec<(i32, i32)>) -> Vec<Vec<Coord<i32>>> {
+    vec![line(coords)]
+}
+
+/// Every edge tile's pieces and every fill run, per feature — the slicer's whole observable state.
+type PolyState = Vec<(
+    Vec<(TileId, Vec<Vec<Vec<Coord<i32>>>>)>,
+    Vec<map_tile_toolkit::FillRun>,
+)>;
+
+fn poly_state(s: &PolygonSlicerAll<Coord<i32>>) -> PolyState {
+    s.iter_features()
+        .map(|f| {
+            let tiles = f
+                .iter_tiles()
+                .map(|t| {
+                    let polys = t
+                        .iter_polygons()
+                        .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
+                        .collect();
+                    (t.tile_id(), polys)
+                })
+                .collect();
+            (tiles, f.iter_fill_runs().collect())
+        })
+        .collect()
+}
+
+#[test]
+fn polygon_all_validates_config() {
+    assert_eq!(
+        PolygonSlicerAll::<Coord<i32>>::new(0, 0).err(),
+        Some(TileError::InvalidExtent)
+    );
+    assert_eq!(
+        PolygonSlicerAll::<Coord<i32>>::new(10, 5).err(),
+        Some(TileError::BufferTooLarge)
+    );
+}
+
+#[test]
+fn polygon_all_too_many_tiles() {
+    let mut s = PolygonSlicerAll::<Coord<i32>>::new(1, 0).expect("valid config");
+    // A ring spanning 40 000 tiles on x, past i16::MAX.
+    assert_eq!(
+        s.add_feature([poly(vec![(0, 0), (40_000, 0), (40_000, 5)])])
+            .err(),
+        Some(TileError::TooManyTiles)
+    );
+    assert!(s.is_empty());
+
+    // The candidate-tile budget (2^25 = 33 554 432) is shared by all rings of a feature: the small
+    // triangle charges ~362 000 candidates (its 601² diagonal box plus two edges) and the large one's
+    // first edge 5781² = 33 419 961 — each fine alone, too many together (the large one is rejected
+    // as soon as its first box is charged). Covered tiles are never charged: the small triangle alone
+    // fills ~180 000 tiles.
+    let small = poly(vec![(0, 0), (600, 600), (0, 600)]);
+    let large = poly(vec![(0, 0), (5780, 5780), (0, 5780)]);
+    s.add_feature([small.clone()])
+        .expect("one ring is within budget");
+    assert_eq!(s.len(), 1);
+    let filled: usize = s
+        .iter_features()
+        .flat_map(|f| f.iter_fill_runs())
+        .map(|r| r.x.len())
+        .sum();
+    assert!(filled > 170_000, "{filled}");
+    let before = poly_state(&s);
+    assert_eq!(
+        s.add_feature([small, large]).err(),
+        Some(TileError::TooManyTiles)
+    );
+    assert_eq!(poly_state(&s), before, "a rejected feature leaves no trace");
+}
+
+#[test]
+fn polygon_all_is_atomic_on_error() {
+    // A square whose left edge runs through the column of tiles based at x = i32::MIN (extent 4096,
+    // buffer 0). Routing succeeds, but closing that edge's ring in tile row 1 needs a `B⁺` corner one
+    // unit left of i32::MIN → Overflow, after row 0's tiles were already written.
+    let (x0, x1) = (i32::MIN + 10, i32::MIN + 6000);
+    let bad = poly(vec![(x0, 0), (x1, 0), (x1, 10_000), (x0, 10_000)]);
+    let mut one =
+        PolygonSlicerOne::<Coord<i32>>::new(4096, 0, TileId::new(-524_288, 1)).expect("config");
+    assert_eq!(
+        one.add_feature(&bad[0], &[]).err(),
+        Some(TileError::Overflow),
+        "the single-tile clip agrees"
+    );
+
+    let good = poly(vec![(5, 5), (9000, 5), (9000, 9000), (5, 9000)]);
+    let mut s = PolygonSlicerAll::<Coord<i32>>::new(4096, 0).expect("valid config");
+    s.add_feature([good.clone()]).expect("clean feature");
+    let before = poly_state(&s);
+    assert_eq!(s.add_feature([bad]).err(), Some(TileError::Overflow));
+    assert_eq!(
+        poly_state(&s),
+        before,
+        "errored feature must roll back fully"
+    );
+
+    // Still usable, and identical to a slicer that never saw the bad input.
+    s.add_feature([good.clone()]).expect("still usable");
+    let mut clean = PolygonSlicerAll::<Coord<i32>>::new(4096, 0).expect("valid config");
+    clean.add_feature([good.clone()]).expect("clean");
+    clean.add_feature([good]).expect("clean");
+    assert_eq!(poly_state(&s), poly_state(&clean));
+}
+
+#[test]
+fn polygon_all_degenerate_inputs_and_clear() {
+    let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 0).expect("valid config");
+    // No polygons, a polygon with no rings, and a degenerate exterior (whose holes are then ignored):
+    // nothing is recorded.
+    s.add_feature(Vec::<Vec<Vec<Coord<i32>>>>::new())
+        .expect("empty");
+    s.add_feature([Vec::<Vec<Coord<i32>>>::new()])
+        .expect("no rings");
+    s.add_feature([vec![
+        line(vec![(1, 1), (9, 9), (1, 1)]),
+        line(vec![(2, 2), (8, 2), (8, 8)]),
+    ]])
+    .expect("degenerate exterior");
+    assert!(s.is_empty());
+    // A degenerate hole is ignored.
+    let square = line(vec![(2, 2), (60, 2), (60, 60), (2, 60)]);
+    s.add_feature([vec![square.clone(), line(vec![(30, 30), (31, 31)])]])
+        .expect("degenerate hole");
+    let mut plain = PolygonSlicerAll::<Coord<i32>>::new(25, 0).expect("valid config");
+    plain.add_feature([vec![square.clone()]]).expect("plain");
+    assert_eq!(poly_state(&s), poly_state(&plain));
+
+    // After clear the slicer behaves exactly like a fresh one.
+    s.clear();
+    assert!(s.is_empty());
+    assert_eq!(s.len(), 0);
+    s.add_feature([vec![square]]).expect("reuse");
+    assert_eq!(poly_state(&s), poly_state(&plain));
 }
