@@ -416,6 +416,10 @@ fn payload_and_attribute_ride_through() {
             .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
             .collect();
         assert_eq!(got, expected, "{:?}", t.tile_id());
+        // Every polygon carries its feature's attribute, and the views are plain copies.
+        let tile = t;
+        assert!(tile.iter_polygons().all(|p| *p.attr() == "lake"));
+        assert_eq!(t.tile_id(), tile.tile_id());
     }
 }
 

@@ -25,27 +25,15 @@ use crate::clip_polygon::{close_ring, push_distinct, push_fill_box};
 use crate::clip_polyline::to_local;
 use crate::geom::{crossing_x_ceil, ring_orientation};
 use crate::grid::{Grid, MAX_TILE_VISITS, RouteSink};
-use crate::polygon_slicer::RingView;
+use crate::polygon_view::{PolygonView, copy_view, offset, span};
 use crate::tile::TileId;
 use crate::vertex::PolyVertex;
-
-/// `len` as a `u32` arena offset. The flat storage indexes with `u32`; geometry beyond that is
-/// rejected rather than truncated.
-fn offset(len: usize) -> Result<u32, TileError> {
-    u32::try_from(len).map_err(|_| TileError::PolylineTooLarge)
-}
 
 /// The most vertices one feature may add to the output. Each detour has fewer corners than the
 /// vertices it replaces, so a tile's output stays within its rings' size, but a ring winding many times
 /// around many tiles (or many overlapping polygons) can still multiply that across tiles; valid
 /// geometry stays far below this.
 const MAX_FEATURE_VERTICES: usize = 1 << 28;
-
-/// The arena span of item `i`, given every item's end offset.
-fn span(ends: &[u32], i: usize) -> Range<usize> {
-    let start = if i == 0 { 0 } else { ends[i - 1] as usize };
-    start..ends[i] as usize
-}
 
 /// One ring of the feature being added. Its distinct vertices are `pts[start .. start + len]`, followed
 /// by a copy of the first so it routes as a closed polyline; edge `i` is global edge `start + i`.
@@ -235,6 +223,7 @@ impl<V: PolyVertex> Input<V> {
 /// all-synthetic box ring per covering polygon). Runs are maximal, never overlap the feature's edge
 /// tiles, and come in row-major order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct FillRun {
     /// The tile row.
     pub y: i32,
@@ -291,6 +280,14 @@ impl<V> Pieces<V> {
 
     fn clear(&mut self) {
         self.rollback(Savepoint::default());
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.verts.shrink_to_fit();
+        self.ring_ends.shrink_to_fit();
+        self.poly_ends.shrink_to_fit();
+        self.tiles.shrink_to_fit();
+        self.runs.shrink_to_fit();
     }
 
     /// Record covered tiles `start..end` of row `y`, extending the row's previous run when they abut.
@@ -885,7 +882,8 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
             let feature = &features[f];
             PolygonFeatureView {
                 pieces,
-                tiles: tiles_start as usize..feature.tiles_end as usize,
+                tiles_start: tiles_start as usize,
+                tiles_end: feature.tiles_end as usize,
                 runs: &pieces.runs[runs_start as usize..feature.runs_end as usize],
                 attr: &feature.attr,
             }
@@ -909,6 +907,20 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
         self.pieces.clear();
         self.features.clear();
     }
+
+    /// Release the memory not needed for what is recorded, including the working memory a large
+    /// feature left behind: [`clear`](Self::clear) keeps every buffer's capacity, so after an outlier
+    /// a long-lived slicer would otherwise hold its peak forever.
+    pub fn shrink_to_fit(&mut self) {
+        self.pieces.shrink_to_fit();
+        self.features.shrink_to_fit();
+        self.input = Input {
+            pts: Vec::new(),
+            rings: Vec::new(),
+            polys: Vec::new(),
+        };
+        self.scratch = Scratch::new();
+    }
 }
 
 impl<V: PolyVertex> PolygonSlicerAll<V, ()> {
@@ -931,7 +943,9 @@ impl<V: PolyVertex> PolygonSlicerAll<V, ()> {
 /// A borrowed view of one feature added to a [`PolygonSlicerAll`].
 pub struct PolygonFeatureView<'a, V: PolyVertex, A = ()> {
     pieces: &'a Pieces<V>,
-    tiles: Range<usize>,
+    /// The feature's edge tiles, `tiles_start..tiles_end` in `pieces.tiles`.
+    tiles_start: usize,
+    tiles_end: usize,
     runs: &'a [FillRun],
     attr: &'a A,
 }
@@ -946,11 +960,13 @@ impl<'a, V: PolyVertex, A> PolygonFeatureView<'a, V, A> {
 
     /// Iterate the feature's edge tiles — every tile a ring edge touches that received geometry — in
     /// row-major order (by `y`, then `x`).
-    pub fn iter_tiles(&self) -> impl Iterator<Item = PolygonTileView<'a, V>> + use<'a, V, A> {
-        let pieces = self.pieces;
-        self.tiles
-            .clone()
-            .map(move |index| PolygonTileView { pieces, index })
+    pub fn iter_tiles(&self) -> impl Iterator<Item = PolygonTileView<'a, V, A>> + use<'a, V, A> {
+        let (pieces, attr) = (self.pieces, self.attr);
+        (self.tiles_start..self.tiles_end).map(move |index| PolygonTileView {
+            pieces,
+            index,
+            attr,
+        })
     }
 
     /// Iterate the feature's fully covered tiles as [`FillRun`]s, in row-major order. Storage is per
@@ -961,12 +977,13 @@ impl<'a, V: PolyVertex, A> PolygonFeatureView<'a, V, A> {
 }
 
 /// A borrowed view of one feature's pieces in one edge tile.
-pub struct PolygonTileView<'a, V: PolyVertex> {
+pub struct PolygonTileView<'a, V: PolyVertex, A = ()> {
     pieces: &'a Pieces<V>,
     index: usize,
+    attr: &'a A,
 }
 
-impl<'a, V: PolyVertex> PolygonTileView<'a, V> {
+impl<'a, V: PolyVertex, A> PolygonTileView<'a, V, A> {
     /// The tile this view is for.
     #[must_use]
     pub fn tile_id(&self) -> TileId {
@@ -974,38 +991,25 @@ impl<'a, V: PolyVertex> PolygonTileView<'a, V> {
     }
 
     /// Iterate the clipped polygons in this tile, in input-polygon order (at most one per input
-    /// polygon).
-    pub fn iter_polygons(&self) -> impl Iterator<Item = PolygonView<'a, V>> + use<'a, V> {
-        let pieces = self.pieces;
-        let start = if self.index == 0 {
-            0
-        } else {
-            pieces.tiles[self.index - 1].poly_end as usize
-        };
-        (start..pieces.tiles[self.index].poly_end as usize)
-            .map(move |index| PolygonView { pieces, index })
-    }
-}
-
-/// A borrowed view of one clipped polygon: its exterior ring, then its holes.
-pub struct PolygonView<'a, V: PolyVertex> {
-    pieces: &'a Pieces<V>,
-    index: usize,
-}
-
-impl<'a, V: PolyVertex> PolygonView<'a, V> {
-    /// Iterate the polygon's rings (exterior first, then holes), each closed and in the tile-local
-    /// frame.
-    pub fn iter_rings(&self) -> impl Iterator<Item = RingView<'a, V>> + use<'a, V> {
-        let pieces = self.pieces;
-        let rings = span(&pieces.poly_ends, self.index);
-        let first = rings.start;
-        rings.map(move |r| RingView {
-            verts: &pieces.verts[span(&pieces.ring_ends, r)],
-            is_hole: r != first,
+    /// polygon), each carrying the feature's attribute.
+    pub fn iter_polygons(&self) -> impl Iterator<Item = PolygonView<'a, V, A>> + use<'a, V, A> {
+        let (pieces, attr) = (self.pieces, self.attr);
+        let start = self
+            .index
+            .checked_sub(1)
+            .map_or(0, |prev| pieces.tiles[prev].poly_end as usize);
+        (start..pieces.tiles[self.index].poly_end as usize).map(move |p| {
+            PolygonView::new(
+                &pieces.verts,
+                &pieces.ring_ends,
+                span(&pieces.poly_ends, p),
+                attr,
+            )
         })
     }
 }
+
+copy_view!(PolygonFeatureView<A>: PolyVertex, PolygonTileView<A>: PolyVertex);
 
 #[cfg(test)]
 mod tests {
@@ -1044,6 +1048,26 @@ mod tests {
         s.max_feature_verts = MAX_FEATURE_VERTICES;
         s.add_feature([[&big[..]]]).expect("under the real cap");
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn shrink_to_fit_releases_working_memory() {
+        let ring = [(5, 5), (190, 5), (190, 190), (5, 190)].map(|(x, y)| Coord { x, y });
+        let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 2).expect("config");
+        s.add_feature([[&ring[..]]]).expect("slice");
+        let output = format!("{:?}", s.pieces);
+        s.clear();
+        assert!(s.scratch.hits.capacity() > 0 && s.pieces.verts.capacity() > 0);
+        s.shrink_to_fit();
+        assert_eq!(s.scratch.hits.capacity(), 0);
+        assert_eq!(s.input.pts.capacity(), 0);
+        assert_eq!(s.pieces.verts.capacity(), 0);
+        s.add_feature([[&ring[..]]]).expect("slice");
+        assert_eq!(
+            format!("{:?}", s.pieces),
+            output,
+            "a shrunk slicer works the same"
+        );
     }
 
     #[test]

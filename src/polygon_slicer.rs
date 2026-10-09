@@ -18,21 +18,15 @@ use crate::TileError;
 use crate::clip_polygon::{RingClip, clip_ring};
 use crate::clip_polyline::to_local;
 use crate::grid::Grid;
+use crate::polygon_view::{PolygonView, offset};
 use crate::tile::TileId;
 use crate::vertex::PolyVertex;
 
-/// One clipped ring in a tile's local frame, tagged exterior vs. hole.
+/// One polygon feature clipped into the tile: where its rings (exterior first, then holes) end, and
+/// its attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Ring<V> {
-    verts: Vec<V>,
-    is_hole: bool,
-}
-
-/// One polygon feature clipped into a tile: its surviving rings (exterior first, then holes) plus the
-/// per-feature attribute (cloned into each tile the feature reaches).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PolyFeature<V, A> {
-    rings: Vec<Ring<V>>,
+struct FeatureEntry<A> {
+    rings_end: u32,
     attr: A,
 }
 
@@ -45,7 +39,10 @@ struct PolyFeature<V, A> {
 pub struct PolygonSlicerOne<V: PolyVertex = Coord<i32>, A = ()> {
     grid: Grid,
     tile: TileId,
-    features: Vec<PolyFeature<V, A>>,
+    /// Every kept ring's tile-local vertices (each ring closed), and where each ring ends.
+    verts: Vec<V>,
+    ring_ends: Vec<u32>,
+    features: Vec<FeatureEntry<A>>,
 }
 
 impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
@@ -60,6 +57,8 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
         Ok(Self {
             grid: Grid::new(extent, buffer)?,
             tile,
+            verts: Vec::new(),
+            ring_ends: Vec::new(),
             features: Vec::new(),
         })
     }
@@ -89,13 +88,14 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
     ///
     /// When `A = ()`, prefer [`add_feature`](Self::add_feature).
     ///
-    /// Atomic: the polygon is fully clipped before anything is recorded, so on error the accumulator
-    /// is unchanged.
+    /// Atomic: on error the accumulator is unchanged.
     ///
     /// # Errors
     ///
-    /// [`TileError::Overflow`] if the tile's box, a synthetic corner, or a kept vertex overflows
-    /// `i32`.
+    /// - [`TileError::Overflow`] if the tile's box, a synthetic corner, or a kept vertex overflows
+    ///   `i32`.
+    /// - [`TileError::PolylineTooLarge`] if the tile's vertices exceed the `u32` indexing of the
+    ///   storage.
     pub fn add_feature_with(
         &mut self,
         exterior: &[V],
@@ -108,35 +108,68 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
             .origin(self.grid.extent())
             .ok_or(TileError::Overflow)?;
 
+        let (verts_before, rings_before) = (self.verts.len(), self.ring_ends.len());
+        let kept = self
+            .clip_feature(exterior, holes, min, max, origin)
+            .and_then(|kept| kept.then(|| offset(self.ring_ends.len())).transpose());
+        match kept {
+            Ok(Some(rings_end)) => self.features.push(FeatureEntry { rings_end, attr }),
+            other => {
+                // Absent from the tile, or failed: either way nothing of it stays.
+                self.verts.truncate(verts_before);
+                self.ring_ends.truncate(rings_before);
+                other?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Append the feature's clipped rings; `false` if it leaves nothing in the tile.
+    fn clip_feature(
+        &mut self,
+        exterior: &[V],
+        holes: &[&[V]],
+        min: Coord<i32>,
+        max: Coord<i32>,
+        origin: Coord<i32>,
+    ) -> Result<bool, TileError> {
         // Clip the exterior first — if it misses the tile entirely, the whole feature is absent here.
-        let ext = match clip_ring(exterior, min, max)? {
-            RingClip::Outside => return Ok(self),
-            RingClip::Covers(ring) | RingClip::Clipped(ring) => ring,
-        };
-        let mut rings = vec![Ring {
-            verts: localize(&ext, origin)?,
-            is_hole: false,
-        }];
+        match clip_ring(exterior, min, max)? {
+            RingClip::Outside => return Ok(false),
+            RingClip::Covers(ring) | RingClip::Clipped(ring) => self.push_ring(&ring, origin)?,
+        }
         for hole in holes {
             match clip_ring(hole, min, max)? {
                 // A hole that covers the whole tile leaves nothing to draw here — drop the feature
                 // entirely rather than emit a fill exactly cancelled by its hole.
-                RingClip::Covers(_) => return Ok(self),
-                RingClip::Clipped(clipped) => rings.push(Ring {
-                    verts: localize(&clipped, origin)?,
-                    is_hole: true,
-                }),
+                RingClip::Covers(_) => return Ok(false),
+                RingClip::Clipped(clipped) => self.push_ring(&clipped, origin)?,
                 RingClip::Outside => {}
             }
         }
-        self.features.push(PolyFeature { rings, attr });
-        Ok(self)
+        Ok(true)
     }
 
-    /// Iterate the tile's polygon features, in the order added. Each [`PolyFeatureView`] exposes that
-    /// feature's rings and its [`attr`](PolyFeatureView::attr).
-    pub fn iter_features(&self) -> impl Iterator<Item = PolyFeatureView<'_, V, A>> {
-        self.features.iter().map(|f| PolyFeatureView { feature: f })
+    /// Append one clipped ring (global frame) in the tile-local frame (`vertex − origin`).
+    fn push_ring(&mut self, ring: &[V], origin: Coord<i32>) -> Result<(), TileError> {
+        for &v in ring {
+            self.verts.push(to_local(v, origin)?);
+        }
+        self.ring_ends.push(offset(self.verts.len())?);
+        Ok(())
+    }
+
+    /// Iterate the tile's polygon features that reach it, in the order added, each as the
+    /// [`PolygonView`] of its clipped rings and [`attr`](PolygonView::attr).
+    pub fn iter_features(&self) -> impl Iterator<Item = PolygonView<'_, V, A>> {
+        let (verts, ring_ends, features) = (&self.verts, &self.ring_ends, &self.features);
+        (0..features.len()).map(move |f| {
+            let start = f
+                .checked_sub(1)
+                .map_or(0, |p| features[p].rings_end as usize);
+            let rings = start..features[f].rings_end as usize;
+            PolygonView::new(verts, ring_ends, rings, &features[f].attr)
+        })
     }
 
     /// Number of polygon features accumulated for the tile.
@@ -151,8 +184,10 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
         self.features.is_empty()
     }
 
-    /// Discard everything accumulated, keeping the extent/buffer/tile config.
+    /// Discard everything accumulated, keeping the extent/buffer/tile config and buffer capacity.
     pub fn clear(&mut self) {
+        self.verts.clear();
+        self.ring_ends.clear();
         self.features.clear();
     }
 }
@@ -163,55 +198,9 @@ impl<V: PolyVertex> PolygonSlicerOne<V, ()> {
     ///
     /// # Errors
     ///
-    /// [`TileError::Overflow`] as in [`add_feature_with`](Self::add_feature_with).
+    /// As in [`add_feature_with`](Self::add_feature_with).
     pub fn add_feature(&mut self, exterior: &[V], holes: &[&[V]]) -> Result<&mut Self, TileError> {
         self.add_feature_with(exterior, holes, ())
-    }
-}
-
-/// Re-express a clipped ring (global frame) in the tile-local frame (`vertex − origin`).
-fn localize<V: PolyVertex>(ring: &[V], origin: Coord<i32>) -> Result<Vec<V>, TileError> {
-    ring.iter().map(|&v| to_local(v, origin)).collect()
-}
-
-/// A borrowed view of one clipped polygon feature.
-pub struct PolyFeatureView<'a, V: PolyVertex, A = ()> {
-    feature: &'a PolyFeature<V, A>,
-}
-
-impl<'a, V: PolyVertex, A> PolyFeatureView<'a, V, A> {
-    /// The feature's per-feature attribute.
-    #[must_use]
-    pub fn attr(&self) -> &'a A {
-        &self.feature.attr
-    }
-
-    /// Iterate the feature's rings (exterior first, then holes), each in the tile-local frame.
-    pub fn iter_rings(&self) -> impl Iterator<Item = RingView<'a, V>> {
-        self.feature.rings.iter().map(|r| RingView {
-            verts: &r.verts,
-            is_hole: r.is_hole,
-        })
-    }
-}
-
-/// A borrowed view of one clipped ring.
-pub struct RingView<'a, V: PolyVertex> {
-    pub(crate) verts: &'a [V],
-    pub(crate) is_hole: bool,
-}
-
-impl<'a, V: PolyVertex> RingView<'a, V> {
-    /// The ring's vertices in the tile-local frame, closed (first vertex repeated at the end).
-    #[must_use]
-    pub fn vertices(&self) -> &'a [V] {
-        self.verts
-    }
-
-    /// Whether this ring is an interior ring (a hole).
-    #[must_use]
-    pub fn is_hole(&self) -> bool {
-        self.is_hole
     }
 }
 

@@ -157,7 +157,8 @@ fn example() -> Result<(), TileError> {
 ```
 
 A per-worker slicer can be reused across features: `clear()` keeps every buffer's capacity, so it
-stops allocating once warmed up. `add_feature` is atomic, like the polyline slicers.
+stops allocating once warmed up, and `shrink_to_fit()` releases what an outlier feature left behind.
+`add_feature` is atomic, like the polyline slicers.
 
 ### Payloads
 

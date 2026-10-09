@@ -73,10 +73,11 @@ PolygonSlicerAll<V = Coord<i32>, A = ()>   // slices multipolygon features into 
   payload). `PolygonSlicerOne` takes one polygon, `(exterior, &[holes])`. `PolygonSlicerAll` takes one
   **multipolygon** feature: an iterator of polygons, each an iterator of rings (exterior first), e.g.
   `[[&exterior[..], &hole[..]]]`.
-- Read-back: `PolygonSlicerOne::iter_features()` → rings (`RingView`: `vertices()` closed, tile-local;
-  `is_hole()`), `attr()`. `PolygonSlicerAll::iter_features()` → per feature `attr()`,
-  `iter_tiles()` (edge tiles, row-major) → `iter_polygons()` → `iter_rings()`, and
-  `iter_fill_runs()` → `FillRun { y, x: Range<i32> }` (§6). Feature-major rather than the polyline
+- Read-back: both slicers hand out the same `PolygonView` per clipped polygon — `attr()` and
+  `iter_rings()` (`RingView`: `vertices()` closed, tile-local; `is_hole()`). `PolygonSlicerOne::
+  iter_features()` yields one per feature that reaches the tile. `PolygonSlicerAll::iter_features()`
+  → per feature `attr()`, `iter_tiles()` (edge tiles, row-major) → `iter_polygons()`, and
+  `iter_fill_runs()` → `FillRun { y, x: Range<i32> }` (§6). Views are `Copy`. Feature-major rather than the polyline
   slicers' tile-major order: fill runs belong to one feature and span many tiles, and append-only
   per-feature storage needs no tile index.
 - `signed_area_2x(ring) -> i128` (§9) is public: the slicers preserve input winding, so a caller
@@ -85,7 +86,8 @@ PolygonSlicerAll<V = Coord<i32>, A = ()>   // slices multipolygon features into 
 
 Storage: flat `u32`-offset arenas (vertices, ring ends, polygon ends, tile entries, fill runs,
 feature ends) — a polygon's first ring is its exterior, so the role needs no marker. No per-tile
-allocation; `clear()` keeps all capacity. **No new runtime dependency.**
+allocation; `clear()` keeps all capacity, and `PolygonSlicerAll::shrink_to_fit()` releases it after
+an outlier feature. **No new runtime dependency.**
 
 ## 5. Corner-detour routing (the one genuinely new algorithm)
 
