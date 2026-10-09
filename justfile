@@ -235,6 +235,10 @@ test-fmt: && (fmt-toml '--check' '--check-format')
 udeps:  (cargo-install 'cargo-udeps')
     cargo +nightly udeps --workspace --all-features --all-targets
 
+# Refresh tests/visualize.qgz (QGIS) so its layer groups mirror every GeoJSON file under tests/
+update-visualize:  (assert-cmd 'python3')
+    python3 tests/update_visualize.py
+
 # Update all dependencies, including breaking changes. Requires nightly toolchain (install with `rustup install nightly`)
 update:
     cargo +nightly -Z unstable-options update --breaking
