@@ -61,56 +61,6 @@
         "type": "LineString",
         "coordinates": [
           [
-            5.0,
-            20.0
-          ],
-          [
-            45.0,
-            6.0
-          ],
-          [
-            55.0,
-            22.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 1/0",
-        "stroke": "#261fb5",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            45.0,
-            6.0
-          ],
-          [
-            55.0,
-            22.0
-          ],
-          [
-            10.0,
-            40.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/0",
-        "stroke": "#261fb5",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
             55.0,
             22.0
           ],
@@ -136,6 +86,31 @@
         "type": "LineString",
         "coordinates": [
           [
+            5.0,
+            20.0
+          ],
+          [
+            45.0,
+            6.0
+          ],
+          [
+            55.0,
+            22.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
             55.0,
             22.0
           ],
@@ -151,6 +126,31 @@
       },
       "properties": {
         "role": "tile 1/1",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            45.0,
+            6.0
+          ],
+          [
+            55.0,
+            22.0
+          ],
+          [
+            10.0,
+            40.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/0",
         "stroke": "#261fb5",
         "stroke-width": 2
       }

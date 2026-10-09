@@ -483,8 +483,26 @@ pub fn tile_polygon(exterior: &[Coord<i32>], holes: &[Vec<Coord<i32>>], tile: Ti
 }
 
 /// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot
-/// tests store and compare.
-pub fn feature_collection_bytes(features: Vec<Feature>) -> Vec<u8> {
+/// tests store and compare. Features are sorted by their `role` property: inputs, then tiles, then
+/// fills, then any other role, each group by role text (stable, so pieces sharing a role keep the
+/// order they were produced in).
+pub fn feature_collection_bytes(mut features: Vec<Feature>) -> Vec<u8> {
+    features.sort_by_cached_key(|f| {
+        let role = f
+            .property("role")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        let group = if role == "input" {
+            0
+        } else if role.starts_with("tile ") {
+            1
+        } else if role.starts_with("fill ") {
+            2
+        } else {
+            3
+        };
+        (group, role.to_owned())
+    });
     serde_json::to_vec_pretty(&FeatureCollection {
         bbox: None,
         features,

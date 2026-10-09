@@ -161,27 +161,6 @@
         "type": "LineString",
         "coordinates": [
           [
-            40.0,
-            20.0
-          ],
-          [
-            45.0,
-            5.0
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/0",
-        "stroke": "#261fb5",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
             23.0,
             10.0
           ],
@@ -197,6 +176,27 @@
       },
       "properties": {
         "role": "tile 1/1",
+        "stroke": "#261fb5",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            40.0,
+            20.0
+          ],
+          [
+            45.0,
+            5.0
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/0",
         "stroke": "#261fb5",
         "stroke-width": 2
       }

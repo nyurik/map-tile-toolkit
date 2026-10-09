@@ -7,9 +7,9 @@
 //! this single per-tile pass already fills tiles that sit fully inside the polygon (the containment
 //! case) as well as border tiles.
 //!
-//! The surviving per-tile rings are snapshotted as a `FeatureCollection`: the input polygon(s) first
-//! (yellow), then one filled `Polygon` feature per per-tile ring, colored by tile parity. Regenerate
-//! with `just bless`.
+//! The surviving per-tile rings are snapshotted as a `FeatureCollection`: the input polygon(s)
+//! (yellow) and one filled `Polygon` feature per per-tile ring, colored by tile parity, sorted by
+//! `role`. Regenerate with `just bless`.
 //!
 //! Every fixture is snapshotted at two buffer sizes: `polygons/snapshots/` (buffer 0) and
 //! `polygons/snapshots-5/` (buffer 5, each tile box grown 5 units per side).
@@ -124,8 +124,8 @@ fn snapshot_at_buffer(stem: &str, polygons: &[FixturePolygon], buffer: u16, dir:
         "duplicating every vertex changed the clip for {stem} (buffer {buffer})"
     );
 
-    // Build the snapshot: input polygons (yellow), then one filled piece per tile feature (holes
-    // punched out).
+    // Build the snapshot: input polygons (yellow) and one filled piece per tile feature (holes
+    // punched out); serialization sorts them by role.
     let mut features: Vec<_> = polygons
         .iter()
         .map(|p| support::input_polygon(&p.exterior, &p.holes))

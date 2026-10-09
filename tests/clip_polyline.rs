@@ -8,8 +8,8 @@
 //! 1. `slice_all_tiles` — the whole geometry into every tile it touches, in one pass.
 //! 2. For each tile that (1) produced, `slice_tile` re-clips that single tile.
 //!
-//! The result is snapshotted as a `FeatureCollection`: the original polyline first, then one
-//! feature per per-tile piece. Regenerate with `just bless`.
+//! The result is snapshotted as a `FeatureCollection`: the original polyline and one feature per
+//! per-tile piece, sorted by `role`. Regenerate with `just bless`.
 //!
 //! Every fixture is snapshotted at two buffer sizes, each into its own directory:
 //! - `snapshots/` — buffer 0 (tile boxes flush with the grid);
@@ -84,7 +84,7 @@ fn globalize(tile: TileId, runs: &[Vec<Coord<i32>>], extent: i32) -> Vec<Vec<Coo
         .collect()
 }
 
-/// Build the snapshot features: the input polylines first (one gray feature each), then one feature
+/// Build the snapshot features: the input polylines (one gray feature each) and one feature
 /// per per-tile **run** — each a plain `LineString`, never a `MultiLineString`, so distinct
 /// features/runs in a tile stay distinct (colored by tile parity so neighbors contrast, tagged with
 /// the tile).
@@ -96,8 +96,6 @@ fn build_features(
         .iter()
         .map(|line| support::input_feature(line))
         .collect();
-    let mut tiles = tiles.iter().map(|(&k, v)| (k, v)).collect::<Vec<_>>();
-    tiles.sort_unstable_by_key(|(k, _)| (k.y, k.x));
     for (tile, runs) in tiles {
         for run in runs {
             features.push(feature_line(run, &format!("tile {}/{}", tile.x, tile.y)));
