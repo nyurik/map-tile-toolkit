@@ -36,6 +36,12 @@ pub enum TileError {
     #[error("polyline reaches too many tiles to slice")]
     TooManyTiles,
 
+    /// Slicing one polygon feature would produce more vertices than the slicer allows (2^28). Valid
+    /// geometry stays far below that; only rings winding around tiles many times, or many overlapping
+    /// polygons, come close, and they are rejected rather than exhausting memory.
+    #[error("slicing the feature would produce too many vertices")]
+    OutputTooLarge,
+
     /// Coordinate arithmetic overflowed `i32` — a coordinate or tile lies too close to the limits of
     /// the representable range for the given `extent`/`buffer`.
     #[error("coordinate arithmetic overflowed the i32 range")]

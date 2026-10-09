@@ -35,6 +35,12 @@ fn offset(len: usize) -> Result<u32, TileError> {
     u32::try_from(len).map_err(|_| TileError::PolylineTooLarge)
 }
 
+/// The most vertices one feature may add to the output. Each detour has fewer corners than the
+/// vertices it replaces, so a tile's output stays within its rings' size, but a ring winding many times
+/// around many tiles (or many overlapping polygons) can still multiply that across tiles; valid
+/// geometry stays far below this.
+const MAX_FEATURE_VERTICES: usize = 1 << 28;
+
 /// The arena span of item `i`, given every item's end offset.
 fn span(ends: &[u32], i: usize) -> Range<usize> {
     let start = if i == 0 { 0 } else { ends[i - 1] as usize };
@@ -321,6 +327,8 @@ struct Scratch {
     /// Polygons containing the current tile (exterior inside, no hole inside), as a swap-remove set.
     covering: Vec<u32>,
     cover_pos: Vec<usize>,
+    /// The output length the current feature must not pass ([`MAX_FEATURE_VERTICES`] past its start).
+    vert_limit: usize,
     /// Per-tile temporaries.
     edges: Vec<u32>,
     arcs: Vec<(usize, usize)>,
@@ -339,6 +347,7 @@ impl Scratch {
             holes_in: Vec::new(),
             covering: Vec::new(),
             cover_pos: Vec::new(),
+            vert_limit: 0,
             edges: Vec::new(),
             arcs: Vec::new(),
             touched: Vec::new(),
@@ -407,13 +416,15 @@ impl Scratch {
         Ok(())
     }
 
-    /// Emit every edge tile of the feature into `out`, row by row.
+    /// Emit every edge tile of the feature into `out`, row by row, adding at most `max_verts` vertices.
     fn sweep<V: PolyVertex>(
         &mut self,
         grid: Grid,
         input: &Input<V>,
         out: &mut Pieces<V>,
+        max_verts: usize,
     ) -> Result<(), TileError> {
+        self.vert_limit = out.verts.len().saturating_add(max_verts);
         // Containment state starts (and, since every ring crosses a line an even number of times, ends
         // each row) empty.
         self.inside.clear();
@@ -493,6 +504,10 @@ impl Scratch {
                 }
                 let end = h + hits[h..].partition_point(|x| x.tx == hit.tx);
                 self.tile(grid, input, TileId::new(hit.tx, ty), &hits[h..end], cs, out)?;
+                // One tile's output is bounded by the feature's size; only the sum over tiles is not.
+                if out.verts.len() > self.vert_limit {
+                    return Err(TileError::OutputTooLarge);
+                }
                 (h, next) = (end, tx + 1);
             }
             if k == self.by_x.len() {
@@ -752,6 +767,8 @@ pub struct PolygonSlicerAll<V: PolyVertex = Coord<i32>, A = ()> {
     features: Vec<FeatureEntry<A>>,
     input: Input<V>,
     scratch: Scratch,
+    /// [`MAX_FEATURE_VERTICES`], lowered by tests.
+    max_feature_verts: usize,
 }
 
 impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
@@ -779,6 +796,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
                 polys: Vec::new(),
             },
             scratch: Scratch::new(),
+            max_feature_verts: MAX_FEATURE_VERTICES,
         })
     }
 
@@ -810,6 +828,8 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     /// - [`TileError::TooManyTiles`] if a ring spans more than `i16::MAX` tiles on an axis, or routing
     ///   the feature's rings would examine too many candidate tiles (one budget per feature).
     /// - [`TileError::Overflow`] if coordinate math overflows `i32` (geometry too near its limits).
+    /// - [`TileError::OutputTooLarge`] if the feature's pieces would exceed 2^28 vertices (only rings
+    ///   winding around tiles many times, or many overlapping polygons, get there).
     /// - [`TileError::PolylineTooLarge`] if the geometry exceeds the `u32` indexing of the storage.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add_feature_with<P>(&mut self, polygons: P, attr: A) -> Result<&mut Self, TileError>
@@ -824,7 +844,12 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
         let save = self.pieces.savepoint();
         let ends = self
             .scratch
-            .sweep(self.grid, &self.input, &mut self.pieces)
+            .sweep(
+                self.grid,
+                &self.input,
+                &mut self.pieces,
+                self.max_feature_verts,
+            )
             .and_then(|()| {
                 Ok((
                     offset(self.pieces.tiles.len())?,
@@ -1002,6 +1027,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn output_cap_rejects_the_feature_atomically() {
+        let small = [(5, 5), (20, 5), (20, 20), (5, 20)].map(|(x, y)| Coord { x, y });
+        let big = [(5, 5), (190, 5), (190, 190), (5, 190)].map(|(x, y)| Coord { x, y });
+        let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 2).expect("config");
+        s.add_feature([[&small[..]]]).expect("slice");
+        let before = format!("{:?}", s.pieces);
+        s.max_feature_verts = 40;
+        let err = s.add_feature([[&big[..]]]).err();
+        assert_eq!(err, Some(TileError::OutputTooLarge));
+        assert_eq!(s.len(), 1, "the rejected feature is not recorded");
+        assert_eq!(format!("{:?}", s.pieces), before, "nor any of its pieces");
+        s.max_feature_verts = MAX_FEATURE_VERTICES;
+        s.add_feature([[&big[..]]]).expect("under the real cap");
+        assert_eq!(s.len(), 2);
     }
 
     #[test]
