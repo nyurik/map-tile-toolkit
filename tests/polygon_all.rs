@@ -6,7 +6,7 @@
 //! Also here: per-fixture GeoJSON snapshots of the all-tiles output (input polygons, every edge-tile
 //! piece, and each fill run as one green rectangle) at buffer 0 (`polygons/snapshots-all/`) and 5
 //! (`polygons/snapshots-all-5/`); fill coverage against an independent `geo` point-in-polygon of each
-//! tile centre; reassembly of the edge tiles with [`PolygonMosaic`]; and the large-input bounds.
+//! tile center; reassembly of the edge tiles with [`PolygonMosaic`]; and the large-input bounds.
 
 #![allow(clippy::pedantic, reason = "test tool")]
 
@@ -197,7 +197,7 @@ fn fixture_matches_one(path: &Path) {
     }
 }
 
-/// The tile centre (a point of its core cell) in the global frame.
+/// The tile center (a point of its core cell) in the global frame.
 fn center(tile: TileId, extent: u32) -> Point<f64> {
     let e = extent as i32;
     Point::new(f64::from(tile.x * e + e / 2), f64::from(tile.y * e + e / 2))
@@ -214,7 +214,7 @@ fn geo_polygon(p: &FixturePolygon) -> Polygon<f64> {
     Polygon::new(ring(&p.exterior), p.holes.iter().map(|h| ring(h)).collect())
 }
 
-/// Every tile no edge touches is filled iff its centre lies in some polygon, by `geo`'s independent
+/// Every tile no edge touches is filled iff its center lies in some polygon, by `geo`'s independent
 /// point-in-polygon.
 fn fixture_fill_matches_geo(path: &Path) {
     let polygons = support::load_polygon_fixture(path);

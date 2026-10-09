@@ -5,7 +5,7 @@
 //! A vertex is kept by the same rule as the polyline clip (an incident edge touches the box); the
 //! dropped outside excursions between kept arcs are replaced by detours that hug the box exterior
 //! (`B⁺`, one unit outside `B`) via its corners. Each detour is built to be **homotopic** to the
-//! excursion it replaces — it reproduces the excursion's winding around the box centre — so the fill
+//! excursion it replaces — it reproduces the excursion's winding around the box center — so the fill
 //! inside the box is exact even when a ring wraps the tile. All synthetic geometry lies strictly
 //! outside `B`, which lets [`Mosaic`](crate::Mosaic) recognise and drop it geometrically.
 //!
@@ -79,9 +79,9 @@ fn corner(slot: u8, min: Coord<i32>, max: Coord<i32>) -> Result<Coord<i32>, Tile
 }
 
 /// Signed crossing of segment `a → b` with the ray `{ y = cy, x > max_x }` — the part of the `+x` ray
-/// from the box centre that lies outside the box: `+1` upward, `-1` downward, `0` if it misses
+/// from the box center that lies outside the box: `+1` upward, `-1` downward, `0` if it misses
 /// (half-open in `y`, so a vertex shared by two edges is counted once). Summed along a path this is
-/// the path's winding around the box centre; since every excursion and every detour lives outside the
+/// the path's winding around the box center; since every excursion and every detour lives outside the
 /// box, only the outside portion of the ray can be crossed.
 fn ray_crossing(a: Coord<i32>, b: Coord<i32>, cy: i32, max_x: i32) -> i64 {
     if (a.y > cy) == (b.y > cy) {
@@ -137,7 +137,7 @@ fn corner_count(start: u8, advance: i64) -> u64 {
     }
 }
 
-/// The box's centre `y` (overflow-safe midpoint) — the height of the winding ray.
+/// The box's center `y` (overflow-safe midpoint) — the height of the winding ray.
 pub(crate) fn center_y(min: Coord<i32>, max: Coord<i32>) -> i32 {
     i32::midpoint(min.y, max.y)
 }
@@ -151,7 +151,7 @@ enum Bridge {
 }
 
 /// Decide how to bridge a gap of `gap_len` dropped vertices from exit vertex `u` to entry vertex `v`
-/// (both outside the box) whose excursion winds `w_exc` times around the box centre ([`ray_crossing`]
+/// (both outside the box) whose excursion winds `w_exc` times around the box center ([`ray_crossing`]
 /// summed over its edges). The detour reproduces that winding, so it is homotopic to the excursion in
 /// the box exterior: the CCW corner path from `u`'s slot to `v`'s is the reference, and whole `∂B⁺`
 /// loops (±8 slots each) make up the winding difference.

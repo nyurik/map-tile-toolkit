@@ -124,7 +124,7 @@ fully, and a local detour would reconstruct only the notch area filled (inverted
 exit/entry vertices alone can't tell a short poke-out from a full wrap, so the detour is built to be
 **homotopic to the excursion** in `exterior(B)`:
 
-1. Pick a fixed ray `R` from the box centre (`+x`). For the dropped excursion polyline `[E … S]`,
+1. Pick a fixed ray `R` from the box center (`+x`). For the dropped excursion polyline `[E … S]`,
    count its **signed crossings** of the part of `R` outside `B` (exact integer, the same
    crossing-number machinery as `point_in_ring`) → `W_exc`.
 2. Build the reference corner path (CCW `∂B⁺` arc from `E`'s outcode slot to `S`'s), count its signed
@@ -158,7 +158,7 @@ whether any *edge* touches `B`:
   - A tile not touched by any ring edge has no ring within its `B`, so its whole box is uniformly
     inside or outside the fill — **one point-in-polygon test per tile is decisive.**
   - Do it as a **scanline over tile-rows** (perf, §8), not a test per tile. Each row's
-    representative line is its **centre line** `y = cy` — the same line every tile in the row casts
+    representative line is its **center line** `y = cy` — the same line every tile in the row casts
     its §5 winding ray along — so one exact integer x-crossing list per row (`crossing_x_ceil`,
     rounded up so "right of tile `tx`'s box" is a plain `tx <= k` test) serves both the fill and the
     detours. Sweeping the row's crossings left to right toggles each ring's parity; between two
@@ -245,7 +245,7 @@ purely tile-local, hence inherently order-independent.
 - **Orientation once per input ring** (i128 shoelace), reused across every tile that ring touches —
   not recomputed per tile.
 - **Interior fill is the only super-linear risk**; the scanline (§6) makes it
-  `O(crossings · log)` — crossings of row centre lines, bounded by the routing budget — instead of
+  `O(crossings · log)` — crossings of row center lines, bounded by the routing budget — instead of
   `O(tiles · ring)`, and only classifies tiles the edge pass didn't already cover. Measured
   (Callgrind, `just bench polygon`): a 4.5k-vertex polygon on a 25-unit grid costs 7.5M instructions
   all-tiles vs 100M through a per-tile `One`; the z14-like `huge_fill` (2^28 tiles) costs ~2.4k
@@ -365,7 +365,7 @@ All phases are done:
 
 `PolygonSlicerAll`'s tests (`tests/polygon_all.rs`) check every tile of the reachable span against
 `PolygonSlicerOne` on all fixtures at several grids and on random self-intersecting / overlapping /
-star-shaped multipolygons; fill coverage against `geo`'s point-in-polygon of each tile centre;
+star-shaped multipolygons; fill coverage against `geo`'s point-in-polygon of each tile center;
 reassembly through `PolygonMosaic`; and a z14-like square with a hole (2^28 tiles) in bounded time
 and memory. Snapshots: `tests/polygons/snapshots-all{,-5}/`.
 

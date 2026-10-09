@@ -6,7 +6,7 @@
 //! 1. **Route** every ring through [`Grid::route_within`] (one shared tile budget), recording which
 //!    edges touch which tile's buffered box — the keep-rule's whole input. Tiles no edge touches are
 //!    never visited.
-//! 2. **Index** where each edge crosses each tile row's centre line `y = cy`. That line carries the
+//! 2. **Index** where each edge crosses each tile row's center line `y = cy`. That line carries the
 //!    winding ray of every tile in the row, so one sorted list per row answers both remaining
 //!    questions: how far an excursion outside a tile winds around it (the detour's shape) and whether
 //!    a ring with no edge in a tile contains it (ray parity).
@@ -69,7 +69,7 @@ struct Hit {
     ring: u32,
 }
 
-/// A ring edge crossing row `ty`'s centre line, the line of every winding ray in that row (the
+/// A ring edge crossing row `ty`'s center line, the line of every winding ray in that row (the
 /// half-open rule of [`ray_crossing`](crate::clip_polygon) — each crossing counted once). The crossing
 /// lies right of tile `tx`'s buffered box — on its winding ray — iff `tx <= right_of`.
 #[derive(Debug, Clone, Copy)]
@@ -365,7 +365,7 @@ impl Scratch {
         Ok(())
     }
 
-    /// Index every edge's crossings of the tile-row centre lines it spans. An edge spans no more rows
+    /// Index every edge's crossings of the tile-row center lines it spans. An edge spans no more rows
     /// than routing charged it, so this is bounded by the routing budget.
     fn index_crossings<V: PolyVertex>(
         &mut self,
@@ -375,7 +375,7 @@ impl Scratch {
         self.crossings.clear();
         let extent = i64::from(grid.extent());
         let buffer = i64::from(grid.buffer());
-        // Row `ty`'s centre line: the midpoint of its buffered box, as the clip computes it.
+        // Row `ty`'s center line: the midpoint of its buffered box, as the clip computes it.
         let center =
             |ty: i64| i64::midpoint(ty * extent - buffer, ty * extent + extent - 1 + buffer);
         for (ring, info) in (0..).zip(&input.rings) {
@@ -383,7 +383,7 @@ impl Scratch {
                 let a = input.pts[edge as usize].position();
                 let b = input.pts[edge as usize + 1].position();
                 let (lo, hi) = (i64::from(a.y.min(b.y)), i64::from(a.y.max(b.y)));
-                // Rows whose centre `cy` satisfies `lo <= cy < hi` (the half-open crossing rule).
+                // Rows whose center `cy` satisfies `lo <= cy < hi` (the half-open crossing rule).
                 let mut ty = lo.div_euclid(extent) - 1;
                 while center(ty) < lo {
                     ty += 1;
@@ -741,7 +741,7 @@ struct FeatureEntry<A> {
 /// [`signed_area_2x`](crate::signed_area_2x) to normalize it first).
 ///
 /// The cost is proportional to the routing work (the edge tiles) plus the ring edges' crossings of
-/// tile-row centre lines — independent of ring length per tile. All storage is flat and reused:
+/// tile-row center lines — independent of ring length per tile. All storage is flat and reused:
 /// [`clear`](Self::clear) keeps every buffer's capacity, so one slicer per worker, cleared between
 /// features, stops allocating once warmed up.
 #[derive(Debug, Clone)]
