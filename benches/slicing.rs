@@ -23,7 +23,8 @@
 //! [`PolygonSlicerOne`](map_tile_toolkit::PolygonSlicerOne) per edge tile. Scenarios: `small` (every
 //! `tests/polygons/fixtures` feature), [`support::big_polygon`] at the three `big_*` scales, and —
 //! for `polygon_all` only — `huge_fill`, the z14-like [`support::huge_square`] whose 2^28 covered
-//! tiles must cost nothing per tile.
+//! tiles must cost nothing per tile, and `many_holes`, [`support::many_holes`] whose 2000 inner rings
+//! must cost their hits, not their count per edge tile.
 //!
 //! Filter with e.g. `just bench big`, `just bench big_single`, `just bench all`, `just bench polygon`.
 
@@ -138,6 +139,8 @@ enum PolyInput {
     Big,
     /// The single [`support::huge_square`].
     Huge,
+    /// The single [`support::many_holes`].
+    Holes,
 }
 
 /// Multipolygon features (each a list of polygons) for a [`PolyInput`].
@@ -159,6 +162,7 @@ fn load_polygons(input: PolyInput) -> Vec<Vec<FixturePolygon>> {
         }
         PolyInput::Big => vec![vec![support::big_polygon()]],
         PolyInput::Huge => vec![vec![support::huge_square()]],
+        PolyInput::Holes => vec![vec![support::many_holes()]],
     }
 }
 
@@ -172,6 +176,7 @@ fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<Vec<FixturePolygon
 #[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
 #[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
 #[bench::huge_fill(support::slicer(4096, 64), PolyInput::Huge)]
+#[bench::many_holes(support::slicer(256, 8), PolyInput::Holes)]
 fn polygon_all((cfg, features): (Cfg, Vec<Vec<FixturePolygon>>)) {
     let mut acc = cfg.poly_all();
     for feature in &features {

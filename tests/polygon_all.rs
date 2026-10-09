@@ -335,6 +335,41 @@ fn snapshot_fixture(path: &Path) {
     }
 }
 
+/// Many holes, from specks inside one tile to holes containing whole tiles, some overlapping: every
+/// tile still matches the oracle, now that untouched holes are settled by count rather than visited.
+#[test]
+fn many_holes_match_one() {
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut below = |n: i32| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        i32::try_from(state % u64::from(n.unsigned_abs())).expect("fits")
+    };
+    let square = |x: i32, y: i32, side: i32| {
+        [(x, y), (x + side, y), (x + side, y + side), (x, y + side)]
+            .map(|(x, y)| Coord { x, y })
+            .to_vec()
+    };
+    let holes = (0..60)
+        .map(|i| {
+            let side = if i % 6 == 0 {
+                30 + below(60)
+            } else {
+                1 + below(8)
+            };
+            square(10 + below(380 - side), 10 + below(380 - side), side)
+        })
+        .collect();
+    let polygon = FixturePolygon {
+        exterior: square(0, 0, 400),
+        holes,
+    };
+    for buffer in [0, 1, 3] {
+        check(std::slice::from_ref(&polygon), 16, buffer, "many holes");
+    }
+}
+
 #[test]
 fn payload_and_attribute_ride_through() {
     // Each vertex carries its index as an M value; synthetic corners carry the default (0).

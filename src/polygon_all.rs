@@ -51,12 +51,11 @@ struct RingInfo {
     hole: bool,
 }
 
-/// One polygon of the feature (only those with a non-degenerate exterior): rings `first..end`,
-/// exterior first, and the exterior's winding (for a fill box).
+/// One polygon of the feature (only those with a non-degenerate exterior): its exterior ring `first`
+/// (its holes follow it) and the exterior's winding (for a fill box).
 #[derive(Debug, Clone, Copy)]
 struct PolyInfo {
     first: u32,
-    end: u32,
     orient: Ordering,
 }
 
@@ -191,7 +190,6 @@ impl<V: PolyVertex> Input<V> {
             let ext_pts = &self.pts[ext.start as usize..(ext.start + ext.len) as usize];
             self.polys.push(PolyInfo {
                 first,
-                end: offset(self.rings.len())?,
                 orient: ring_orientation(ext_pts),
             });
         }
@@ -621,6 +619,9 @@ impl Scratch {
     /// Emit polygon `p` into the current tile from its rings' `hits` here: touching rings are clipped,
     /// the rest decided by containment (an exterior missing the tile or a hole covering it drops the
     /// polygon).
+    ///
+    /// Only the touching rings are visited, so a polygon with many holes costs its hits here, not its
+    /// ring count: the untouched holes are settled at once by how many of them contain the tile.
     #[expect(
         clippy::too_many_arguments,
         reason = "the tile context, passed down once per polygon"
@@ -637,50 +638,64 @@ impl Scratch {
         out: &mut Pieces<V>,
     ) -> Result<(), TileError> {
         let info = input.polys[p as usize];
-        let (verts_before, rings_before) = (out.verts.len(), out.ring_ends.len());
-        let mut h = 0;
-        for r in info.first..info.end {
-            let ring = input.rings[r as usize];
-            let n = hits[h..].partition_point(|x| x.ring == r);
-            let ring_hits = &hits[h..h + n];
-            h += n;
+        // Hits come in edge order, so the exterior's (if any) come first, then each hole's.
+        let exterior_touched = hits.first().is_some_and(|x| x.ring == info.first);
+        if !exterior_touched && !self.inside[info.first as usize] {
+            return Ok(()); // the exterior misses the tile
+        }
+        // `holes_in` counts every hole whose ray parity is odd, but a touched hole's parity says
+        // nothing about the tile: what remains are untouched holes containing it, which leave nothing
+        // to draw.
+        let holes_in = self.holes_in[p as usize] as usize;
+        if holes_in > 0
+            && holes_in
+                > ring_groups(hits)
+                    .filter(|g| g[0].ring != info.first && self.inside[g[0].ring as usize])
+                    .count()
+        {
+            return Ok(());
+        }
+        if !exterior_touched {
             let ring_start = out.verts.len();
-            if ring_hits.is_empty() {
-                match (self.inside[r as usize], ring.hole) {
-                    (false, false) => return Ok(()), // the exterior misses the tile
-                    (false, true) => continue,       // the hole misses the tile
-                    (true, true) => {
-                        // The tile is entirely hole: nothing to draw.
-                        out.verts.truncate(verts_before);
-                        out.ring_ends.truncate(rings_before);
-                        return Ok(());
-                    }
-                    (true, false) => push_fill_box(&mut out.verts, info.orient, min, max)?,
-                }
-            } else {
-                self.edges.clear();
-                self.edges
-                    .extend(ring_hits.iter().map(|x| x.edge - ring.start));
-                let fenwick = &self.fenwick;
-                let winding =
-                    |first: usize, count: usize| excursion_winding(cs, fenwick, ring, first, count);
-                let ring_pts = input.ring_pts(ring);
-                close_ring(
-                    ring_pts,
-                    &self.edges,
-                    min,
-                    max,
-                    winding,
-                    &mut self.arcs,
-                    &mut out.verts,
-                )?;
-            }
+            push_fill_box(&mut out.verts, info.orient, min, max)?;
+            localize(&mut out.verts[ring_start..], origin)?;
+            out.ring_ends.push(offset(out.verts.len())?);
+        }
+        for ring_hits in ring_groups(hits) {
+            let ring = input.rings[ring_hits[0].ring as usize];
+            let ring_start = out.verts.len();
+            self.edges.clear();
+            self.edges
+                .extend(ring_hits.iter().map(|x| x.edge - ring.start));
+            let fenwick = &self.fenwick;
+            let winding =
+                |first: usize, count: usize| excursion_winding(cs, fenwick, ring, first, count);
+            close_ring(
+                input.ring_pts(ring),
+                &self.edges,
+                min,
+                max,
+                winding,
+                &mut self.arcs,
+                &mut out.verts,
+            )?;
             localize(&mut out.verts[ring_start..], origin)?;
             out.ring_ends.push(offset(out.verts.len())?);
         }
         out.poly_ends.push(offset(out.ring_ends.len())?);
         Ok(())
     }
+}
+
+/// `hits` (one tile's, in edge order, so each ring's are contiguous) split into runs of the same ring,
+/// with one binary search per ring rather than a comparison per hit.
+fn ring_groups(mut hits: &[Hit]) -> impl Iterator<Item = &[Hit]> {
+    core::iter::from_fn(move || {
+        let ring = hits.first()?.ring;
+        let (group, rest) = hits.split_at(hits.partition_point(|x| x.ring == ring));
+        hits = rest;
+        Some(group)
+    })
 }
 
 /// Signed crossings, right of the current tile, of `ring`'s `count` edges from local edge `first`

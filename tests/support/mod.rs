@@ -324,6 +324,30 @@ pub fn huge_square() -> FixturePolygon {
     }
 }
 
+/// A 100×100-tile square (extent 256) with 2000 small holes, one per tile: the shape of a forest or
+/// lake multipolygon with many inner rings, whose cost must follow its hits, not its ring count.
+#[must_use]
+pub fn many_holes() -> FixturePolygon {
+    const E: i32 = 256;
+    let square = |x: i32, y: i32, side: i32| {
+        vec![
+            Coord { x, y },
+            Coord { x, y: y + side },
+            Coord {
+                x: x + side,
+                y: y + side,
+            },
+            Coord { x: x + side, y },
+        ]
+    };
+    FixturePolygon {
+        exterior: square(0, 0, 100 * E),
+        holes: (0..2000)
+            .map(|i| square((i % 98 + 1) * E + 10, (i / 98 + 1) * E + 10, 20))
+            .collect(),
+    }
+}
+
 /// The rings of a polygon, exterior first — the per-polygon input [`PolygonSlicerAll`] takes.
 #[must_use]
 pub fn rings(p: &FixturePolygon) -> Vec<&[Coord<i32>]> {
