@@ -104,7 +104,7 @@
         ]
       },
       "properties": {
-        "role": "tile 1/0",
+        "role": "tile 0/1",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
@@ -125,7 +125,7 @@
         ]
       },
       "properties": {
-        "role": "tile 0/1",
+        "role": "tile 1/0",
         "stroke": "#261fb5",
         "stroke-width": 2
       }
