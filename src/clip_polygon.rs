@@ -341,7 +341,7 @@ pub(crate) enum RingClip<V> {
 ///
 /// - [`TileError::Overflow`] if the tile sits so close to the `i32` edge that a synthetic corner can't
 ///   be placed strictly outside the box.
-/// - [`TileError::PolylineTooLarge`] if the ring has more than `u32::MAX` distinct vertices.
+/// - [`TileError::GeometryTooLarge`] if the ring has more than `u32::MAX` distinct vertices.
 pub(crate) fn clip_ring<V: PolyVertex>(
     ring: &[V],
     min: Coord<i32>,
@@ -353,7 +353,7 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         return Ok(RingClip::Outside);
     }
     let pos = |i: usize| pts[i % m].position();
-    let edges = u32::try_from(m).map_err(|_| TileError::PolylineTooLarge)?;
+    let edges = u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
     let touching: Vec<u32> = (0..edges)
         .filter(|&i| segment_intersects(pos(i as usize), pos(i as usize + 1), min, max))
         .collect();

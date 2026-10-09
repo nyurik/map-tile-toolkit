@@ -14,7 +14,7 @@ use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
 /// The maximum polyline length the slicer accepts (`u16::MAX + 1` vertices); a longer polyline yields
-/// [`TileError::PolylineTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
+/// [`TileError::GeometryTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
 const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 
 /// Upper bound on the candidate tiles [`Grid::route`] will examine before giving up with
@@ -226,7 +226,8 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`TileError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
+    /// - [`TileError::GeometryTooLarge`] — the polyline has more than 65,536 (`u16::MAX + 1`)
+    ///   vertices.
     /// - [`TileError::TooManyTiles`], [`TileError::Overflow`] — as in [`Self::route_within`], with a
     ///   fresh `MAX_TILE_VISITS` budget.
     pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
@@ -236,7 +237,7 @@ impl Grid {
     ) -> Result<(), TileError> {
         // Up-front length check before any `emit`, so this input-level error is atomic.
         if polyline.len() > MAX_INDEXED_LEN {
-            return Err(TileError::PolylineTooLarge);
+            return Err(TileError::GeometryTooLarge);
         }
         // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
         // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.

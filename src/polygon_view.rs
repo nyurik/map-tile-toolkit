@@ -10,7 +10,7 @@ use crate::vertex::PolyVertex;
 /// `len` as a `u32` arena offset. The flat storage indexes with `u32`; geometry beyond that is
 /// rejected rather than truncated.
 pub(crate) fn offset(len: usize) -> Result<u32, TileError> {
-    u32::try_from(len).map_err(|_| TileError::PolylineTooLarge)
+    u32::try_from(len).map_err(|_| TileError::GeometryTooLarge)
 }
 
 /// The arena span of item `i`, given every item's end offset.

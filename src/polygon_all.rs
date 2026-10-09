@@ -827,7 +827,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     /// - [`TileError::Overflow`] if coordinate math overflows `i32` (geometry too near its limits).
     /// - [`TileError::OutputTooLarge`] if the feature's pieces would exceed 2^28 vertices (only rings
     ///   winding around tiles many times, or many overlapping polygons, get there).
-    /// - [`TileError::PolylineTooLarge`] if the geometry exceeds the `u32` indexing of the storage.
+    /// - [`TileError::GeometryTooLarge`] if the geometry exceeds the `u32` indexing of the storage.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add_feature_with<P>(&mut self, polygons: P, attr: A) -> Result<&mut Self, TileError>
     where

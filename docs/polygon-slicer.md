@@ -111,13 +111,13 @@ corner on the same side; each connecting segment lies wholly in one `B` edge's o
 never meets `B`'s interior. This must be proven/tested, because a detour that clips `B` corrupts
 **reassembly**, not just one tile's render (§7).
 
-**Seam handling:** `slice_one` treats the ring as an open polyline, so a ring whose closure point is
-inside `B` comes back with its first and last arcs split at the array seam; join them (they're
-contiguous in the ring) before bridging the remaining gaps.
+**Seam handling:** the touching edges are numbered from the ring's first vertex, so a ring whose
+closure point is inside `B` has its first and last arcs split at the array seam; `close_ring` joins
+them (they're contiguous in the ring) before bridging the remaining gaps.
 
 Same-edge tiny excursion (`E`, `S` beyond the same edge) needs **zero** corners — the chord `E→S`
-already stays outside. The existing `slice_one` "bridge" (single-segment out-and-back kept as one
-arc) is unaffected and needs no detour.
+already stays outside. Two touching edges at most two apart stay one kept arc (the single-segment
+out-and-back between them, as in the polyline clip), which needs no detour.
 
 **Winding-matched detours (the wrap case).** A naive "route to the nearest corners" detour is wrong
 when the dropped excursion *encircles* the box — e.g. a large C-/donut-shaped ring whose notch dips
@@ -242,8 +242,9 @@ purely tile-local, hence inherently order-independent.
 - **One closing core.** `close_ring` (arcs from the sorted touching edges, seam join, bridge/detour
   via a winding callback) is shared: `One` supplies touching edges and windings by walking the ring,
   `All` from its hits and Fenwick tree, so both produce identical rings by construction.
-- **`PolygonSlicerOne`** reuses `Grid::slice_one` per ring to get arcs, then closes (§5) + containment
-  (§6). No duplicate walk.
+- **`PolygonSlicerOne`** finds each ring's touching edges with the same `segment_intersects` test,
+  then closes them with the shared core (§5); a ring touching no edge is settled by `point_in_ring`
+  (§6).
 - **Orientation once per input ring** (i128 shoelace), reused across every tile that ring touches —
   not recomputed per tile.
 - **Interior fill is the only super-linear risk**; the scanline (§6) makes it

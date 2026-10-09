@@ -22,18 +22,17 @@ pub enum TileError {
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
-    /// A line has more than `u16::MAX` vertices, or the geometry has more than `u16::MAX` lines —
-    /// beyond what the slicer's compact indexing supports.
-    #[error(
-        "polyline too large: at most {0} lines, and {0} vertices per line, are supported",
-        u16::MAX
-    )]
-    PolylineTooLarge,
+    /// The geometry is beyond the slicers' compact indexing: a polyline with more than 65,536
+    /// (`u16::MAX + 1`) vertices for the polyline slicers, or more than `u32::MAX` vertices or rings
+    /// in the storage for the polygon slicers.
+    #[error("geometry too large for the slicer's compact indexing")]
+    GeometryTooLarge,
 
-    /// The geometry reaches too many tiles to slice: it spans more than `i16::MAX` tiles from its
-    /// first vertex on an axis, or its segments would collectively require examining more candidate
-    /// tiles than the slicer's working-set bound.
-    #[error("polyline reaches too many tiles to slice")]
+    /// The geometry reaches too many tiles to slice: a polyline or ring spans more than `i16::MAX`
+    /// tiles from its first vertex on an axis, or its segments would collectively require examining
+    /// more candidate tiles than the slicer's working-set bound (one budget per polyline, or per
+    /// polygon feature).
+    #[error("geometry reaches too many tiles to slice")]
     TooManyTiles,
 
     /// Slicing one polygon feature would produce more vertices than the slicer allows (2^28). Valid

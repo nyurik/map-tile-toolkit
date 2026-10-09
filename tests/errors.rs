@@ -125,7 +125,7 @@ fn too_many_vertices_errors() {
         .collect();
     assert_eq!(
         s.add_feature(&coords).err(),
-        Some(TileError::PolylineTooLarge)
+        Some(TileError::GeometryTooLarge)
     );
 }
 

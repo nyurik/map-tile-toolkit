@@ -94,7 +94,7 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
     ///
     /// - [`TileError::Overflow`] if the tile's box, a synthetic corner, or a kept vertex overflows
     ///   `i32`.
-    /// - [`TileError::PolylineTooLarge`] if the tile's vertices exceed the `u32` indexing of the
+    /// - [`TileError::GeometryTooLarge`] if the tile's vertices exceed the `u32` indexing of the
     ///   storage.
     pub fn add_feature_with(
         &mut self,
