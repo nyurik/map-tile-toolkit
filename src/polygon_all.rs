@@ -21,7 +21,7 @@ use core::ops::Range;
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polygon::{close_ring, push_distinct, push_fill_box};
+use crate::clip_polygon::{close_ring, fill_box, push_distinct, push_fill_box};
 use crate::clip_polyline::to_local;
 use crate::geom::{crossing_x_ceil, ring_orientation};
 use crate::grid::{Grid, MAX_TILE_VISITS, RouteSink};
@@ -46,11 +46,13 @@ struct RingInfo {
 }
 
 /// One polygon of the feature (only those with a non-degenerate exterior): its exterior ring `first`
-/// (its holes follow it) and the exterior's winding (for a fill box).
+/// (its holes follow it), the exterior's winding (for a fill box), and its position among the
+/// polygons passed in.
 #[derive(Debug, Clone, Copy)]
 struct PolyInfo {
     first: u32,
     orient: Ordering,
+    index: u32,
 }
 
 /// A ring edge touching a tile's buffered box (from routing). Sorted by `(ty, tx, edge)`: rows in
@@ -167,7 +169,8 @@ impl<V: PolyVertex> Input<V> {
         self.pts.clear();
         self.rings.clear();
         self.polys.clear();
-        for polygon in polygons {
+        for (index, polygon) in polygons.into_iter().enumerate() {
+            let index = offset(index)?;
             let mut rings = polygon.into_iter();
             let Some(exterior) = rings.next() else {
                 continue;
@@ -185,6 +188,7 @@ impl<V: PolyVertex> Input<V> {
             self.polys.push(PolyInfo {
                 first,
                 orient: ring_orientation(ext_pts),
+                index,
             });
         }
         Ok(())
@@ -216,12 +220,17 @@ impl<V: PolyVertex> Input<V> {
     }
 }
 
-/// A horizontal run of tiles lying **entirely inside** a feature: row `y`, columns `x.start..x.end`.
+/// A horizontal run of tiles lying **entirely inside** one of a feature's polygons: row `y`, columns
+/// `x.start..x.end`, covered by polygon `polygon`.
 ///
-/// No ring edge touches these tiles' buffered boxes, so each is uniformly covered — render it as a
-/// solid fill of its buffered box (where [`PolygonSlicerOne`](crate::PolygonSlicerOne) emits one
-/// all-synthetic box ring per covering polygon). Runs are maximal, never overlap the feature's edge
-/// tiles, and come in row-major order.
+/// No ring edge touches these tiles' buffered boxes, so each is uniformly covered. In each of them,
+/// [`PolygonSlicerOne`](crate::PolygonSlicerOne) emits one polygon for this one: a single
+/// all-synthetic box ring around the buffered box, which
+/// [`PolygonFeatureView::fill_ring`] returns (the same tile-local ring for every tile of the run).
+///
+/// Runs never overlap the feature's edge tiles, are maximal per polygon, and come in row-major order,
+/// then by polygon. Polygons of a valid multipolygon don't overlap, so neither do their runs; only
+/// overlapping parts give a tile several runs, which `PolygonSlicerOne` emits in polygon order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct FillRun {
@@ -229,6 +238,11 @@ pub struct FillRun {
     pub y: i32,
     /// The tile columns, end-exclusive.
     pub x: Range<i32>,
+    /// The covering polygon: its position among the polygons passed to
+    /// [`add_feature_with`](PolygonSlicerAll::add_feature_with).
+    pub polygon: u32,
+    /// The covering polygon's exterior winding, which its fill ring follows.
+    orient: Ordering,
 }
 
 /// Where each feature's geometry lands, in flat arenas (no per-tile allocations): tile-local ring
@@ -289,22 +303,6 @@ impl<V> Pieces<V> {
         self.tiles.shrink_to_fit();
         self.runs.shrink_to_fit();
     }
-
-    /// Record covered tiles `start..end` of row `y`, extending the row's previous run when they abut.
-    /// `row_runs` is where this row's runs begin, so runs never merge across rows or features.
-    fn fill(&mut self, y: i32, start: i64, end: i64, row_runs: usize) -> Result<(), TileError> {
-        if start >= end {
-            return Ok(());
-        }
-        let start = i32::try_from(start).map_err(|_| TileError::Overflow)?;
-        let end = i32::try_from(end).map_err(|_| TileError::Overflow)?;
-        let row_len = self.runs.len() - row_runs;
-        match self.runs.last_mut() {
-            Some(run) if row_len > 0 && run.x.end == start => run.x.end = end,
-            _ => self.runs.push(FillRun { y, x: start..end }),
-        }
-        Ok(())
-    }
 }
 
 /// Reusable working memory for one feature's routing and row sweep (kept across features).
@@ -324,7 +322,14 @@ struct Scratch {
     /// Polygons containing the current tile (exterior inside, no hole inside), as a swap-remove set.
     covering: Vec<u32>,
     cover_pos: Vec<usize>,
+    /// Per polygon: its latest fill run (an index into the output runs; stale unless in this row).
+    last_run: Vec<usize>,
+    /// Whether the tile-local fill box fits `i32` (see [`PolygonSlicerAll::fill_box`]).
+    fill_ok: bool,
     /// The output length the current feature must not pass ([`MAX_FEATURE_VERTICES`] past its start).
+    /// It bounds the fill runs too: a polygon's run ends only beside a tile where that polygon emits
+    /// a ring (an edge of it, or its fill box in another polygon's edge tile), so runs never
+    /// outnumber the output rings by more than one per row and polygon.
     vert_limit: usize,
     /// Per-tile temporaries.
     edges: Vec<u32>,
@@ -344,6 +349,8 @@ impl Scratch {
             holes_in: Vec::new(),
             covering: Vec::new(),
             cover_pos: Vec::new(),
+            last_run: Vec::new(),
+            fill_ok: false,
             vert_limit: 0,
             edges: Vec::new(),
             arcs: Vec::new(),
@@ -420,8 +427,12 @@ impl Scratch {
         input: &Input<V>,
         out: &mut Pieces<V>,
         max_verts: usize,
+        fill_ok: bool,
     ) -> Result<(), TileError> {
         self.vert_limit = out.verts.len().saturating_add(max_verts);
+        self.fill_ok = fill_ok;
+        self.last_run.clear();
+        self.last_run.resize(input.polys.len(), usize::MAX);
         // Containment state starts (and, since every ring crosses a line an even number of times, ends
         // each row) empty.
         self.inside.clear();
@@ -491,14 +502,11 @@ impl Scratch {
                 .by_x
                 .get(k)
                 .map_or(i64::MAX, |&i| cs[i as usize].right_of);
-            let covered = !self.covering.is_empty();
             while let Some(hit) = hits.get(h)
                 && i64::from(hit.tx) <= bound
             {
                 let tx = i64::from(hit.tx);
-                if covered {
-                    out.fill(ty, next, tx, row_runs)?;
-                }
+                self.fill(input, ty, next, tx, row_runs, out)?;
                 let end = h + hits[h..].partition_point(|x| x.tx == hit.tx);
                 self.tile(grid, input, TileId::new(hit.tx, ty), &hits[h..end], cs, out)?;
                 // One tile's output is bounded by the feature's size; only the sum over tiles is not.
@@ -508,13 +516,13 @@ impl Scratch {
                 (h, next) = (end, tx + 1);
             }
             if k == self.by_x.len() {
-                // Past every crossing each ring's parity is even again: nothing covers.
+                // Past every crossing each ring's parity is even again: nothing covers. Order the
+                // row's runs by column, then polygon (they were extended per polygon as found).
+                out.runs[row_runs..].sort_unstable_by_key(|r| (r.x.start, r.polygon));
                 return Ok(());
             }
             // `bound` is a crossing's `right_of` (|·| ≤ 2^32), so `+ 1` cannot overflow.
-            if covered {
-                out.fill(ty, next, bound + 1, row_runs)?;
-            }
+            self.fill(input, ty, next, bound + 1, row_runs, out)?;
             next = bound + 1;
             // Tiles past `bound` have these crossings on their left.
             while let Some(&i) = self.by_x.get(k)
@@ -526,6 +534,50 @@ impl Scratch {
                 k += 1;
             }
         }
+    }
+
+    /// Record tiles `start..end` of row `y` as covered by every polygon now covering, extending each
+    /// polygon's previous run of the row when they abut. `row_runs` is where this row's runs begin, so
+    /// runs never merge across rows or features.
+    fn fill<V>(
+        &mut self,
+        input: &Input<V>,
+        y: i32,
+        start: i64,
+        end: i64,
+        row_runs: usize,
+        out: &mut Pieces<V>,
+    ) -> Result<(), TileError> {
+        if start >= end || self.covering.is_empty() {
+            return Ok(());
+        }
+        if !self.fill_ok {
+            // The single-tile clip can't build this tile's fill box either.
+            return Err(TileError::Overflow);
+        }
+        let start = i32::try_from(start).map_err(|_| TileError::Overflow)?;
+        let end = i32::try_from(end).map_err(|_| TileError::Overflow)?;
+        for &p in &self.covering {
+            let info = input.polys[p as usize];
+            let last = &mut self.last_run[p as usize];
+            match out.runs.get_mut(*last) {
+                Some(run)
+                    if *last >= row_runs && run.polygon == info.index && run.x.end == start =>
+                {
+                    run.x.end = end;
+                }
+                _ => {
+                    *last = out.runs.len();
+                    out.runs.push(FillRun {
+                        y,
+                        x: start..end,
+                        polygon: info.index,
+                        orient: info.orient,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The sweep passed `crossing`: flip its ring's containment and update which polygons cover.
@@ -766,6 +818,9 @@ pub struct PolygonSlicerAll<V: PolyVertex = Coord<i32>, A = ()> {
     scratch: Scratch,
     /// [`MAX_FEATURE_VERTICES`], lowered by tests.
     max_feature_verts: usize,
+    /// The tile-local `B⁺` corners `(sw, ne)` of every fill box, or `None` if they leave `i32` (then
+    /// no tile can be filled: the single-tile clip reports `Overflow` there).
+    fill_box: Option<(Coord<i32>, Coord<i32>)>,
 }
 
 impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
@@ -777,8 +832,24 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
     /// - [`TileError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
     pub fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
+        let grid = Grid::new(extent, buffer)?;
+        // A fill box is the same in every tile's local frame: tile (0, 0)'s, where global = local.
+        let fill_box = grid
+            .tile_buffered_bounds(TileId::new(0, 0))
+            .ok()
+            .and_then(|(min, max)| {
+                let sw = Coord {
+                    x: min.x.checked_sub(1)?,
+                    y: min.y.checked_sub(1)?,
+                };
+                let ne = Coord {
+                    x: max.x.checked_add(1)?,
+                    y: max.y.checked_add(1)?,
+                };
+                Some((sw, ne))
+            });
         Ok(Self {
-            grid: Grid::new(extent, buffer)?,
+            grid,
             pieces: Pieces {
                 verts: Vec::new(),
                 ring_ends: Vec::new(),
@@ -794,6 +865,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
             },
             scratch: Scratch::new(),
             max_feature_verts: MAX_FEATURE_VERTICES,
+            fill_box,
         })
     }
 
@@ -846,6 +918,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
                 &self.input,
                 &mut self.pieces,
                 self.max_feature_verts,
+                self.fill_box.is_some(),
             )
             .and_then(|()| {
                 Ok((
@@ -875,6 +948,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     pub fn iter_features(&self) -> impl Iterator<Item = PolygonFeatureView<'_, V, A>> {
         let pieces = &self.pieces;
         let features = &self.features;
+        let fill_box = self.fill_box.unwrap_or_default();
         (0..features.len()).map(move |f| {
             let (tiles_start, runs_start) = f
                 .checked_sub(1)
@@ -885,6 +959,7 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
                 tiles_start: tiles_start as usize,
                 tiles_end: feature.tiles_end as usize,
                 runs: &pieces.runs[runs_start as usize..feature.runs_end as usize],
+                fill_box,
                 attr: &feature.attr,
             }
         })
@@ -947,6 +1022,8 @@ pub struct PolygonFeatureView<'a, V: PolyVertex, A = ()> {
     tiles_start: usize,
     tiles_end: usize,
     runs: &'a [FillRun],
+    /// The tile-local fill-box corners (unused when there are no runs).
+    fill_box: (Coord<i32>, Coord<i32>),
     attr: &'a A,
 }
 
@@ -973,6 +1050,15 @@ impl<'a, V: PolyVertex, A> PolygonFeatureView<'a, V, A> {
     /// run, not per tile, so a feature covering millions of tiles costs one run per row of them.
     pub fn iter_fill_runs(&self) -> impl Iterator<Item = FillRun> + use<'a, V, A> {
         self.runs.iter().cloned()
+    }
+
+    /// The ring [`PolygonSlicerOne`](crate::PolygonSlicerOne) emits for `run`'s polygon in each tile
+    /// of the run: the tile's buffered box grown by one unit, tile-local and closed, all synthetic
+    /// vertices, wound like the polygon's exterior. It is the polygon's only ring there.
+    #[must_use]
+    pub fn fill_ring(&self, run: &FillRun) -> [V; 5] {
+        let (sw, ne) = self.fill_box;
+        fill_box(run.orient, sw, ne).map(V::synthetic_at)
     }
 }
 

@@ -10,8 +10,8 @@
 //!    large to scan cheaply):
 //!    - every **edge tile** holds exactly what a `PolygonSlicerOne` bound to it yields for each
 //!      polygon, in order;
-//!    - every **fill-run** tile is one the single-tile slicer fills with whole-tile boxes only, and
-//!      no tile is both;
+//!    - every **fill-run** tile holds exactly what the single-tile slicer yields there too, once each
+//!      run's fill ring is placed in it (in polygon order), and no tile is both;
 //!    - every **other** tile is one the single-tile slicer leaves empty.
 //!
 //!    The second feature checks that features stored one after another read back independently.
@@ -23,7 +23,7 @@
 
 #![no_main]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use arbitrary::Arbitrary;
 use geo_types::Coord;
@@ -47,11 +47,14 @@ struct Input {
     features: Vec<Vec<Vec<Vec<(i8, i8)>>>>,
 }
 
-/// Per polygon, its rings (exterior first), tile-local.
-type Pieces = Vec<Vec<Vec<Coord<i32>>>>;
+/// One polygon's rings (exterior first), tile-local.
+type Rings = Vec<Vec<Coord<i32>>>;
 
-/// One feature's output: its edge tiles' pieces and its filled tiles.
-type Output = (BTreeMap<TileId, Pieces>, BTreeSet<TileId>);
+/// Per polygon, its rings.
+type Pieces = Vec<Rings>;
+
+/// One feature's output: its edge tiles' pieces and its filled tiles' fill rings, as pieces.
+type Output = (BTreeMap<TileId, Pieces>, BTreeMap<TileId, Pieces>);
 
 /// What the single-tile slicer yields for `tile`, or `None` if the tile itself is out of range.
 fn one_tile(polygons: &Polygons, extent: u32, buffer: u16, tile: TileId) -> Option<Pieces> {
@@ -74,7 +77,7 @@ fn output(all: &PolygonSlicerAll<Coord<i32>>) -> Vec<Output> {
     all.iter_features()
         .map(|f| {
             let mut tiles = BTreeMap::new();
-            let mut fills = BTreeSet::new();
+            let mut fills: BTreeMap<TileId, Vec<(u32, Rings)>> = BTreeMap::new();
             for t in f.iter_tiles() {
                 let pieces = t
                     .iter_polygons()
@@ -87,28 +90,29 @@ fn output(all: &PolygonSlicerAll<Coord<i32>>) -> Vec<Output> {
             }
             for run in f.iter_fill_runs() {
                 assert!(!run.x.is_empty(), "empty fill run");
-                for x in run.x {
+                let ring = f.fill_ring(&run).to_vec();
+                for x in run.x.clone() {
                     let tile = TileId::new(x, run.y);
                     assert!(!tiles.contains_key(&tile), "{tile:?} is both edge and fill");
-                    assert!(fills.insert(tile), "{tile:?} filled twice");
+                    let polys = fills.entry(tile).or_default();
+                    assert!(
+                        polys.iter().all(|(p, _)| *p != run.polygon),
+                        "{tile:?} filled twice by polygon {}",
+                        run.polygon
+                    );
+                    polys.push((run.polygon, vec![ring.clone()]));
                 }
             }
+            let fills = fills
+                .into_iter()
+                .map(|(tile, mut polys)| {
+                    polys.sort_by_key(|(p, _)| *p);
+                    (tile, polys.into_iter().map(|(_, rings)| rings).collect())
+                })
+                .collect();
             (tiles, fills)
         })
         .collect()
-}
-
-/// Whether every piece is a single all-synthetic ring outside the tile's core — a fill box.
-fn only_fill_boxes(pieces: &Pieces, extent: u32) -> bool {
-    let e = i64::from(extent);
-    !pieces.is_empty()
-        && pieces.iter().all(|p| {
-            p.len() == 1
-                && p[0].len() == 5
-                && p[0]
-                    .iter()
-                    .all(|c| !(0..e).contains(&i64::from(c.x)) && !(0..e).contains(&i64::from(c.y)))
-        })
 }
 
 /// Scale and move one feature's coordinates, dropping vertices that leave `i32`.
@@ -167,7 +171,7 @@ fn check(polygons: &Polygons, (tiles, fills): &Output, extent: u32, buffer: u16)
             let Some(one) = one_tile(polygons, extent, buffer, id) else {
                 // A padding tile past the `i32` limits: the all-tiles slicer cannot have used it.
                 assert!(
-                    !tiles.contains_key(&id) && !fills.contains(&id),
+                    !tiles.contains_key(&id) && !fills.contains_key(&id),
                     "{id:?} is out of range"
                 );
                 continue;
@@ -177,10 +181,10 @@ fn check(polygons: &Polygons, (tiles, fills): &Output, extent: u32, buffer: u16)
                     pieces, &one,
                     "edge tile {id:?} disagrees with the single-tile slicer"
                 );
-            } else if fills.contains(&id) {
-                assert!(
-                    only_fill_boxes(&one, extent),
-                    "fill tile {id:?}, single-tile: {one:?}"
+            } else if let Some(pieces) = fills.get(&id) {
+                assert_eq!(
+                    pieces, &one,
+                    "fill tile {id:?} disagrees with the single-tile slicer"
                 );
             } else {
                 assert!(one.is_empty(), "tile {id:?} missing: {one:?}");

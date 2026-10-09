@@ -110,8 +110,10 @@ for renderers that clip to the tile (MVT), not for consumers that need OGC-valid
 `PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
 
 Tiles a feature covers entirely are never materialized: `PolygonSlicerAll` reports them as
-`FillRun { y, x: Range<i32> }` row spans, so a polygon covering 10⁸ tiles costs one run per row, and
-time and memory grow with its perimeter rather than its area.
+`FillRun { y, x: Range<i32>, polygon }` row spans, so a polygon covering 10⁸ tiles costs one run per
+row, and time and memory grow with its perimeter rather than its area. `fill_ring(&run)` gives the
+one ring `PolygonSlicerOne` yields for that polygon in each of the run's tiles (a box just outside the
+buffered tile, wound like the polygon), so expanding the runs reproduces its output exactly.
 
 Slicing preserves each ring's winding. `signed_area_2x` gives a ring's exact orientation, so
 normalize it once per feature if the output needs a fixed convention. MVT needs exteriors with a
@@ -147,9 +149,10 @@ fn example() -> Result<(), TileError> {
                 }
             }
         }
-        // Tiles entirely inside the feature, as row spans.
+        // Tiles entirely inside one of its polygons, as row spans: in each tile (x, y)
+        // for x in run.x, that polygon is the single ring `fill_ring` (tile-local).
         for run in feature.iter_fill_runs() {
-            let _ = (run.y, run.x); // tiles (x, y) for x in run.x
+            let _ = (run.y, &run.x, run.polygon, feature.fill_ring(&run));
         }
     }
     Ok(())
@@ -239,9 +242,9 @@ This project uses [just](https://github.com/casey/just#readme) (`cargo install j
 the command list and `just test` to test. Tests are data-driven: each `tests/polylines/fixtures/*.geojson`
 polyline is sliced by both paths (asserted byte-identical) and snapshotted as a `.geojson`
 `FeatureCollection` (original line plus every per-tile piece) that renders on a map. Polygon fixtures
-in `tests/polygons/fixtures/` are snapshotted per tile by `PolygonSlicerOne` (`snapshots*/`) and by
-`PolygonSlicerAll` (`snapshots-all*/`, with fill runs drawn as green rectangles), and every
-`PolygonSlicerAll` tile is checked against `PolygonSlicerOne`. Run `just bless`
+in `tests/polygons/fixtures/` are snapshotted per tile (`snapshots*/`); `PolygonSlicerOne` and
+`PolygonSlicerAll` (its fill runs expanded into fill rings) must produce identical output, and every
+`PolygonSlicerAll` tile is also checked against `PolygonSlicerOne` on finer grids. Run `just bless`
 to regenerate snapshots. To inspect them, load `tests/polylines/fixtures/grid.geojson` (the tile grid, offset
 0.5px to sit between integer coordinates) and the `tests/polylines/snapshots/*.geojson` files in QGIS or any
 `GeoJSON` viewer.

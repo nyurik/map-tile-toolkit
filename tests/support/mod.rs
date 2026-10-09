@@ -12,7 +12,7 @@ use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
-use map_tile_toolkit::{FillRun, PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileId};
 use serde_json::json;
 
 pub const EXTENT: u32 = 25;
@@ -509,20 +509,6 @@ pub fn load_polygon_features(path: &Path) -> Vec<Vec<FixturePolygon>> {
 /// single-tile slicer, which takes one polygon per feature.
 pub fn load_polygon_fixture(path: &Path) -> Vec<FixturePolygon> {
     load_polygon_features(path).into_iter().flatten().collect()
-}
-
-/// A fill run's tiles as one rectangle over their core cells (green), tagged `fill y/x0..x1`.
-pub fn fill_run_polygon(run: &FillRun, extent: u32) -> Feature {
-    let e = extent as i32;
-    let (x0, x1, y0, y1) = (
-        run.x.start * e,
-        run.x.end * e - 1,
-        run.y * e,
-        run.y * e + e - 1,
-    );
-    let rect = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)].map(|(x, y)| Coord { x, y });
-    let role = format!("fill {}/{}..{}", run.y, run.x.start, run.x.end);
-    styled_polygon(&rect, &[], &role, "#1fb53a", "#0b6b1f")
 }
 
 /// Inclusive tile-coordinate bounds covering every vertex of `rings`, padded by one tile so a per-tile

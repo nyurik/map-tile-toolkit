@@ -218,18 +218,21 @@ pub(crate) fn push_fill_box<V: PolyVertex>(
     min: Coord<i32>,
     max: Coord<i32>,
 ) -> Result<(), TileError> {
-    let sw = corner(0, min, max)?;
-    let se = corner(2, min, max)?;
-    let ne = corner(4, min, max)?;
-    let nw = corner(6, min, max)?;
+    let ring = fill_box(orient, corner(0, min, max)?, corner(4, min, max)?);
+    out.extend(ring.into_iter().map(V::synthetic_at));
+    Ok(())
+}
+
+/// The closed fill-box ring through the `B⁺` corners `sw` and `ne`, oriented like `orient`.
+pub(crate) fn fill_box(orient: Ordering, sw: Coord<i32>, ne: Coord<i32>) -> [Coord<i32>; 5] {
+    let se = Coord { x: ne.x, y: sw.y };
+    let nw = Coord { x: sw.x, y: ne.y };
     // Counter-clockwise for a CCW ring, clockwise otherwise, so the fill matches the ring's sense.
-    let seq = if orient == Ordering::Less {
+    if orient == Ordering::Less {
         [sw, nw, ne, se, sw]
     } else {
         [sw, se, ne, nw, sw]
-    };
-    out.extend(seq.into_iter().map(V::synthetic_at));
-    Ok(())
+    }
 }
 
 /// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), appended

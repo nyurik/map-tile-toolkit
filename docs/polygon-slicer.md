@@ -77,7 +77,7 @@ PolygonSlicerAll<V = Coord<i32>, A = ()>   // slices multipolygon features into 
   `iter_rings()` (`RingView`: `vertices()` closed, tile-local; `is_hole()`). `PolygonSlicerOne::
   iter_features()` yields one per feature that reaches the tile. `PolygonSlicerAll::iter_features()`
   → per feature `attr()`, `iter_tiles()` (edge tiles, row-major) → `iter_polygons()`, and
-  `iter_fill_runs()` → `FillRun { y, x: Range<i32> }` (§6). Views are `Copy`. Feature-major rather than the polyline
+  `iter_fill_runs()` → `FillRun { y, x: Range<i32>, polygon }` with `fill_ring(&run)` (§6). Views are `Copy`. Feature-major rather than the polyline
   slicers' tile-major order: fill runs belong to one feature and span many tiles, and append-only
   per-feature storage needs no tile index.
 - `signed_area_2x(ring) -> i128` (§9) is public: the slicers preserve input winding, so a caller
@@ -170,9 +170,11 @@ whether any *edge* touches `B`:
     normalized winding this is the nonzero-winding rule; unlike a raw winding sum it does not depend
     on the input's ring orientation, and it keeps `All` equal to `One` on every input.
   - **Output as runs, not boxes:** each covered span, minus the row's edge tiles, becomes one
-    maximal `FillRun { y, x }` — never a per-tile `B⁺` box — so memory is `O(edge tiles + runs)` and a
-    polygon covering 10⁸ tiles costs one run per row. The consumer renders each run tile as its full
-    buffered box (what `One` emits there, one all-synthetic box per covering polygon).
+    maximal `FillRun { y, x, polygon }` per covering polygon — never a per-tile `B⁺` box — so memory
+    is `O(edge tiles + runs)` and a polygon covering 10⁸ tiles costs one run per row. The run keeps
+    its polygon's exterior winding, and `fill_ring(&run)` returns the tile-local `B⁺` box `One` emits
+    for that polygon in each of the run's tiles, so expanding the runs (several per tile only for
+    overlapping polygons, in polygon order) reproduces `One` exactly; the snapshot tests assert it.
   - **Edge tiles** use the same parity for rings with no edge in the tile: an exterior that contains
     the tile becomes a fill box beside clipped holes, a containing hole drops its polygon, and a
     polygon wholly covering another part's edge tile (only possible for overlapping, invalid
@@ -370,7 +372,8 @@ All phases are done:
 `PolygonSlicerOne` on all fixtures at several grids and on random self-intersecting / overlapping /
 star-shaped multipolygons; fill coverage against `geo`'s point-in-polygon of each tile center;
 reassembly through `PolygonMosaic`; and a z14-like square with a hole (2^28 tiles) in bounded time
-and memory. Snapshots: `tests/polygons/snapshots-all{,-5}/`.
+and memory. The fixture snapshots (`tests/polygons/snapshots{,-5}/`) are shared: `clip_polygon.rs`
+asserts that `All`, with its fill runs expanded, yields exactly `One`'s per-tile output.
 
 ## Appendix — `synthetic_at` and `M: Default`
 
