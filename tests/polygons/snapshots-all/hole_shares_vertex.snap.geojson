@@ -119,98 +119,6 @@
           [
             [
               5.0,
-              5.0
-            ],
-            [
-              70.0,
-              5.0
-            ],
-            [
-              70.0,
-              70.0
-            ],
-            [
-              5.0,
-              70.0
-            ],
-            [
-              5.0,
-              5.0
-            ]
-          ],
-          [
-            [
-              40.0,
-              30.0
-            ],
-            [
-              5.0,
-              5.0
-            ],
-            [
-              30.0,
-              40.0
-            ],
-            [
-              40.0,
-              30.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 1/0",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              5.0,
-              5.0
-            ],
-            [
-              70.0,
-              5.0
-            ],
-            [
-              70.0,
-              70.0
-            ],
-            [
-              5.0,
-              70.0
-            ],
-            [
-              5.0,
-              5.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/0",
-        "fill": "#261fb5",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              5.0,
               70.0
             ],
             [
@@ -252,6 +160,98 @@
       },
       "properties": {
         "role": "tile 0/1",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              70.0,
+              70.0
+            ],
+            [
+              5.0,
+              70.0
+            ],
+            [
+              5.0,
+              5.0
+            ],
+            [
+              70.0,
+              5.0
+            ],
+            [
+              70.0,
+              70.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/2",
+        "fill": "#261fb5",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              5.0,
+              5.0
+            ],
+            [
+              70.0,
+              5.0
+            ],
+            [
+              70.0,
+              70.0
+            ],
+            [
+              5.0,
+              70.0
+            ],
+            [
+              5.0,
+              5.0
+            ]
+          ],
+          [
+            [
+              40.0,
+              30.0
+            ],
+            [
+              5.0,
+              5.0
+            ],
+            [
+              30.0,
+              40.0
+            ],
+            [
+              40.0,
+              30.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",
@@ -321,80 +321,6 @@
           [
             [
               70.0,
-              5.0
-            ],
-            [
-              70.0,
-              70.0
-            ],
-            [
-              5.0,
-              70.0
-            ],
-            [
-              5.0,
-              5.0
-            ],
-            [
-              70.0,
-              5.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/1",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              70.0,
-              70.0
-            ],
-            [
-              5.0,
-              70.0
-            ],
-            [
-              5.0,
-              5.0
-            ],
-            [
-              70.0,
-              5.0
-            ],
-            [
-              70.0,
-              70.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/2",
-        "fill": "#261fb5",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              70.0,
               70.0
             ],
             [
@@ -418,6 +344,80 @@
       },
       "properties": {
         "role": "tile 1/2",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              5.0,
+              5.0
+            ],
+            [
+              70.0,
+              5.0
+            ],
+            [
+              70.0,
+              70.0
+            ],
+            [
+              5.0,
+              70.0
+            ],
+            [
+              5.0,
+              5.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/0",
+        "fill": "#261fb5",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              70.0,
+              5.0
+            ],
+            [
+              70.0,
+              70.0
+            ],
+            [
+              5.0,
+              70.0
+            ],
+            [
+              5.0,
+              5.0
+            ],
+            [
+              70.0,
+              5.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",

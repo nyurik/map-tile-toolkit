@@ -94,80 +94,6 @@
         "coordinates": [
           [
             [
-              4.0,
-              21.0
-            ],
-            [
-              4.0,
-              4.0
-            ],
-            [
-              20.0,
-              4.0
-            ],
-            [
-              20.0,
-              9.0
-            ],
-            [
-              4.0,
-              21.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/-1",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              4.0,
-              4.0
-            ],
-            [
-              20.0,
-              4.0
-            ],
-            [
-              20.0,
-              9.0
-            ],
-            [
-              19.0,
-              5.0
-            ],
-            [
-              4.0,
-              4.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 1/-1",
-        "fill": "#261fb5",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
               20.0,
               21.0
             ],
@@ -192,6 +118,80 @@
       },
       "properties": {
         "role": "tile -1/0",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              20.0,
+              21.0
+            ],
+            [
+              4.0,
+              21.0
+            ],
+            [
+              4.0,
+              4.0
+            ],
+            [
+              5.0,
+              19.0
+            ],
+            [
+              20.0,
+              21.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile -1/1",
+        "fill": "#261fb5",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              4.0,
+              21.0
+            ],
+            [
+              4.0,
+              4.0
+            ],
+            [
+              20.0,
+              4.0
+            ],
+            [
+              20.0,
+              9.0
+            ],
+            [
+              4.0,
+              21.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/-1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",
@@ -254,6 +254,80 @@
         "coordinates": [
           [
             [
+              20.0,
+              15.0
+            ],
+            [
+              20.0,
+              21.0
+            ],
+            [
+              4.0,
+              21.0
+            ],
+            [
+              4.0,
+              4.0
+            ],
+            [
+              20.0,
+              15.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 0/1",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              4.0,
+              4.0
+            ],
+            [
+              20.0,
+              4.0
+            ],
+            [
+              20.0,
+              9.0
+            ],
+            [
+              19.0,
+              5.0
+            ],
+            [
+              4.0,
+              4.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/-1",
+        "fill": "#261fb5",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
               4.0,
               4.0
             ],
@@ -290,80 +364,6 @@
       },
       "properties": {
         "role": "tile 1/0",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              20.0,
-              21.0
-            ],
-            [
-              4.0,
-              21.0
-            ],
-            [
-              4.0,
-              4.0
-            ],
-            [
-              5.0,
-              19.0
-            ],
-            [
-              20.0,
-              21.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile -1/1",
-        "fill": "#261fb5",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              20.0,
-              15.0
-            ],
-            [
-              20.0,
-              21.0
-            ],
-            [
-              4.0,
-              21.0
-            ],
-            [
-              4.0,
-              4.0
-            ],
-            [
-              20.0,
-              15.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 0/1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",

@@ -82,43 +82,6 @@
         "coordinates": [
           [
             [
-              10.0,
-              10.0
-            ],
-            [
-              40.0,
-              10.0
-            ],
-            [
-              40.0,
-              40.0
-            ],
-            [
-              10.0,
-              40.0
-            ],
-            [
-              10.0,
-              10.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 1/0",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
               40.0,
               40.0
             ],
@@ -143,6 +106,43 @@
       },
       "properties": {
         "role": "tile 0/1",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              10.0,
+              10.0
+            ],
+            [
+              40.0,
+              10.0
+            ],
+            [
+              40.0,
+              40.0
+            ],
+            [
+              10.0,
+              40.0
+            ],
+            [
+              10.0,
+              10.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",

@@ -93,7 +93,7 @@
         ]
       },
       "properties": {
-        "role": "tile 1/0",
+        "role": "tile 0/1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",
@@ -126,7 +126,7 @@
         ]
       },
       "properties": {
-        "role": "tile 0/1",
+        "role": "tile 1/0",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",

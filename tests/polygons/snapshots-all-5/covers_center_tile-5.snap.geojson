@@ -83,80 +83,6 @@
           [
             [
               8.0,
-              8.0
-            ],
-            [
-              66.0,
-              8.0
-            ],
-            [
-              66.0,
-              66.0
-            ],
-            [
-              8.0,
-              66.0
-            ],
-            [
-              8.0,
-              8.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 1/0",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              8.0,
-              8.0
-            ],
-            [
-              66.0,
-              8.0
-            ],
-            [
-              66.0,
-              66.0
-            ],
-            [
-              8.0,
-              66.0
-            ],
-            [
-              8.0,
-              8.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/0",
-        "fill": "#261fb5",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              8.0,
               66.0
             ],
             [
@@ -180,43 +106,6 @@
       },
       "properties": {
         "role": "tile 0/1",
-        "fill": "#b5211f",
-        "fill-opacity": 0.35,
-        "stroke": "#111111",
-        "stroke-width": 2
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [
-          [
-            [
-              66.0,
-              8.0
-            ],
-            [
-              66.0,
-              66.0
-            ],
-            [
-              8.0,
-              66.0
-            ],
-            [
-              8.0,
-              8.0
-            ],
-            [
-              66.0,
-              8.0
-            ]
-          ]
-        ]
-      },
-      "properties": {
-        "role": "tile 2/1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",
@@ -267,6 +156,43 @@
         "coordinates": [
           [
             [
+              8.0,
+              8.0
+            ],
+            [
+              66.0,
+              8.0
+            ],
+            [
+              66.0,
+              66.0
+            ],
+            [
+              8.0,
+              66.0
+            ],
+            [
+              8.0,
+              8.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 1/0",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
               66.0,
               66.0
             ],
@@ -291,6 +217,80 @@
       },
       "properties": {
         "role": "tile 1/2",
+        "fill": "#b5211f",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              8.0,
+              8.0
+            ],
+            [
+              66.0,
+              8.0
+            ],
+            [
+              66.0,
+              66.0
+            ],
+            [
+              8.0,
+              66.0
+            ],
+            [
+              8.0,
+              8.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/0",
+        "fill": "#261fb5",
+        "fill-opacity": 0.35,
+        "stroke": "#111111",
+        "stroke-width": 2
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              66.0,
+              8.0
+            ],
+            [
+              66.0,
+              66.0
+            ],
+            [
+              8.0,
+              66.0
+            ],
+            [
+              8.0,
+              8.0
+            ],
+            [
+              66.0,
+              8.0
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "role": "tile 2/1",
         "fill": "#b5211f",
         "fill-opacity": 0.35,
         "stroke": "#111111",
