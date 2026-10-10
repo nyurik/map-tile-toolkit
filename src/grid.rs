@@ -441,3 +441,42 @@ impl Grid {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counts the tiles routing emits to.
+    struct Emits(usize);
+
+    impl RouteSink<Coord<i32>> for Emits {
+        fn begin_polyline(&mut self) {}
+
+        fn begin_segment(&mut self) {}
+
+        fn emit(
+            &mut self,
+            _: TileId,
+            _: Coord<i32>,
+            _: Coord<i32>,
+            _: Coord<i32>,
+        ) -> Result<(), TileError> {
+            self.0 += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn budget_bounds_segments_inside_one_tile() {
+        // Both segments stay in one tile's inner box (the fast path); the budget covers only the first.
+        let grid = Grid::new(4096, 8).expect("config");
+        let line = [(100, 100), (200, 100), (300, 100)].map(|(x, y)| Coord { x, y });
+        let (mut budget, mut sink) = (1, Emits(0));
+        let err = grid.route_within(&line, &mut sink, &mut budget).err();
+        assert_eq!(err, Some(TileError::TooManyTiles));
+        assert_eq!(
+            sink.0, 1,
+            "the first segment was routed before the budget ran out"
+        );
+    }
+}

@@ -115,19 +115,12 @@ clippy *args:
 coverage:  (_coverage '--open')
 
 # Clean, collect, and aggregate coverage using the requested report arguments
+# Default features only: `hotpath` wraps instrumented functions in macro-generated code, which throws
+# off their line mapping. Stable only: nightly's line mapping is unreliable (and `--doctests` needs it).
 _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if rustup toolchain list | grep nightly &> /dev/null; then
-        cargo +nightly llvm-cov clean --workspace
-        cargo +nightly llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
-        cargo +nightly llvm-cov --no-report --doctests --workspace --all-features
-        cargo +nightly llvm-cov report --include-build-script {{report_args}}
-    else
-        cargo llvm-cov clean --workspace
-        cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
-        cargo llvm-cov report --include-build-script {{report_args}}
-    fi
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --workspace {{non_bench_targets}}
+    cargo llvm-cov report --include-build-script {{report_args}}
 
 # Build and open code documentation
 docs *args='--open':
