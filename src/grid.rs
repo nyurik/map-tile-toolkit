@@ -52,6 +52,22 @@ pub(crate) trait RouteSink<V: Vertex> {
     ///
     /// [`TileError::Overflow`] if a vertex lies more than an `i32` span from `origin`.
     fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), TileError>;
+
+    /// Called after each segment `a`–`c` is routed (and charged to the tile budget), with `row` the
+    /// tile row whose cells' inner boxes hold the whole segment, if one does.
+    ///
+    /// # Errors
+    ///
+    /// As the sink reports; the default does nothing.
+    fn end_segment(
+        &mut self,
+        a: Coord<i32>,
+        c: Coord<i32>,
+        row: Option<i32>,
+    ) -> Result<(), TileError> {
+        let _ = (a, c, row);
+        Ok(())
+    }
 }
 
 /// A vertex's owner tile with its core cell and inner box precomputed in **global** coordinates, so
@@ -299,6 +315,7 @@ impl Grid {
                         return Err(TileError::TooManyTiles);
                     }
                     sink.emit(la.owner, la.core_lo, a, *v)?;
+                    sink.end_segment(a_pos, c, Some(la.owner.y))?;
                     prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
                 } else {
                     // Slow path: route the segment through every candidate tile it might touch. Grow
@@ -354,6 +371,7 @@ impl Grid {
                             }
                         }
                     }
+                    sink.end_segment(a_pos, c, None)?;
                     // `c`'s tile for the next step: reuse `la` if `c` shares its core, else locate it
                     // (its box was just validated in the scan above, so this cannot newly error).
                     prev_loc = Some(if la.contains_core(c) {
@@ -391,6 +409,19 @@ impl Grid {
                 y: base_y.checked_add(reach).ok_or(TileError::Overflow)?,
             },
         ))
+    }
+
+    /// The tile whose inner box holds every point of `points`, and its origin: then every segment
+    /// between them touches that tile's buffered box and no other's. `None` if they span more than one
+    /// inner box, or there are none (or the tile overflows, left to the general path to report).
+    pub(crate) fn inner_tile(
+        self,
+        mut points: impl Iterator<Item = Coord<i32>>,
+    ) -> Option<(TileId, Coord<i32>)> {
+        let first = points.next()?;
+        let located = self.locate(first).ok()?;
+        (located.contains_inner(first) && points.all(|p| located.contains_inner(p)))
+            .then_some((located.owner, located.core_lo))
     }
 
     /// Locate the tile owning `c` (in output space), with its core and inner boxes precomputed (see

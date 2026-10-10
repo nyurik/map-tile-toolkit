@@ -201,7 +201,13 @@ fn plan_bridge(
 /// Append to `out` the distinct vertices of `ring` in cyclic order — consecutive duplicate positions
 /// and a repeated closing vertex dropped, so zero-length edges can't distort the clip (matching the
 /// polyline slicer's handling of consecutive duplicates). Returns how many were appended.
+#[inline]
 pub(crate) fn push_distinct<V: Vertex>(ring: &[V], out: &mut Vec<V>) -> usize {
+    // Usually the ring is distinct already: then one bulk copy of it, without its closing vertices.
+    if let Some(n) = distinct_prefix(ring) {
+        out.extend_from_slice(&ring[..n]);
+        return n;
+    }
     let start = out.len();
     for &v in ring {
         if out.len() == start || out.last().map(Vertex::position) != Some(v.position()) {
@@ -239,15 +245,66 @@ pub(crate) fn fill_box(orient: Ordering, sw: Coord<i32>, ne: Coord<i32>) -> [Coo
     }
 }
 
+/// Extend the kept arcs with touching edge `t` (edges must come in ascending order). Arcs are inclusive
+/// vertex spans `(start, end)`, `end` unwrapped (it may pass the ring's length by wrapping to its
+/// start). Edge `t` keeps vertices `t` and `t + 1`, so two touching edges at most two apart keep one
+/// contiguous arc (the edge between them is a single-segment out-and-back bridge).
+#[inline]
+pub(crate) fn keep_edge(arcs: &mut Vec<(usize, usize)>, t: usize) {
+    match arcs.last_mut() {
+        Some((_, end)) if t <= *end + 1 => *end = t + 1,
+        _ => arcs.push((t, t + 1)),
+    }
+}
+
+/// Reusable working memory for [`clip_ring`]. It holds nothing between calls, so it never makes two
+/// owners differ: it compares equal, clones empty, and only its capacity survives a call.
+pub(crate) struct ClipScratch<V> {
+    copy: Vec<V>,
+    crossings: Vec<(u32, i64)>,
+    arcs: Vec<(usize, usize)>,
+}
+
+impl<V> ClipScratch<V> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            copy: Vec::new(),
+            crossings: Vec::new(),
+            arcs: Vec::new(),
+        }
+    }
+}
+
+impl<V> Clone for ClipScratch<V> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<V> PartialEq for ClipScratch<V> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<V> Eq for ClipScratch<V> {}
+
+impl<V> core::fmt::Debug for ClipScratch<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ClipScratch").finish_non_exhaustive()
+    }
+}
+
 /// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), appended
 /// to `out` in the ring's own coordinate frame.
 ///
 /// `ring` holds the ring's distinct vertices in cyclic order (see [`push_distinct`]); edge `i` runs
-/// `ring[i] → ring[(i + 1) % m]`. `touching` lists, ascending and non-empty, the edges that touch the
-/// box `[min, max]` — a vertex is kept iff an incident edge touches. `winding(first, count)` must return
+/// `ring[i] → ring[(i + 1) % m]`. `arcs` holds, non-empty, the kept arcs that [`keep_edge`] built from
+/// the edges touching the box `[min, max]` in ascending order — a vertex is kept iff an incident edge
+/// touches; they are consumed. `winding(first, count)` must return
 /// [`ray_crossing`] summed over the `count` consecutive edges from edge `first` (cyclically), for this
 /// box's ray; the caller supplies it so the single-tile clip can walk the edges while the all-tiles
-/// slicer answers from its per-row crossing index. `arcs` is caller-owned scratch.
+/// slicer answers from its per-row crossing index.
 ///
 /// Output starts at the first arc in index order, so it is a pure function of the inputs.
 ///
@@ -257,25 +314,13 @@ pub(crate) fn fill_box(orient: Ordering, sw: Coord<i32>, ne: Coord<i32>) -> [Coo
 #[inline]
 pub(crate) fn close_ring<V: PolyVertex>(
     ring: &[V],
-    touching: &[u32],
+    arcs: &mut [(usize, usize)],
     min: Coord<i32>,
     max: Coord<i32>,
     mut winding: impl FnMut(usize, usize) -> i64,
-    arcs: &mut Vec<(usize, usize)>,
     out: &mut Vec<V>,
 ) -> Result<(), TileError> {
     let m = ring.len();
-    // Kept arcs as inclusive vertex spans `(start, end)`, `end` unwrapped (it may pass `m` by wrapping
-    // to the ring's start). Edge `t` keeps vertices `t` and `t + 1`, so two touching edges at most two
-    // apart keep one contiguous arc (the edge between them is a single-segment out-and-back bridge).
-    arcs.clear();
-    for &t in touching {
-        let t = t as usize;
-        match arcs.last_mut() {
-            Some((_, end)) if t <= *end + 1 => *end = t + 1,
-            _ => arcs.push((t, t + 1)),
-        }
-    }
     // The last arc may run on, across the ring's seam, into the first.
     let mut first = 0;
     if let (Some(&(s0, e0)), Some(last)) = (arcs.first(), arcs.len().checked_sub(1))
@@ -329,19 +374,20 @@ pub(crate) fn close_ring<V: PolyVertex>(
 }
 
 /// The outcome of clipping one ring to a tile box.
-pub(crate) enum RingClip<V> {
-    /// The ring does not appear in this tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RingClip {
+    /// The ring does not appear in this tile (nothing was appended).
     Outside,
     /// The tile lies entirely inside the ring: a solid fill (the synthetic `B⁺` box). For an exterior
     /// ring this means a fully-filled tile; for a hole it means the tile is entirely a hole.
-    Covers(Vec<V>),
+    Covers,
     /// The ring crosses the tile; the clipped closed ring (original vertices + synthetic detours).
-    Clipped(Vec<V>),
+    Clipped,
 }
 
 /// Clip one closed `ring` to the inclusive buffered box `[min, max]`, keeping original vertices and
-/// closing the result with synthetic `B⁺` corners. Returns the closed output ring in the input's own
-/// coordinate frame (first vertex repeated at the end), distinguishing a whole-tile [`RingClip::Covers`]
+/// closing the result with synthetic `B⁺` corners. Appends the closed output ring to `out` in the
+/// input's own coordinate frame (first vertex repeated at the end), and tells apart a whole-tile [`RingClip::Covers`]
 /// fill from a partial [`RingClip::Clipped`] crossing (so the caller can drop a tile that a hole
 /// entirely covers) and [`RingClip::Outside`] when the ring misses the tile.
 ///
@@ -354,13 +400,20 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     ring: &[V],
     min: Coord<i32>,
     max: Coord<i32>,
-) -> Result<RingClip<V>, TileError> {
+    scratch: &mut ClipScratch<V>,
+    out: &mut Vec<V>,
+) -> Result<RingClip, TileError> {
+    let ClipScratch {
+        copy,
+        crossings,
+        arcs,
+    } = scratch;
     // Borrow the ring when it is already distinct (the usual case), copying only to drop duplicates.
-    let mut copy = Vec::new();
     let pts = if let Some(n) = distinct_prefix(ring) {
         &ring[..n]
     } else {
-        push_distinct(ring, &mut copy);
+        copy.clear();
+        push_distinct(ring, copy);
         copy.as_slice()
     };
     let m = pts.len();
@@ -368,6 +421,14 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         return Ok(RingClip::Outside);
     }
     u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
+    if pts.iter().all(|p| outcode(p.position(), min, max) == 0) {
+        // Every vertex is inside (most rings of small polygons): every edge touches, and the ring is
+        // kept verbatim, as `close_ring` would. Reserved exactly: a fresh slicer's buffer needs no regrowth.
+        out.reserve(m + 1);
+        out.extend_from_slice(pts);
+        out.push(pts[0]);
+        return Ok(RingClip::Clipped);
+    }
 
     // One pass over the edges. Each vertex's outcode is computed once and shared by its two edges: a
     // shared outside bit rejects an edge (the bounding-box test of `segment_intersects`), an inside
@@ -376,15 +437,15 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     // `ray_crossing` can count), so an excursion's winding is a sum over those few, not a walk.
     let cy = center_y(min, max);
     let code = |p: Coord<i32>| outcode(p, min, max) | if p.y > cy { ABOVE } else { 0 };
-    let mut touching = Vec::new();
-    let mut crossings: Vec<(u32, i64)> = Vec::new();
+    arcs.clear();
+    crossings.clear();
     let (mut a, mut ca) = (pts[0].position(), code(pts[0].position()));
     for (i, b) in (0..).zip(pts[1..].iter().chain(iter::once(&pts[0]))) {
         let b = b.position();
         let cb = code(b);
         let (oa, ob) = (ca & BOX, cb & BOX);
         if oa & ob == 0 && (oa == 0 || ob == 0 || line_meets_box(a, b, min, max)) {
-            touching.push(i);
+            keep_edge(arcs, i as usize);
         }
         if (ca ^ cb) & ABOVE != 0 {
             let w = ray_crossing(a, b, cy, max.x);
@@ -395,7 +456,7 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         (a, ca) = (b, cb);
     }
 
-    if touching.is_empty() {
+    if arcs.is_empty() {
         // No edge touches the box → the tile is uniformly inside or outside the ring, and the box
         // center's `+x` ray meets edges only outside the box — exactly the recorded crossings — so their
         // parity is the even-odd containment of the whole tile.
@@ -406,9 +467,8 @@ pub(crate) fn clip_ring<V: PolyVertex>(
             "ray parity must agree with point-in-ring containment"
         );
         return if inside {
-            let mut fill = Vec::with_capacity(5);
-            push_fill_box(&mut fill, ring_orientation(pts), min, max)?;
-            Ok(RingClip::Covers(fill))
+            push_fill_box(out, ring_orientation(pts), min, max)?;
+            Ok(RingClip::Covers)
         } else {
             Ok(RingClip::Outside)
         };
@@ -437,9 +497,8 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         );
         w
     };
-    let mut out = Vec::new();
-    close_ring(pts, &touching, min, max, winding, &mut Vec::new(), &mut out)?;
-    Ok(RingClip::Clipped(out))
+    close_ring(pts, arcs, min, max, winding, out)?;
+    Ok(RingClip::Clipped)
 }
 
 /// The length of `ring` without its repeated closing vertices, if that prefix has no consecutive
@@ -481,17 +540,22 @@ mod tests {
     }
 
     /// The ring of a non-empty clip (panics on [`RingClip::Outside`]).
-    fn clipped(rc: RingClip<Coord<i32>>) -> Vec<Coord<i32>> {
-        match rc {
-            RingClip::Covers(v) | RingClip::Clipped(v) => v,
-            RingClip::Outside => panic!("expected geometry, got Outside"),
-        }
+    fn clipped((rc, out): (RingClip, Vec<Coord<i32>>)) -> Vec<Coord<i32>> {
+        assert_ne!(rc, RingClip::Outside, "expected geometry");
+        out
+    }
+
+    /// [`clip_ring`] into a fresh output, with how the ring met the tile.
+    fn clip(ring: &[Coord<i32>]) -> (RingClip, Vec<Coord<i32>>) {
+        let mut out = Vec::new();
+        let rc = clip_ring(ring, MIN, MAX, &mut ClipScratch::new(), &mut out).unwrap();
+        (rc, out)
     }
 
     #[test]
     fn fully_inside_is_kept_verbatim() {
         let ring = [c(2, 2), c(7, 2), c(7, 7), c(2, 7), c(2, 2)];
-        let out = clipped(clip_ring(&ring, MIN, MAX).unwrap());
+        let out = clipped(clip(&ring));
         assert_eq!(out, ring.to_vec(), "an inside ring is returned unchanged");
     }
 
@@ -502,7 +566,7 @@ mod tests {
         // and the re-entry (50,5). That lone vertex must be kept verbatim, not replaced by synthetic
         // `B⁺` corners — so every output vertex is an original input vertex.
         let ring = [c(5, 5), c(5, 50), c(50, 50), c(50, 5), c(5, 5)];
-        let out = clipped(clip_ring(&ring, MIN, MAX).unwrap());
+        let out = clipped(clip(&ring));
         let pts = positions(&out);
         let original: std::collections::BTreeSet<(i32, i32)> =
             [(5, 5), (5, 50), (50, 50), (50, 5)].into_iter().collect();
@@ -529,19 +593,16 @@ mod tests {
             c(100, 110),
             c(100, 100),
         ];
-        assert!(matches!(
-            clip_ring(&ring, MIN, MAX).unwrap(),
-            RingClip::Outside
-        ));
+        assert!(matches!(clip(&ring), (RingClip::Outside, _)));
     }
 
     #[test]
     fn containment_fills_the_box() {
         // A big ring that encloses the whole tile with no edge touching it → solid fill.
         let ring = [c(-50, -50), c(50, -50), c(50, 50), c(-50, 50), c(-50, -50)];
-        let rc = clip_ring(&ring, MIN, MAX).unwrap();
+        let rc = clip(&ring);
         assert!(
-            matches!(rc, RingClip::Covers(_)),
+            matches!(rc, (RingClip::Covers, _)),
             "a fully-enclosed tile is reported as a solid fill"
         );
         let out = clipped(rc);
@@ -558,7 +619,7 @@ mod tests {
         // Every vertex is outside the box, but the hypotenuse (line x+y=9) cuts through the tile: a
         // big right triangle covering the lower-left half-plane {x+y<9}. The filled side must win.
         let ring = [c(-100, -100), c(109, -100), c(-100, 109), c(-100, -100)];
-        let out = clipped(clip_ring(&ring, MIN, MAX).unwrap());
+        let out = clipped(clip(&ring));
         let pts = positions(&out);
         assert!(
             fill_at(&pts, c(1, 1)),
@@ -574,7 +635,7 @@ mod tests {
     fn crossing_ring_keeps_original_crossing_vertices() {
         // A ring straddling the right edge: two vertices inside, two outside.
         let ring = [c(4, 3), c(15, 3), c(15, 6), c(4, 6), c(4, 3)];
-        let out = clipped(clip_ring(&ring, MIN, MAX).unwrap());
+        let out = clipped(clip(&ring));
         let pts = positions(&out);
         // Original inside/near vertices are preserved; the fill inside the box is the left strip.
         assert!(pts.contains(&c(4, 3)) && pts.contains(&c(4, 6)));
@@ -598,7 +659,7 @@ mod tests {
             c(-60, -50),
             c(3, -50),
         ];
-        let out = clipped(clip_ring(&ring, MIN, MAX).unwrap());
+        let out = clipped(clip(&ring));
         let pts = positions(&out);
         // Inside the notch (x in 3..6, low y) is NOT filled; the rest of the tile IS filled.
         assert!(!fill_at(&pts, c(4, 2)), "the notch is a hole in the fill");
