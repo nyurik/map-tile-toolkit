@@ -13,14 +13,13 @@ use crate::clip_polyline::{segment_intersects, to_local};
 use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
-/// The maximum polyline length the slicer accepts (`u16::MAX + 1` vertices); a longer polyline yields
-/// [`TileError::GeometryTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
-const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
-
-/// Upper bound on the candidate tiles [`Grid::route`] will examine before giving up with
-/// [`TileError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
-/// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
-/// well under a second.
+/// Upper bound on the tiles [`Grid::route`] will visit (one per tile each segment touches, plus one
+/// per tile row a segment crosses between two unbuffered tiles without touching either) before
+/// giving up with [`TileError::TooManyTiles`]. This is the only reach limit: it bounds the time and
+/// the per-tile output memory a single feature can demand, so adversarial input (say, thousands of
+/// world-spanning zigzags) is rejected rather than exhausting the host. It sits far above any
+/// realistic feature — a local way visits a handful of tiles per segment, a world-spanning z16
+/// diagonal (extent 4096, buffer 64) ~140 000 — and ~33M visits is well under a second.
 pub(crate) const MAX_TILE_VISITS: i64 = 1 << 25;
 
 /// `c` shifted by `d` on both axes. Used for the `± buffer` corner offsets, where the caller has
@@ -30,6 +29,19 @@ const fn shift(c: Coord<i32>, d: i32) -> Coord<i32> {
     Coord {
         x: c.x + d,
         y: c.y + d,
+    }
+}
+
+/// `⌊n·m / d⌋` for `d > 0`, exactly. The product of two coordinate spans can exceed `i64`, so it
+/// falls back to `i128` — only for spans beyond ~3 billion units, so the common case stays in `i64`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "callers pass |n| <= d, so the quotient is within |m| and fits i64"
+)]
+fn mul_div_floor(n: i64, m: i64, d: i64) -> i64 {
+    match n.checked_mul(m) {
+        Some(p) => p.div_euclid(d),
+        None => (i128::from(n) * i128::from(m)).div_euclid(i128::from(d)) as i64,
     }
 }
 
@@ -234,6 +246,8 @@ impl Grid {
     /// buffered box it touches, in walk order. Fast path: a segment lying entirely within one tile's
     /// inner box (≥ `buffer` from every edge — the common case) goes straight to that tile, skipping
     /// `tile_of` and the geometry test; the owning tile is cached across the walk (see [`Located`]).
+    /// Any other segment is walked row by row through exactly the tiles it touches ([`Self::walk`]),
+    /// so its cost follows those tiles, not its bounding rectangle.
     /// The sink gets each touched tile's id, local-frame origin, and the segment's two **original**
     /// vertices (it localizes).
     ///
@@ -242,8 +256,8 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`TileError::GeometryTooLarge`] — the polyline has more than 65,536 (`u16::MAX + 1`)
-    ///   vertices.
+    /// - [`TileError::GeometryTooLarge`] — the polyline has more than `u32::MAX` vertices (the
+    ///   slicers' flat storage indexes vertices with `u32`).
     /// - [`TileError::TooManyTiles`], [`TileError::Overflow`] — as in [`Self::route_within`], with a
     ///   fresh `MAX_TILE_VISITS` budget.
     pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
@@ -252,24 +266,22 @@ impl Grid {
         sink: &mut S,
     ) -> Result<(), TileError> {
         // Up-front length check before any `emit`, so this input-level error is atomic.
-        if polyline.len() > MAX_INDEXED_LEN {
-            return Err(TileError::GeometryTooLarge);
-        }
-        // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
-        // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.
+        u32::try_from(polyline.len()).map_err(|_| TileError::GeometryTooLarge)?;
+        // Bound the total tiles visited, so an adversarial spread of long segments can't exhaust
+        // time or memory: a polyline needing more than this is rejected rather than crashing.
         let mut budget = MAX_TILE_VISITS;
         self.route_within(polyline, sink, &mut budget)
     }
 
-    /// [`Self::route`] without the vertex-count cap, charging every candidate tile examined to the
-    /// caller's `budget` — so several polylines (a polygon's rings) can share one working-set bound.
+    /// [`Self::route`] without the vertex-count cap, charging every tile visited to the caller's
+    /// `budget` — so several polylines (a polygon's rings) can share one working-set bound.
     ///
     /// # Errors
     ///
-    /// - [`TileError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
-    ///   segments would examine more candidate tiles than remain in `budget`.
-    /// - [`TileError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
-    ///   vertex lies more than an `i32` span from its tile origin.
+    /// - [`TileError::TooManyTiles`] — its segments would visit more tiles than remain in `budget`.
+    /// - [`TileError::Overflow`] — a touched tile's buffered box overflows `i32` (an outermost tile,
+    ///   with `buffer > 0`), or (from the sink) a kept vertex lies more than an `i32` span from its
+    ///   tile origin.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn route_within<V: Vertex, S: RouteSink<V>>(
         self,
@@ -280,13 +292,9 @@ impl Grid {
         let poly = polyline;
 
         // Empty polyline → nothing to route.
-        let Some(first) = poly.first().map(Vertex::position) else {
+        if poly.is_empty() {
             return Ok(());
-        };
-
-        // Each routed segment's tile box is bounded against this reference (the first vertex's tile)
-        // as it is walked, so there is no separate bounding-box pass over the whole polyline.
-        let reference = tile_of(first, self.extent);
+        }
 
         sink.begin_polyline();
         // Carry the previous vertex and its located tile, so a segment whose two endpoints share one
@@ -318,62 +326,11 @@ impl Grid {
                     sink.end_segment(a_pos, c, Some(la.owner.y))?;
                     prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
                 } else {
-                    // Slow path: route the segment through every candidate tile it might touch. Grow
-                    // the segment's coordinate box by the buffer (checked — a coordinate too near the
-                    // i32 edge reports `Overflow`) and map it to tiles.
-                    let lo = tile_of(
-                        Coord {
-                            x: (a_pos.x.min(c.x))
-                                .checked_sub(self.buffer)
-                                .ok_or(TileError::Overflow)?,
-                            y: (a_pos.y.min(c.y))
-                                .checked_sub(self.buffer)
-                                .ok_or(TileError::Overflow)?,
-                        },
-                        self.extent,
-                    );
-                    let hi = tile_of(
-                        Coord {
-                            x: (a_pos.x.max(c.x))
-                                .checked_add(self.buffer)
-                                .ok_or(TileError::Overflow)?,
-                            y: (a_pos.y.max(c.y))
-                                .checked_add(self.buffer)
-                                .ok_or(TileError::Overflow)?,
-                        },
-                        self.extent,
-                    );
-                    // Bound this segment's tile box against the reference: each extreme must stay within
-                    // `i16` of the first vertex's tile (else the polyline reaches too many tiles). This
-                    // also keeps the candidate-count product below `i64` overflow.
-                    for (t, r) in [
-                        (lo.x, reference.x),
-                        (hi.x, reference.x),
-                        (lo.y, reference.y),
-                        (hi.y, reference.y),
-                    ] {
-                        i16::try_from(i64::from(t) - i64::from(r))
-                            .map_err(|_| TileError::TooManyTiles)?;
-                    }
-                    // Charge this segment's candidate-tile box.
-                    *budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
-                        * (i64::from(hi.y) - i64::from(lo.y) + 1);
-                    if *budget < 0 {
-                        return Err(TileError::TooManyTiles);
-                    }
-                    for ty in lo.y..=hi.y {
-                        for tx in lo.x..=hi.x {
-                            let tile = TileId::new(tx, ty);
-                            let (min, max) = self.tile_buffered_bounds(tile)?;
-                            if segment_intersects(a_pos, c, min, max) {
-                                // Tile origin = base = min + buffer.
-                                sink.emit(tile, shift(min, self.buffer), a, *v)?;
-                            }
-                        }
-                    }
+                    // Slow path: walk the segment through exactly the tiles it touches.
+                    self.walk(a, *v, sink, budget)?;
                     sink.end_segment(a_pos, c, None)?;
                     // `c`'s tile for the next step: reuse `la` if `c` shares its core, else locate it
-                    // (its box was just validated in the scan above, so this cannot newly error).
+                    // (its tile was just visited by the walk, so this cannot newly error).
                     prev_loc = Some(if la.contains_core(c) {
                         la
                     } else {
@@ -382,6 +339,98 @@ impl Grid {
                 }
             }
             prev = Some(*v);
+        }
+        Ok(())
+    }
+
+    /// Route segment `a`–`c` into exactly the tiles whose buffered box it touches, charging each to
+    /// `budget` — so a long diagonal costs the tiles it crosses, not its bounding rectangle. A row the
+    /// segment crosses without touching a tile (it runs through the gap between two unbuffered
+    /// tiles) is charged one visit too, so every row the walk iterates is paid for.
+    ///
+    /// Rows ascend, then columns within a row. Inside a row's buffered `y`-slab the segment is a
+    /// sub-segment whose `x`-extent is one interval, and a tile of the row touches the segment iff its
+    /// buffered `x`-range meets that interval — the separating-axis answer [`segment_intersects`]
+    /// gives per tile, computed once per row with exact rounding. Each touched tile's box is built
+    /// with checked math; since the endpoints' own tiles are always touched, a segment reaching past
+    /// the `i32` range reports [`TileError::Overflow`].
+    ///
+    /// # Errors
+    ///
+    /// - [`TileError::TooManyTiles`] — the touched tiles and gap rows exceed the remaining `budget`.
+    /// - [`TileError::Overflow`] — a touched tile's buffered box overflows `i32`, or (from the sink) a
+    ///   kept vertex lies more than an `i32` span from its tile origin.
+    fn walk<V: Vertex, S: RouteSink<V>>(
+        self,
+        a: V,
+        c: V,
+        sink: &mut S,
+        budget: &mut i64,
+    ) -> Result<(), TileError> {
+        let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
+        let wide = |p: Coord<i32>| Coord {
+            x: i64::from(p.x),
+            y: i64::from(p.y),
+        };
+        // Order the endpoints by `y`, so rows ascend and the `y` offsets below are non-negative.
+        let (lo, hi) = if a.position().y <= c.position().y {
+            (wide(a.position()), wide(c.position()))
+        } else {
+            (wide(c.position()), wide(a.position()))
+        };
+        let (dx, dy) = (hi.x - lo.x, hi.y - lo.y);
+        for ty in (lo.y - buffer).div_euclid(extent)..=(hi.y + buffer).div_euclid(extent) {
+            // The row's buffered slab clipped to the segment's `y`-range, as offsets from `lo.y`;
+            // never empty, since these are exactly the rows whose slab meets `[lo.y, hi.y]`.
+            let base = ty * extent;
+            let start = (base - buffer).max(lo.y) - lo.y;
+            let end = (base + extent - 1 + buffer).min(hi.y) - lo.y;
+            // The sub-segment's `x`-extent, `x(y) = lo.x + (y − lo.y)·dx/dy` at the slab's two ends
+            // (monotone in `y`): rounding the low end up and the high end down keeps exactly the
+            // integers it spans, and so the closed integer boxes it meets. An end at a vertex is
+            // exact, which spares the division for most short segments.
+            let x_at = |off: i64, up: bool| match off {
+                0 => lo.x,
+                _ if off == dy => hi.x,
+                _ if up => lo.x - mul_div_floor(-off, dx, dy),
+                _ => lo.x + mul_div_floor(off, dx, dy),
+            };
+            let (x_min, x_max) = if dy == 0 {
+                (lo.x.min(hi.x), lo.x.max(hi.x))
+            } else if dx >= 0 {
+                (x_at(start, true), x_at(end, false))
+            } else {
+                (x_at(end, true), x_at(start, false))
+            };
+            let (first, last) = (
+                (x_min - buffer).div_euclid(extent),
+                (x_max + buffer).div_euclid(extent),
+            );
+            // Charge every row, even one whose sub-segment runs through the gap between two
+            // unbuffered tiles and touches none (only possible with `buffer == 0`): otherwise a
+            // near-vertical segment along such a gap would cost one free iteration per row.
+            *budget -= (last - first + 1).max(1);
+            if *budget < 0 {
+                return Err(TileError::TooManyTiles);
+            }
+            if first > last {
+                continue;
+            }
+            // Every touched box of the row lies within the row's outermost buffered corners, so
+            // checking those once covers each tile's origin and box.
+            let fits = |v: i64| i32::try_from(v).map_err(|_| TileError::Overflow);
+            fits(first * extent - buffer)?;
+            fits(last * extent + extent - 1 + buffer)?;
+            fits(base - buffer)?;
+            fits(base + extent - 1 + buffer)?;
+            let (ty, origin_y) = (fits(ty)?, fits(base)?);
+            for tx in fits(first)?..=fits(last)? {
+                let origin = Coord {
+                    x: tx * self.extent,
+                    y: origin_y,
+                };
+                sink.emit(TileId::new(tx, ty), origin, a, c)?;
+            }
         }
         Ok(())
     }
@@ -467,6 +516,21 @@ mod tests {
     }
 
     #[test]
+    fn mul_div_floor_is_exact_past_i64() {
+        // Spans of ~4·10⁹ (two far-apart full-i32 coordinates) overflow the i64 product.
+        let reference = |n: i64, m: i64, d: i64| {
+            i64::try_from((i128::from(n) * i128::from(m)).div_euclid(i128::from(d))).unwrap()
+        };
+        for (n, m, d) in [
+            (4_000_000_000, 4_294_967_295, 4_294_967_296),
+            (-3_999_999_999, 4_294_967_295, 4_000_000_000),
+            (12, -7, 5),
+        ] {
+            assert_eq!(mul_div_floor(n, m, d), reference(n, m, d), "{n}·{m}/{d}");
+        }
+    }
+
+    #[test]
     fn budget_bounds_segments_inside_one_tile() {
         // Both segments stay in one tile's inner box (the fast path); the budget covers only the first.
         let grid = Grid::new(4096, 8).expect("config");
@@ -477,6 +541,114 @@ mod tests {
         assert_eq!(
             sink.0, 1,
             "the first segment was routed before the budget ran out"
+        );
+    }
+
+    /// Records the tiles each `emit` reaches, in order.
+    struct Tiles(Vec<TileId>);
+
+    impl RouteSink<Coord<i32>> for Tiles {
+        fn begin_polyline(&mut self) {}
+        fn begin_segment(&mut self) {}
+        fn emit(
+            &mut self,
+            tile: TileId,
+            _: Coord<i32>,
+            _: Coord<i32>,
+            _: Coord<i32>,
+        ) -> Result<(), TileError> {
+            self.0.push(tile);
+            Ok(())
+        }
+    }
+
+    /// The tiles the walk routes segment `a`–`c` into, and the visits it charged for them.
+    fn walked(grid: Grid, a: Coord<i32>, c: Coord<i32>) -> Result<(Vec<TileId>, i64), TileError> {
+        let mut sink = Tiles(Vec::new());
+        let mut budget = MAX_TILE_VISITS;
+        grid.walk(a, c, &mut sink, &mut budget)?;
+        Ok((sink.0, MAX_TILE_VISITS - budget))
+    }
+
+    /// The previous routing: test every tile of the segment's buffered bounding box, row-major.
+    fn scanned(grid: Grid, a: Coord<i32>, c: Coord<i32>) -> Result<Vec<TileId>, TileError> {
+        let (extent, buffer) = (i64::from(grid.extent), i64::from(grid.buffer));
+        let tile = |v: i32, d: i64| i32::try_from((i64::from(v) + d).div_euclid(extent)).unwrap();
+        let mut out = Vec::new();
+        for ty in tile(a.y.min(c.y), -buffer)..=tile(a.y.max(c.y), buffer) {
+            for tx in tile(a.x.min(c.x), -buffer)..=tile(a.x.max(c.x), buffer) {
+                let tile = TileId::new(tx, ty);
+                let (min, max) = grid.tile_buffered_bounds(tile)?;
+                if segment_intersects(a, c, min, max) {
+                    out.push(tile);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The walk visits exactly the tiles (in the same order) that the bounding-box scan accepts, and
+    /// reports `Overflow` for exactly the same segments near the `i32` limits.
+    #[test]
+    fn walk_matches_bounding_box_scan() {
+        // A deterministic xorshift stream, reduced to `0..n`.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut below = |n: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            i64::from(u32::try_from(state % u64::from(n)).unwrap())
+        };
+        let mut overflows = 0;
+        for case in 0..20_000 {
+            let extent: u32 = [1, 2, 3, 5, 7, 10, 25, 4096][case % 8];
+            let buffer = u16::try_from(below(extent.div_ceil(2))).unwrap();
+            let grid = Grid::new(extent, buffer).unwrap();
+            // Spans of up to 40 tiles per axis, around an origin sometimes at the i32 limits.
+            let span = extent * 40;
+            let origin = match case % 5 {
+                0 => i64::from(i32::MIN),
+                1 => i64::from(i32::MAX) - i64::from(span),
+                _ => -i64::from(span / 2),
+            };
+            let mut coord = || {
+                let mut v = || i32::try_from(origin + below(span)).unwrap();
+                Coord { x: v(), y: v() }
+            };
+            let (a, mut c) = (coord(), coord());
+            // Bias towards axis-parallel and near-vertical segments, the walk's degenerate rows.
+            match below(4) {
+                0 => c.y = a.y,
+                1 => c.x = a.x,
+                2 => c.x = i32::try_from(i64::from(a.x) + below(3) - 1).unwrap_or(a.x),
+                _ => {}
+            }
+            let walk = walked(grid, a, c).map(|(tiles, charged)| {
+                // One charge per visited tile, plus one per row the walk crosses without a visit.
+                let tile_y = |v: i32, d: i64| (i64::from(v) + d).div_euclid(i64::from(extent));
+                let rows = tile_y(a.y.max(c.y), i64::from(buffer))
+                    - tile_y(a.y.min(c.y), -i64::from(buffer))
+                    + 1;
+                let mut visited_rows: Vec<i32> = tiles.iter().map(|t| t.y).collect();
+                visited_rows.dedup();
+                let gap_rows = rows - i64::try_from(visited_rows.len()).unwrap();
+                assert!(
+                    buffer == 0 || gap_rows == 0,
+                    "only unbuffered tiles leave gaps"
+                );
+                assert_eq!(
+                    charged,
+                    i64::try_from(tiles.len()).unwrap() + gap_rows,
+                    "one charge per visit or gap row"
+                );
+                tiles
+            });
+            overflows += usize::from(walk == Err(TileError::Overflow));
+            assert_eq!(walk, scanned(grid, a, c), "{extent}/{buffer} {a:?}-{c:?}");
+        }
+        assert!(
+            overflows > 100,
+            "the i32 limits are exercised ({overflows})"
         );
     }
 }

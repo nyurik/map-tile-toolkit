@@ -98,11 +98,34 @@ fn extreme_tile_errors_instead_of_panicking() {
 #[test]
 fn spanning_too_many_tiles_errors() {
     let mut s = all(1, 0).expect("valid config"); // 1 unit per tile
-    // Spans 40 000 tiles on x, past i16::MAX (32 767).
+    // Touches 40 000 001 tiles, past the 2^25 (33 554 432) visit budget.
     assert_eq!(
-        s.add_feature(line(vec![(0, 0), (40_000, 0)])).err(),
+        s.add_feature(line(vec![(0, 0), (40_000_000, 0)])).err(),
         Some(TileError::TooManyTiles)
     );
+    assert!(s.is_empty());
+    // Only the touched tiles count, not how far the line reaches: a diagonal across 100 000 tiles
+    // (a 7·10⁹-tile bounding box, once also past the old `i16` span limit) touches under 200 000.
+    let mut s = all(10, 1).expect("valid config");
+    s.add_feature(line(vec![(0, 0), (1_000_000, 700_010)]))
+        .expect("a long diagonal is within budget");
+    assert!(s.len() > 100_000 && s.len() < 200_000, "{}", s.len());
+}
+
+#[test]
+fn unbuffered_gap_rows_are_charged() {
+    // With `buffer == 0`, a segment from x = 0 to x = 1 (extent 1) runs between the closed columns
+    // 0 and 1 in every interior row, touching only its two endpoint tiles. Each row it crosses
+    // still costs one visit, so 2^26 rows exceed the budget instead of looping for free.
+    let mut s = all(1, 0).expect("valid config");
+    assert_eq!(
+        s.add_feature(line(vec![(0, 0), (1, 1 << 26)])).err(),
+        Some(TileError::TooManyTiles)
+    );
+    assert!(s.is_empty());
+    s.add_feature(line(vec![(0, 0), (1, 1000)]))
+        .expect("a short gap run is within budget");
+    assert_eq!(s.len(), 2, "only the endpoint tiles are touched");
 }
 
 #[test]
@@ -117,16 +140,21 @@ fn coordinate_overflow_errors() {
 }
 
 #[test]
-fn too_many_vertices_errors() {
-    // Huge extent → everything in one tile, so only the vertex-count limit can trip.
+fn long_polylines_are_accepted() {
+    // A polyline is limited only by the `u32` indexing of the storage (more than `u32::MAX` vertices
+    // yields `GeometryTooLarge`), so well past the old `u16` cap is fine.
     let mut s = all(1_000_000, 0).expect("valid config");
-    let coords: Vec<Coord<i32>> = (0..=(i32::from(u16::MAX) + 1))
-        .map(|i| Coord { x: i % 8, y: 0 })
+    let coords: Vec<Coord<i32>> = (0..200_000).map(|i| Coord { x: i % 8, y: 0 }).collect();
+    s.add_feature(&coords).expect("200 000 vertices");
+    let runs: Vec<usize> = s
+        .iter_tiles()
+        .flat_map(|t| {
+            t.iter_features()
+                .flat_map(|f| f.iter_polylines().map(<[_]>::len))
+                .collect::<Vec<_>>()
+        })
         .collect();
-    assert_eq!(
-        s.add_feature(&coords).err(),
-        Some(TileError::GeometryTooLarge)
-    );
+    assert_eq!(runs, [200_000]);
 }
 
 #[test]
@@ -284,19 +312,22 @@ fn polygon_all_validates_config() {
 #[test]
 fn polygon_all_too_many_tiles() {
     let mut s = PolygonSlicerAll::<Coord<i32>>::new(1, 0).expect("valid config");
-    // A ring spanning 40 000 tiles on x, past i16::MAX.
+    // A ring whose first edge touches 40 000 001 tiles, past the 2^25 visit budget.
     assert_eq!(
-        s.add_feature([poly(vec![(0, 0), (40_000, 0), (40_000, 5)])])
+        s.add_feature([poly(vec![(0, 0), (40_000_000, 0), (40_000_000, 5)])])
             .err(),
         Some(TileError::TooManyTiles)
     );
     assert!(s.is_empty());
+    // How far a ring reaches does not matter, only the tiles it touches: 40 000 tiles wide is fine.
+    s.add_feature([poly(vec![(0, 0), (40_000, 0), (40_000, 5)])])
+        .expect("a wide ring is within budget");
+    s.clear();
 
-    // The candidate-tile budget (2^25 = 33 554 432) is shared by all rings of a feature: the small
-    // triangle charges ~362 000 candidates (its 601² diagonal box plus two edges) and the large one's
-    // first edge 5781² = 33 419 961 — each fine alone, too many together (the large one is rejected
-    // as soon as its first box is charged). Covered tiles are never charged: the small triangle alone
-    // fills ~180 000 tiles.
+    // Routing charges only the tiles an edge actually touches, never its bounding box: the large
+    // triangle's diagonal spans a 5781² = 33 419 961-tile box (with the small one's 601² box, once
+    // over the 2^25 budget) but touches only ~17 000 tiles. Covered tiles are never charged either:
+    // the small triangle alone fills ~180 000 tiles.
     let small = poly(vec![(0, 0), (600, 600), (0, 600)]);
     let large = poly(vec![(0, 0), (5780, 5780), (0, 5780)]);
     s.add_feature([small.clone()])
@@ -308,12 +339,27 @@ fn polygon_all_too_many_tiles() {
         .map(|r| r.x.len())
         .sum();
     assert!(filled > 170_000, "{filled}");
-    let before = poly_state(&s);
+    s.add_feature([small, large])
+        .expect("long diagonals are charged per touched tile");
+    assert_eq!(s.len(), 2);
+}
+
+#[test]
+fn polygon_all_charges_unbuffered_gap_rows() {
+    // A sliver whose two long edges run between the closed columns 0 and 1 (extent 1, buffer 0):
+    // they touch tiles only near their ends, but span 2^24 rows each, and the crossing index holds
+    // one entry per row an edge spans. Charging each gap row keeps that memory within the budget:
+    // the 2^25 rows are rejected during routing, before anything is indexed.
+    let mut s = PolygonSlicerAll::<Coord<i32>>::new(1, 0).expect("valid config");
     assert_eq!(
-        s.add_feature([small, large]).err(),
+        s.add_feature([poly(vec![(0, 0), (1, 1 << 24), (0, 1)])])
+            .err(),
         Some(TileError::TooManyTiles)
     );
-    assert_eq!(poly_state(&s), before, "a rejected feature leaves no trace");
+    assert!(s.is_empty());
+    s.add_feature([poly(vec![(0, 0), (1, 1000), (0, 1)])])
+        .expect("a short sliver is within budget");
+    assert_eq!(s.len(), 1);
 }
 
 #[test]

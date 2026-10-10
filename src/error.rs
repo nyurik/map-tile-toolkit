@@ -22,16 +22,16 @@ pub enum TileError {
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
-    /// The geometry is beyond the slicers' compact indexing: a polyline with more than 65,536
-    /// (`u16::MAX + 1`) vertices for the polyline slicers, or more than `u32::MAX` vertices or rings
-    /// in the storage for the polygon slicers.
-    #[error("geometry too large for the slicer's compact indexing")]
+    /// A line (or a polygon feature) has more than `u32::MAX` vertices, rings or pieces — beyond the
+    /// `u32` offsets of the slicers' flat storage.
+    #[error("geometry too large: at most {} vertices are supported", u32::MAX)]
     GeometryTooLarge,
 
-    /// The geometry reaches too many tiles to slice: a polyline or ring spans more than `i16::MAX`
-    /// tiles from its first vertex on an axis, or its segments would collectively require examining
-    /// more candidate tiles than the slicer's working-set bound (one budget per polyline, or per
-    /// polygon feature).
+    /// The geometry reaches too many tiles to slice: its segments collectively touch more tiles than
+    /// the slicer's working-set bound of 2^25 tile visits per feature (a tile counts once per segment
+    /// touching it, and so does a tile row a segment crosses without touching any tile; tiles a
+    /// polygon merely covers are free). Far above any realistic feature, even a
+    /// world-spanning diagonal at z16, it guards time and memory against adversarial input.
     #[error("geometry reaches too many tiles to slice")]
     TooManyTiles,
 

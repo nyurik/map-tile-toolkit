@@ -3,9 +3,9 @@
 //!
 //! One pass per feature, in three steps (see `docs/polygon-slicer.md` §6/§8):
 //!
-//! 1. **Route** every ring through [`Grid::route_within`] (one shared tile budget), recording which
-//!    edges touch which tile's buffered box — the keep-rule's whole input. Tiles no edge touches are
-//!    never visited.
+//! 1. **Route** every ring through [`Grid::route_within`] (one shared tile-visit budget), recording
+//!    which edges touch which tile's buffered box — the keep-rule's whole input. Tiles no edge
+//!    touches are never visited.
 //! 2. **Index**, during the same walk, where each edge crosses each tile row's center line `y = cy`.
 //!    That line carries the winding ray of every tile in the row, so one sorted list per row answers both remaining
 //!    questions: how far an excursion outside a tile winds around it (the detour's shape) and whether
@@ -136,8 +136,9 @@ impl<V: PolyVertex> RouteSink<V> for HitSink<'_> {
         Ok(())
     }
 
-    /// Index the edge's crossings of the tile-row center lines it spans. Routing has charged it at
-    /// least that many rows, so this stays within the routing budget.
+    /// Index the edge's crossings of the tile-row center lines it spans. Routing has charged it at least
+    /// one visit for every row it spans (a touched tile, or the gap row itself), so this stays within
+    /// the routing budget.
     fn end_segment(
         &mut self,
         a: Coord<i32>,
@@ -529,15 +530,19 @@ impl Scratch {
         }
     }
 
-    /// Route every ring, recording its tile hits and row-center crossings, all sharing one
-    /// candidate-tile budget.
-    fn route<V: PolyVertex>(&mut self, grid: Grid, input: &Input<V>) -> Result<(), TileError> {
+    /// Route every ring, recording its tile hits and row-center crossings, all sharing one `budget`
+    /// of visited tiles.
+    fn route<V: PolyVertex>(
+        &mut self,
+        grid: Grid,
+        input: &Input<V>,
+        mut budget: i64,
+    ) -> Result<(), TileError> {
         self.hits.clear();
         self.crossings.clear();
         // Every edge hits at least one tile. Reserving that up front also keeps the two lists, which
         // grow together, from reallocating each other out of place on a fresh slicer.
         self.hits.reserve(input.pts.len());
-        let mut budget = MAX_TILE_VISITS;
         for (ring, info) in (0..).zip(&input.rings) {
             let start = info.start as usize;
             let closed = &input.pts[start..=start + info.len as usize];
@@ -1035,8 +1040,9 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
     ///
     /// # Errors
     ///
-    /// - [`TileError::TooManyTiles`] if a ring spans more than `i16::MAX` tiles on an axis, or routing
-    ///   the feature's rings would examine too many candidate tiles (one budget per feature).
+    /// - [`TileError::TooManyTiles`] if the feature's edges touch more than 2^25 tiles in total,
+    ///   counting each row an edge crosses without touching a tile as one (one budget of visits per
+    ///   feature; covered tiles are free).
     /// - [`TileError::Overflow`] if coordinate math overflows `i32` (geometry too near its limits).
     /// - [`TileError::OutputTooLarge`] if the feature's pieces would exceed 2^28 vertices (only rings
     ///   winding around tiles many times, or many overlapping polygons, get there).
@@ -1054,7 +1060,8 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
             return self.add_in_one_tile(tile, origin, attr);
         }
         self.input.orient_polygons();
-        self.scratch.route(self.grid, &self.input)?;
+        self.scratch
+            .route(self.grid, &self.input, MAX_TILE_VISITS)?;
         let save = self.pieces.savepoint();
         let ends = self
             .scratch
@@ -1429,6 +1436,42 @@ mod tests {
             format!("{:?}", s.pieces),
             output,
             "a shrunk slicer works the same"
+        );
+    }
+
+    #[test]
+    fn budget_counts_visited_tiles_across_rings() {
+        let square = [(0, 0), (900, 0), (900, 900), (0, 900)].map(|(x, y)| Coord { x, y });
+        let diagonal = [(3, 5), (2990, 2000), (40, 2900)].map(|(x, y)| Coord { x, y });
+        let grid = Grid::new(10, 2).expect("config");
+        let mut input = Input {
+            pts: Vec::new(),
+            rings: Vec::new(),
+            polys: Vec::new(),
+        };
+        let mut scratch = Scratch::new();
+        // Each ring as its own polygon of one feature.
+        let mut visits = |rings: &[&[Coord<i32>]], budget| {
+            input.load(rings.iter().map(|r| [*r])).expect("load");
+            scratch
+                .route(grid, &input, budget)
+                .map(|()| i64::try_from(scratch.hits.len()).unwrap())
+        };
+        let alone = visits(&[&diagonal], MAX_TILE_VISITS).expect("route");
+        let square_alone = visits(&[&square], MAX_TILE_VISITS).expect("route");
+        let both = visits(&[&square, &diagonal], MAX_TILE_VISITS).expect("route");
+        // Every charge is one touched tile (a hit), and the feature's rings draw on one budget: the
+        // pair fails one visit short, though either ring alone needs less.
+        assert_eq!(alone + square_alone, both);
+        assert_eq!(visits(&[&diagonal], alone), Ok(alone));
+        assert_eq!(visits(&[&square, &diagonal], both), Ok(both));
+        assert_eq!(
+            visits(&[&square, &diagonal], both - 1),
+            Err(TileError::TooManyTiles)
+        );
+        assert_eq!(
+            visits(&[&diagonal], alone - 1),
+            Err(TileError::TooManyTiles)
         );
     }
 
