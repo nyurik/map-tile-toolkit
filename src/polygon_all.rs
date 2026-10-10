@@ -1383,6 +1383,19 @@ mod tests {
     }
 
     #[test]
+    fn output_cap_applies_to_a_feature_in_one_tile() {
+        // Inside one tile's inner box, a feature takes the verbatim path, which honors the cap too.
+        let square = [(5, 5), (20, 5), (20, 20), (5, 20)].map(|(x, y)| Coord { x, y });
+        let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 2).expect("config");
+        let empty = format!("{:?}", s.pieces);
+        s.max_feature_verts = 3;
+        let err = s.add_feature([[&square[..]]]).err();
+        assert_eq!(err, Some(TileError::OutputTooLarge));
+        assert!(s.is_empty(), "the rejected feature is not recorded");
+        assert_eq!(format!("{:?}", s.pieces), empty, "nor any of its pieces");
+    }
+
+    #[test]
     fn output_cap_rejects_the_feature_atomically() {
         let small = [(5, 5), (20, 5), (20, 20), (5, 20)].map(|(x, y)| Coord { x, y });
         let big = [(5, 5), (190, 5), (190, 190), (5, 190)].map(|(x, y)| Coord { x, y });

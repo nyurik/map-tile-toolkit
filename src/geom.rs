@@ -164,6 +164,13 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_ring_contains_nothing() {
+        // Fewer than three vertices, or only two distinct ones once the closing copy is dropped.
+        assert!(!point_in_ring(c(0, 0), &[c(0, 0), c(5, 5)]));
+        assert!(!point_in_ring(c(0, 0), &[c(0, 0), c(5, 5), c(0, 0)]));
+    }
+
+    #[test]
     fn orient_basic_and_extremes() {
         assert_eq!(orient(c(0, 0), c(1, 0), c(0, 1)), Ordering::Greater); // CCW / left
         assert_eq!(orient(c(0, 0), c(1, 0), c(0, -1)), Ordering::Less); // CW / right

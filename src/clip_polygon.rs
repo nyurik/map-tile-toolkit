@@ -553,6 +553,27 @@ mod tests {
     }
 
     #[test]
+    fn ring_of_two_distinct_vertices_is_outside() {
+        // Distinct only after dropping consecutive duplicates, and then just a line there and back.
+        let ring = [c(2, 2), c(2, 2), c(7, 7), c(7, 7), c(2, 2)];
+        assert!(matches!(clip(&ring), (RingClip::Outside, out) if out.is_empty()));
+    }
+
+    #[test]
+    fn defensive_edge_cases() {
+        assert_eq!(
+            slot(0),
+            0,
+            "an inside point never ends a detour; it maps to a valid slot"
+        );
+        assert_eq!(
+            ray_crossings(iter::empty(), 0, 0),
+            0,
+            "an empty path crosses nothing"
+        );
+    }
+
+    #[test]
     fn fully_inside_is_kept_verbatim() {
         let ring = [c(2, 2), c(7, 2), c(7, 7), c(2, 7), c(2, 2)];
         let out = clipped(clip(&ring));

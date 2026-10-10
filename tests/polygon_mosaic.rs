@@ -233,6 +233,39 @@ fn inconsistent_tiles_conflict() {
 }
 
 #[test]
+fn degenerate_ring_contributes_nothing() {
+    // Two distinct vertices once the repeated ones are dropped: there is no ring to keep edges of.
+    let flat = ring(&[(5, 5), (5, 5), (20, 20), (20, 20), (5, 5)]);
+    let mut m = PolygonMosaic::<Coord<i32>>::new(EXTENT, 0).expect("valid config");
+    m.add(TileId::new(0, 0), &[flat]).expect("tile");
+    assert_eq!(m.iter_features().count(), 0);
+}
+
+#[test]
+fn replacing_a_tile_keeps_edges_its_neighbor_shares() {
+    // A rectangle across the seam between tiles (0, 0) and (1, 0), sliced with a buffer: its long
+    // edges reach both tiles' buffered boxes, so both tiles contribute them. Re-adding tile (0, 0)
+    // drops only its own copy of each such edge; the neighbor's keeps the reassembly whole.
+    let rect = FixturePolygon {
+        exterior: ring(&[(15, 5), (35, 5), (35, 20), (15, 20), (15, 5)]),
+        holes: Vec::new(),
+    };
+    let tiles = slice_tiles(std::slice::from_ref(&rect), 5);
+    let mut m = PolygonMosaic::<Coord<i32>>::new(EXTENT, 5).expect("valid config");
+    for (tile, rings) in &tiles {
+        m.add(*tile, rings).expect("tile");
+    }
+    let whole = edge_set(&input_rings(std::slice::from_ref(&rect)));
+    assert_eq!(edge_set(&m.iter_features().collect::<Vec<_>>()), whole);
+    let (tile, rings) = tiles
+        .iter()
+        .find(|(t, _)| *t == TileId::new(0, 0))
+        .expect("tile (0, 0) has a piece");
+    m.add(*tile, rings).expect("re-add");
+    assert_eq!(edge_set(&m.iter_features().collect::<Vec<_>>()), whole);
+}
+
+#[test]
 fn purge_and_clear_manage_tiles() {
     // Two disjoint squares, each fully inside its own tile.
     let sq = ring(&[(5, 5), (20, 5), (20, 20), (5, 20), (5, 5)]);
