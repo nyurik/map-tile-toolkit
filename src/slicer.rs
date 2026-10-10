@@ -263,7 +263,7 @@ impl<V: Vertex, A> SlicerAll<V, A> {
     ///
     /// # Errors
     ///
-    /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
+    /// [`TileError::GeometryTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn add_feature_with<P: AsRef<[V]>>(
         &mut self,
@@ -380,7 +380,7 @@ impl<V: Vertex> SlicerAll<V, ()> {
     ///
     /// # Errors
     ///
-    /// [`TileError::PolylineTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
+    /// [`TileError::GeometryTooLarge`], [`TileError::TooManyTiles`], or [`TileError::Overflow`].
     pub fn add_feature<P: AsRef<[V]>>(&mut self, polyline: P) -> Result<&mut Self, TileError> {
         self.add_feature_with(polyline, ())
     }

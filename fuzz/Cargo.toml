@@ -22,5 +22,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "polygon_equivalence"
+path = "fuzz_targets/polygon_equivalence.rs"
+test = false
+doc = false
+bench = false
+
 # Keep the fuzz crate out of the parent package's build graph.
 [workspace]

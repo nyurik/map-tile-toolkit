@@ -9,6 +9,8 @@
 //!   tile (a fresh [`SlicerOne`] each).
 //! * `big-all-<cfg>` / `big-one-<cfg>` — the large in-memory `big_polyline` sliced with the
 //!   [`support::big_configs`] `<cfg>` (`multi`, `few`, or `single` — many / a few / one output tile).
+//! * `poly-all-<cfg>` — the large `big_polygon` through one reused `PolygonSlicerAll` with the same
+//!   `<cfg>`s, or `poly-all-huge` — the z14-like `huge_square` (2^28 tiles, nearly all covered).
 //!
 //! The second parameter is the iteration count (defaults chosen per scale). Tile ids for the `one`
 //! cases are precomputed up front, so the loop measures only clipping/accumulation.
@@ -48,11 +50,13 @@ fn main() {
     let name = std::env::args()
         .nth(1)
         .expect("usage: profile <name> [iterations]");
+    let iterations: Option<u64> = std::env::args().nth(2).and_then(|s| s.parse().ok());
+    if let Some(cfg) = name.strip_prefix("poly-all-") {
+        profile_polygon(cfg, iterations);
+        return;
+    }
     let (polylines, cfg, op, default_iters) = resolve(&name);
-    let iterations: u64 = std::env::args()
-        .nth(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default_iters);
+    let iterations = iterations.unwrap_or(default_iters);
 
     // Precompute each polyline's tile ids once, outside the timed loop.
     let cases: Vec<Case> = polylines
@@ -80,6 +84,28 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+/// Slice one large polygon repeatedly through a single slicer, cleared between features — the
+/// per-worker pattern of a bulk tile generator.
+fn profile_polygon(cfg: &str, iterations: Option<u64>) {
+    let (polygon, slicer, default_iters) = if cfg == "huge" {
+        (support::huge_square(), support::slicer(4096, 64), 30)
+    } else {
+        let slicer = support::big_configs()
+            .into_iter()
+            .find(|(c, _)| *c == cfg)
+            .map(|(_, s)| s)
+            .unwrap_or_else(|| panic!("unknown polygon config `{cfg}`"));
+        (support::big_polygon(), slicer, 3_000)
+    };
+    let mut acc = slicer.poly_all();
+    for _ in 0..iterations.unwrap_or(default_iters) {
+        acc.clear();
+        acc.add_feature(black_box([support::rings(&polygon)]))
+            .expect("polygon");
+        black_box(&acc);
     }
 }
 

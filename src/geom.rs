@@ -14,6 +14,8 @@ use core::cmp::Ordering;
 
 use geo_types::Coord;
 
+use crate::vertex::Vertex;
+
 /// Orientation of the turn `a → b → c`: the sign of the cross product `(b − a) × (c − a)`.
 ///
 /// [`Ordering::Greater`] is a left turn (counter-clockwise), [`Ordering::Less`] a right turn
@@ -42,31 +44,67 @@ fn fits_i32(v: i64) -> bool {
     i32::try_from(v).is_ok()
 }
 
-/// The winding of a closed `ring` from the sign of its signed area: [`Ordering::Greater`] for
-/// counter-clockwise, [`Ordering::Less`] for clockwise, [`Ordering::Equal`] for a degenerate ring
-/// (zero area). Works whether or not the caller repeats the first vertex to close the ring.
-///
-/// Exact for any `i32` ring: the doubled signed area is accumulated in `i128`, which cannot overflow
-/// for the crate's capped polyline length (`≤ 2^16` vertices, each cross term `< 2^63`).
-pub(crate) fn ring_orientation(ring: &[Coord<i32>]) -> Ordering {
-    if ring.len() < 3 {
-        return Ordering::Equal;
+/// The smallest integer `≥ x`, where `x` is the point at which segment `a`–`b` crosses the horizontal
+/// line at height `y` (`a.y ≠ b.y`, `y` between them). Exact: `x = a.x + dx·t/dy` is evaluated as a
+/// rounded-up integer quotient in `i64` when the factors fit `i32`, widening to `i128` otherwise —
+/// the same fast path / fallback split as [`orient`]. The result lies between `a.x` and `b.x`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the offset is dx·t/dy with |t| ≤ |dy|, so it fits i64"
+)]
+pub(crate) fn crossing_x_ceil(a: Coord<i32>, b: Coord<i32>, y: i32) -> i64 {
+    let dx = i64::from(b.x) - i64::from(a.x);
+    let mut dy = i64::from(b.y) - i64::from(a.y);
+    let mut t = i64::from(y) - i64::from(a.y);
+    // A positive divisor lets `div_euclid` floor; ceil(n/d) = −floor(−n/d).
+    if dy < 0 {
+        dy = -dy;
+        t = -t;
     }
-    // Shoelace measured about the first vertex, so each term is a cross product of edge vectors from
-    // `v0` (smaller magnitudes keep the terms well inside `i128`). Measured this way, the closing edge
-    // `v_{n-1} → v0` and the opening edge `v0 → v1` both contribute zero, so iterating `windows(2)`
-    // gives the full doubled area whether or not the ring repeats its first vertex.
-    let v0 = ring[0];
+    let offset = if fits_i32(dx) && fits_i32(t) {
+        -(-(dx * t)).div_euclid(dy)
+    } else {
+        (-(-(i128::from(dx) * i128::from(t))).div_euclid(i128::from(dy))) as i64
+    };
+    i64::from(a.x) + offset
+}
+
+/// Twice the signed area of `ring` (the shoelace sum `Σ xᵢ·yᵢ₊₁ − xᵢ₊₁·yᵢ`), exact for any `i32`
+/// ring. Works whether or not the ring repeats its first vertex, and is `0` for a degenerate ring.
+///
+/// The sign is the ring's winding: **positive** turns counter-clockwise with `y` up — which is
+/// *clockwise on screen* with `y` down, i.e. an MVT exterior ring in tile coordinates — and
+/// **negative** the other way. The slicers preserve each input ring's winding (synthetic corners
+/// follow it), so a caller that needs a fixed convention (MVT: exterior positive, holes negative)
+/// normalizes once per feature before slicing, reversing any ring whose sign disagrees with its role.
+///
+/// Accumulated in `i128`: each term is a cross product of two `i32`-difference vectors (`< 2^65`), so
+/// the sum cannot overflow below `2^62` vertices.
+#[must_use]
+pub fn signed_area_2x<V: Vertex>(ring: &[V]) -> i128 {
+    let Some(v0) = ring.first().map(Vertex::position) else {
+        return 0;
+    };
+    // Measured about the first vertex, so the closing edge `v_{n-1} → v0` and the opening edge
+    // `v0 → v1` both contribute zero: iterating `windows(2)` gives the full doubled area whether or not
+    // the ring repeats its first vertex, and smaller magnitudes keep the terms well inside `i128`.
     let mut area2: i128 = 0;
     for w in ring.windows(2) {
-        let (p, q) = (w[0], w[1]);
+        let (p, q) = (w[0].position(), w[1].position());
         let px = i128::from(p.x) - i128::from(v0.x);
         let py = i128::from(p.y) - i128::from(v0.y);
         let qx = i128::from(q.x) - i128::from(v0.x);
         let qy = i128::from(q.y) - i128::from(v0.y);
         area2 += px * qy - py * qx;
     }
-    area2.cmp(&0)
+    area2
+}
+
+/// The winding of a closed `ring` from the sign of [`signed_area_2x`]: [`Ordering::Greater`] for
+/// counter-clockwise (y up), [`Ordering::Less`] for clockwise, [`Ordering::Equal`] for a degenerate
+/// ring (zero area).
+pub(crate) fn ring_orientation<V: Vertex>(ring: &[V]) -> Ordering {
+    signed_area_2x(ring).cmp(&0)
 }
 
 /// Whether point `p` lies inside `ring` (a closed polygon ring), counting the boundary as **inside**.
@@ -150,12 +188,44 @@ mod tests {
     }
 
     #[test]
+    fn crossing_x_ceil_is_exact() {
+        // x = 0 + 10·(1/3) = 3.33… → 4; reversed direction gives the same point.
+        assert_eq!(crossing_x_ceil(c(0, 0), c(10, 3), 1), 4);
+        assert_eq!(crossing_x_ceil(c(10, 3), c(0, 0), 1), 4);
+        // Exact integer crossings stay put, negative offsets round toward +∞.
+        assert_eq!(crossing_x_ceil(c(0, 0), c(10, 2), 1), 5);
+        assert_eq!(crossing_x_ceil(c(0, 0), c(-10, 3), 1), -3);
+        // Full-`i32` spans take the `i128` path.
+        let x = crossing_x_ceil(c(i32::MIN, i32::MIN), c(i32::MAX, i32::MAX), 0);
+        assert_eq!(x, 0);
+        // The anti-diagonal `x + y = −1` crosses `y = 1` exactly at `x = −2`; one unit to the right
+        // of an exact crossing must not round further.
+        let x = crossing_x_ceil(c(i32::MIN, i32::MAX), c(i32::MAX, i32::MIN), 1);
+        assert_eq!(x, -2);
+        let x = crossing_x_ceil(c(i32::MIN, i32::MAX), c(i32::MAX - 1, i32::MIN), 1);
+        assert_eq!(x, -2); // the slightly steeper line crosses just left of −2
+    }
+
+    #[test]
     fn ring_orientation_ccw_cw() {
         let ccw = [c(0, 0), c(4, 0), c(4, 4), c(0, 4), c(0, 0)];
         let cw = [c(0, 0), c(0, 4), c(4, 4), c(4, 0), c(0, 0)];
         assert_eq!(ring_orientation(&ccw), Ordering::Greater);
         assert_eq!(ring_orientation(&cw), Ordering::Less);
         assert_eq!(ring_orientation(&ccw[..2]), Ordering::Equal); // degenerate
+        // Open and closed rings agree, and the magnitude is twice the area.
+        assert_eq!(signed_area_2x(&ccw), 32);
+        assert_eq!(signed_area_2x(&ccw[..4]), 32);
+        assert_eq!(signed_area_2x(&cw), -32);
+        assert_eq!(signed_area_2x::<Coord<i32>>(&[]), 0);
+        // Full-`i32` extremes stay exact.
+        let big = [
+            c(i32::MIN, i32::MIN),
+            c(i32::MAX, i32::MIN),
+            c(i32::MAX, i32::MAX),
+        ];
+        let side = i128::from(i32::MAX) - i128::from(i32::MIN);
+        assert_eq!(signed_area_2x(&big), side * side);
     }
 
     #[test]

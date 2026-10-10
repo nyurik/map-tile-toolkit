@@ -14,14 +14,14 @@ use crate::tile::{TileId, tile_of};
 use crate::vertex::Vertex;
 
 /// The maximum polyline length the slicer accepts (`u16::MAX + 1` vertices); a longer polyline yields
-/// [`TileError::PolylineTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
+/// [`TileError::GeometryTooLarge`]. A fixed cap, so the documented per-line vertex limit holds.
 const MAX_INDEXED_LEN: usize = u16::MAX as usize + 1;
 
 /// Upper bound on the candidate tiles [`Grid::route`] will examine before giving up with
 /// [`TileError::TooManyTiles`]. Far above any realistic polyline (a local way examines a handful per
 /// segment), it caps worst-case time and memory for adversarial, widely-spread input. ~33M tests is
 /// well under a second.
-const MAX_TILE_VISITS: i64 = 1 << 25;
+pub(crate) const MAX_TILE_VISITS: i64 = 1 << 25;
 
 /// `c` shifted by `d` on both axes. Used for the `± buffer` corner offsets, where the caller has
 /// already proved the result stays in `i32` (so no checked arithmetic).
@@ -226,23 +226,42 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`TileError::PolylineTooLarge`] — the polyline has more than `u16::MAX` vertices.
-    /// - [`TileError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
-    ///   segments would collectively examine more than `MAX_TILE_VISITS` candidate tiles.
-    /// - [`TileError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
-    ///   vertex lies more than an `i32` span from its tile origin.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    /// - [`TileError::GeometryTooLarge`] — the polyline has more than 65,536 (`u16::MAX + 1`)
+    ///   vertices.
+    /// - [`TileError::TooManyTiles`], [`TileError::Overflow`] — as in [`Self::route_within`], with a
+    ///   fresh `MAX_TILE_VISITS` budget.
     pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
         self,
         polyline: &[V],
         sink: &mut S,
     ) -> Result<(), TileError> {
-        let poly = polyline;
-
         // Up-front length check before any `emit`, so this input-level error is atomic.
-        if poly.len() > MAX_INDEXED_LEN {
-            return Err(TileError::PolylineTooLarge);
+        if polyline.len() > MAX_INDEXED_LEN {
+            return Err(TileError::GeometryTooLarge);
         }
+        // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
+        // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.
+        let mut budget = MAX_TILE_VISITS;
+        self.route_within(polyline, sink, &mut budget)
+    }
+
+    /// [`Self::route`] without the vertex-count cap, charging every candidate tile examined to the
+    /// caller's `budget` — so several polylines (a polygon's rings) can share one working-set bound.
+    ///
+    /// # Errors
+    ///
+    /// - [`TileError::TooManyTiles`] — the polyline spans more than `i16::MAX` tiles on an axis, or its
+    ///   segments would examine more candidate tiles than remain in `budget`.
+    /// - [`TileError::Overflow`] — a coordinate `± buffer` overflows `i32`, or (from the sink) a kept
+    ///   vertex lies more than an `i32` span from its tile origin.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(crate) fn route_within<V: Vertex, S: RouteSink<V>>(
+        self,
+        polyline: &[V],
+        sink: &mut S,
+        budget: &mut i64,
+    ) -> Result<(), TileError> {
+        let poly = polyline;
 
         // Empty polyline → nothing to route.
         let Some(first) = poly.first().map(Vertex::position) else {
@@ -254,9 +273,6 @@ impl Grid {
         let reference = tile_of(first, self.extent);
 
         sink.begin_polyline();
-        // Bound the total candidate tiles examined, so an adversarial spread of long segments can't
-        // exhaust time or memory: a polyline needing more than this is rejected rather than crashing.
-        let mut budget: i64 = MAX_TILE_VISITS;
         // Carry the previous vertex and its located tile, so a segment whose two endpoints share one
         // tile's inner box needs no division or geometry test at all.
         let mut prev: Option<V> = None;
@@ -278,8 +294,8 @@ impl Grid {
                     // Fast path: the whole segment lies in `la`'s inner box, so it touches only that
                     // tile (`la.core_lo` is that tile's origin) — no `tile_of`, `tile_bounds`, or
                     // geometry test.
-                    budget -= 1;
-                    if budget < 0 {
+                    *budget -= 1;
+                    if *budget < 0 {
                         return Err(TileError::TooManyTiles);
                     }
                     sink.emit(la.owner, la.core_lo, a, *v)?;
@@ -323,9 +339,9 @@ impl Grid {
                             .map_err(|_| TileError::TooManyTiles)?;
                     }
                     // Charge this segment's candidate-tile box.
-                    budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
+                    *budget -= (i64::from(hi.x) - i64::from(lo.x) + 1)
                         * (i64::from(hi.y) - i64::from(lo.y) + 1);
-                    if budget < 0 {
+                    if *budget < 0 {
                         return Err(TileError::TooManyTiles);
                     }
                     for ty in lo.y..=hi.y {

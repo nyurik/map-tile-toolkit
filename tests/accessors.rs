@@ -1,7 +1,7 @@
 //! Trivial coverage for the config/size getters and `TileId` conversions.
 
 use geo_types::Coord;
-use map_tile_toolkit::{Mosaic, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{Mosaic, PolygonSlicerAll, SlicerAll, SlicerOne, TileId};
 
 #[test]
 fn slicer_all_reports_its_config() {
@@ -16,6 +16,15 @@ fn slicer_one_reports_its_config() {
     assert_eq!(s.extent(), 25);
     assert_eq!(s.buffer(), 4);
     assert_eq!(s.tile(), TileId::new(2, 3));
+    assert_eq!(s.len(), 0);
+    assert!(s.is_empty());
+}
+
+#[test]
+fn polygon_slicer_all_reports_its_config() {
+    let s = PolygonSlicerAll::<Coord<i32>>::new(25, 4).expect("valid config");
+    assert_eq!(s.extent(), 25);
+    assert_eq!(s.buffer(), 4);
     assert_eq!(s.len(), 0);
     assert!(s.is_empty());
 }

@@ -19,8 +19,12 @@ concurrency:
 
 jobs:
   fuzz:
-    name: Fuzz slice_equivalence
+    name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [slice_equivalence, polygon_equivalence]
     timeout-minutes: 30
     # Fuzzing should fail only on a crash/assertion, not on nightly-only lint drift (the justfile
     # otherwise treats warnings as errors under CI).
@@ -38,15 +42,15 @@ jobs:
         uses: actions/cache@v6
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-slice_equivalence-${{ github.run_id }}
-          restore-keys: fuzz-corpus-slice_equivalence-
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz for the configured time (fails on any crash/assertion)
-        run: just fuzz slice_equivalence -- -max_total_time=${{ github.event.inputs.max_total_time || '600' }}
+        run: just fuzz ${{ matrix.target }} -- -max_total_time=${{ github.event.inputs.max_total_time || '600' }}
       # On a finding, cargo-fuzz drops a reproducer in fuzz/artifacts — keep it.
       - name: Upload crash reproducers
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
           if-no-files-found: ignore
