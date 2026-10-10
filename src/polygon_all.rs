@@ -6,8 +6,8 @@
 //! 1. **Route** every ring through [`Grid::route_within`] (one shared tile budget), recording which
 //!    edges touch which tile's buffered box — the keep-rule's whole input. Tiles no edge touches are
 //!    never visited.
-//! 2. **Index** where each edge crosses each tile row's center line `y = cy`. That line carries the
-//!    winding ray of every tile in the row, so one sorted list per row answers both remaining
+//! 2. **Index**, during the same walk, where each edge crosses each tile row's center line `y = cy`.
+//!    That line carries the winding ray of every tile in the row, so one sorted list per row answers both remaining
 //!    questions: how far an excursion outside a tile winds around it (the detour's shape) and whether
 //!    a ring with no edge in a tile contains it (ray parity).
 //! 3. **Sweep** each row left to right over its edge tiles, closing every touching ring's arcs with
@@ -21,13 +21,13 @@ use core::ops::Range;
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polygon::{close_ring, fill_box, push_distinct, push_fill_box};
+use crate::clip_polygon::{close_ring, fill_box, keep_edge, push_distinct, push_fill_box};
 use crate::clip_polyline::to_local;
 use crate::geom::{crossing_x_ceil, ring_orientation};
 use crate::grid::{Grid, MAX_TILE_VISITS, RouteSink};
 use crate::polygon_view::{PolygonView, copy_view, offset, span};
 use crate::tile::TileId;
-use crate::vertex::PolyVertex;
+use crate::vertex::{PolyVertex, Vertex};
 
 /// The most vertices one feature may add to the output. Each detour has fewer corners than the
 /// vertices it replaces, so a tile's output stays within its rings' size, but a ring winding many times
@@ -83,12 +83,38 @@ impl Crossing {
     }
 }
 
-/// Collects routing hits for one ring, numbering its edges globally.
+/// Collects routing hits and row-center crossings for one ring, numbering its edges globally.
 struct HitSink<'a> {
     hits: &'a mut Vec<Hit>,
+    crossings: &'a mut Vec<Crossing>,
+    extent: i64,
+    buffer: i64,
     ring: u32,
     next: u32,
     edge: u32,
+}
+
+impl HitSink<'_> {
+    /// Record edge `a → b`'s crossing of row `ty`'s center line `cy`, which its `y` span holds.
+    fn push_crossing(
+        &mut self,
+        a: Coord<i32>,
+        b: Coord<i32>,
+        ty: i64,
+        cy: i64,
+    ) -> Result<(), TileError> {
+        let cy = i32::try_from(cy).map_err(|_| TileError::Overflow)?;
+        // Right of tile `tx`'s box iff x > tx·extent + extent − 1 + buffer.
+        let x = crossing_x_ceil(a, b, cy);
+        self.crossings.push(Crossing {
+            ty: i32::try_from(ty).map_err(|_| TileError::Overflow)?,
+            edge: self.edge,
+            ring: self.ring,
+            up: b.y > a.y,
+            right_of: (x - self.extent - self.buffer).div_euclid(self.extent),
+        });
+        Ok(())
+    }
 }
 
 impl<V: PolyVertex> RouteSink<V> for HitSink<'_> {
@@ -107,6 +133,39 @@ impl<V: PolyVertex> RouteSink<V> for HitSink<'_> {
             edge: self.edge,
             ring: self.ring,
         });
+        Ok(())
+    }
+
+    /// Index the edge's crossings of the tile-row center lines it spans. Routing has charged it at
+    /// least that many rows, so this stays within the routing budget.
+    fn end_segment(
+        &mut self,
+        a: Coord<i32>,
+        b: Coord<i32>,
+        row: Option<i32>,
+    ) -> Result<(), TileError> {
+        // Rows whose center `cy` satisfies `lo <= cy < hi` (the half-open crossing rule).
+        let (lo, hi) = (i64::from(a.y.min(b.y)), i64::from(a.y.max(b.y)));
+        if let Some(ty) = row {
+            // Inside one tile's inner box, the edge spans no other row's center line.
+            let (ty, cy) = (i64::from(ty), row_center(i64::from(ty), self.extent));
+            return if lo <= cy && cy < hi {
+                self.push_crossing(a, b, ty, cy)
+            } else {
+                Ok(())
+            };
+        }
+        let mut ty = lo.div_euclid(self.extent) - 1;
+        let mut cy = row_center(ty, self.extent);
+        while cy < lo {
+            ty += 1;
+            cy = row_center(ty, self.extent);
+        }
+        while cy < hi {
+            self.push_crossing(a, b, ty, cy)?;
+            ty += 1;
+            cy = row_center(ty, self.extent);
+        }
         Ok(())
     }
 }
@@ -280,18 +339,27 @@ impl<V: PolyVertex> Input<V> {
             for hole in rings {
                 self.push_ring(hole.as_ref(), poly, true)?;
             }
-            let ext = self.rings[first as usize];
-            let ext_pts = &self.pts[ext.start as usize..(ext.start + ext.len) as usize];
             self.polys.push(PolyInfo {
                 first,
-                orient: ring_orientation(ext_pts),
+                // Set by `orient_polygons` when the feature needs fill boxes.
+                orient: Ordering::Equal,
                 index,
             });
         }
         Ok(())
     }
 
+    /// Record each polygon's exterior winding, which its fill boxes and runs follow.
+    fn orient_polygons(&mut self) {
+        for poly in &mut self.polys {
+            let ext = self.rings[poly.first as usize];
+            poly.orient =
+                ring_orientation(&self.pts[ext.start as usize..(ext.start + ext.len) as usize]);
+        }
+    }
+
     /// Append one ring's distinct vertices (closed with a copy of the first), if it has at least 3.
+    #[inline]
     fn push_ring(&mut self, ring: &[V], poly: u32, hole: bool) -> Result<bool, TileError> {
         let start = self.pts.len();
         let len = push_distinct(ring, &mut self.pts);
@@ -433,7 +501,6 @@ struct Scratch {
     /// outnumber the output rings by more than one per row and polygon.
     vert_limit: usize,
     /// Per-tile temporaries.
-    edges: Vec<u32>,
     arcs: Vec<(usize, usize)>,
     touched: Vec<u32>,
     extra: Vec<u32>,
@@ -456,22 +523,29 @@ impl Scratch {
             last_run: Vec::new(),
             fill_ok: false,
             vert_limit: 0,
-            edges: Vec::new(),
             arcs: Vec::new(),
             touched: Vec::new(),
             extra: Vec::new(),
         }
     }
 
-    /// Route every ring, recording its tile hits, all sharing one candidate-tile budget.
+    /// Route every ring, recording its tile hits and row-center crossings, all sharing one
+    /// candidate-tile budget.
     fn route<V: PolyVertex>(&mut self, grid: Grid, input: &Input<V>) -> Result<(), TileError> {
         self.hits.clear();
+        self.crossings.clear();
+        // Every edge hits at least one tile. Reserving that up front also keeps the two lists, which
+        // grow together, from reallocating each other out of place on a fresh slicer.
+        self.hits.reserve(input.pts.len());
         let mut budget = MAX_TILE_VISITS;
         for (ring, info) in (0..).zip(&input.rings) {
             let start = info.start as usize;
             let closed = &input.pts[start..=start + info.len as usize];
             let mut sink = HitSink {
                 hits: &mut self.hits,
+                crossings: &mut self.crossings,
+                extent: i64::from(grid.extent()),
+                buffer: i64::from(grid.buffer()),
                 ring,
                 next: info.start,
                 edge: 0,
@@ -479,45 +553,6 @@ impl Scratch {
             grid.route_within(closed, &mut sink, &mut budget)?;
         }
         sort_hits(&mut self.hits, &mut self.hits_tmp, &mut self.counts);
-        Ok(())
-    }
-
-    /// Index every edge's crossings of the tile-row center lines it spans. An edge spans no more rows
-    /// than routing charged it, so this is bounded by the routing budget.
-    fn index_crossings<V: PolyVertex>(
-        &mut self,
-        grid: Grid,
-        input: &Input<V>,
-    ) -> Result<(), TileError> {
-        self.crossings.clear();
-        let extent = i64::from(grid.extent());
-        let buffer = i64::from(grid.buffer());
-        let center = |ty: i64| row_center(ty, extent);
-        for (ring, info) in (0..).zip(&input.rings) {
-            for edge in info.start..info.start + info.len {
-                let a = input.pts[edge as usize].position();
-                let b = input.pts[edge as usize + 1].position();
-                let (lo, hi) = (i64::from(a.y.min(b.y)), i64::from(a.y.max(b.y)));
-                // Rows whose center `cy` satisfies `lo <= cy < hi` (the half-open crossing rule).
-                let mut ty = lo.div_euclid(extent) - 1;
-                while center(ty) < lo {
-                    ty += 1;
-                }
-                while center(ty) < hi {
-                    let cy = i32::try_from(center(ty)).map_err(|_| TileError::Overflow)?;
-                    // Right of tile `tx`'s box iff x > tx·extent + extent − 1 + buffer.
-                    let x = crossing_x_ceil(a, b, cy);
-                    self.crossings.push(Crossing {
-                        ty: i32::try_from(ty).map_err(|_| TileError::Overflow)?,
-                        edge,
-                        ring,
-                        up: b.y > a.y,
-                        right_of: (x - extent - buffer).div_euclid(extent),
-                    });
-                    ty += 1;
-                }
-            }
-        }
         sort_crossings(
             &mut self.crossings,
             &mut self.crossings_tmp,
@@ -834,19 +869,19 @@ impl Scratch {
         for ring_hits in ring_groups(hits) {
             let ring = input.rings[ring_hits[0].ring as usize];
             let ring_start = out.verts.len();
-            self.edges.clear();
-            self.edges
-                .extend(ring_hits.iter().map(|x| x.edge - ring.start));
+            self.arcs.clear();
+            for x in ring_hits {
+                keep_edge(&mut self.arcs, (x.edge - ring.start) as usize);
+            }
             let fenwick = &self.fenwick;
             let winding =
                 |first: usize, count: usize| excursion_winding(cs, fenwick, ring, first, count);
             close_ring(
                 input.ring_pts(ring),
-                &self.edges,
+                &mut self.arcs,
                 min,
                 max,
                 winding,
-                &mut self.arcs,
                 &mut out.verts,
             )?;
             localize(&mut out.verts[ring_start..], origin)?;
@@ -1014,8 +1049,12 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
         <P::Item as IntoIterator>::Item: AsRef<[V]>,
     {
         self.input.load(polygons)?;
+        let points = self.input.pts.iter().map(Vertex::position);
+        if let Some((tile, origin)) = self.grid.inner_tile(points) {
+            return self.add_in_one_tile(tile, origin, attr);
+        }
+        self.input.orient_polygons();
         self.scratch.route(self.grid, &self.input)?;
-        self.scratch.index_crossings(self.grid, &self.input)?;
         let save = self.pieces.savepoint();
         let ends = self
             .scratch
@@ -1048,6 +1087,66 @@ impl<V: PolyVertex, A> PolygonSlicerAll<V, A> {
                 Err(err)
             }
         }
+    }
+
+    /// [`add_feature_with`](Self::add_feature_with) for a loaded feature lying in one tile's inner box
+    /// (most buildings): every ring touches only that tile, so each goes there verbatim — exactly what
+    /// routing and the row sweep would produce, without them.
+    fn add_in_one_tile(
+        &mut self,
+        tile: TileId,
+        origin: Coord<i32>,
+        attr: A,
+    ) -> Result<&mut Self, TileError> {
+        let save = self.pieces.savepoint();
+        let result = self.push_in_one_tile(tile, origin, save.verts);
+        match result {
+            Ok(()) => {
+                self.features.push(FeatureEntry {
+                    tiles_end: offset(self.pieces.tiles.len())?,
+                    runs_end: offset(self.pieces.runs.len())?,
+                    attr,
+                });
+                Ok(self)
+            }
+            Err(err) => {
+                self.pieces.rollback(save);
+                Err(err)
+            }
+        }
+    }
+
+    fn push_in_one_tile(
+        &mut self,
+        tile: TileId,
+        origin: Coord<i32>,
+        verts_before: usize,
+    ) -> Result<(), TileError> {
+        let (input, out) = (&self.input, &mut self.pieces);
+        for (i, ring) in input.rings.iter().enumerate() {
+            // Each ring's distinct vertices and the closing copy, as `close_ring` keeps a ring whose
+            // every edge touches the box.
+            let start = out.verts.len();
+            let closed = ring.start as usize..=(ring.start + ring.len) as usize;
+            out.verts.extend_from_slice(&input.pts[closed]);
+            localize(&mut out.verts[start..], origin)?;
+            out.ring_ends.push(offset(out.verts.len())?);
+            if input
+                .rings
+                .get(i + 1)
+                .is_none_or(|next| next.poly != ring.poly)
+            {
+                out.poly_ends.push(offset(out.ring_ends.len())?);
+            }
+        }
+        if out.verts.len() - verts_before > self.max_feature_verts {
+            return Err(TileError::OutputTooLarge);
+        }
+        out.tiles.push(TileEntry {
+            tile,
+            poly_end: offset(out.poly_ends.len())?,
+        });
+        Ok(())
     }
 
     /// Iterate the recorded features, in the order added.

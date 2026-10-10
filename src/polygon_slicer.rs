@@ -15,7 +15,7 @@
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polygon::{RingClip, clip_ring};
+use crate::clip_polygon::{ClipScratch, RingClip, clip_ring};
 use crate::clip_polyline::to_local;
 use crate::grid::Grid;
 use crate::polygon_view::{PolygonView, offset};
@@ -43,6 +43,8 @@ pub struct PolygonSlicerOne<V: PolyVertex = Coord<i32>, A = ()> {
     verts: Vec<V>,
     ring_ends: Vec<u32>,
     features: Vec<FeatureEntry<A>>,
+    /// The clip's working memory, kept for its capacity (never part of the slicer's value).
+    scratch: ClipScratch<V>,
 }
 
 impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
@@ -60,6 +62,7 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
             verts: Vec::new(),
             ring_ends: Vec::new(),
             features: Vec::new(),
+            scratch: ClipScratch::new(),
         })
     }
 
@@ -134,26 +137,30 @@ impl<V: PolyVertex, A> PolygonSlicerOne<V, A> {
         origin: Coord<i32>,
     ) -> Result<bool, TileError> {
         // Clip the exterior first — if it misses the tile entirely, the whole feature is absent here.
-        match clip_ring(exterior, min, max)? {
-            RingClip::Outside => return Ok(false),
-            RingClip::Covers(ring) | RingClip::Clipped(ring) => self.push_ring(&ring, origin)?,
+        // Rings go straight into `verts`; the caller truncates them if the feature is dropped.
+        let start = self.verts.len();
+        if clip_ring(exterior, min, max, &mut self.scratch, &mut self.verts)? == RingClip::Outside {
+            return Ok(false);
         }
+        self.end_ring(start, origin)?;
         for hole in holes {
-            match clip_ring(hole, min, max)? {
+            let start = self.verts.len();
+            match clip_ring(hole, min, max, &mut self.scratch, &mut self.verts)? {
                 // A hole that covers the whole tile leaves nothing to draw here — drop the feature
                 // entirely rather than emit a fill exactly cancelled by its hole.
-                RingClip::Covers(_) => return Ok(false),
-                RingClip::Clipped(clipped) => self.push_ring(&clipped, origin)?,
+                RingClip::Covers => return Ok(false),
+                RingClip::Clipped => self.end_ring(start, origin)?,
                 RingClip::Outside => {}
             }
         }
         Ok(true)
     }
 
-    /// Append one clipped ring (global frame) in the tile-local frame (`vertex − origin`).
-    fn push_ring(&mut self, ring: &[V], origin: Coord<i32>) -> Result<(), TileError> {
-        for &v in ring {
-            self.verts.push(to_local(v, origin)?);
+    /// End the ring appended from `start` (global frame), moving it to the tile-local frame
+    /// (`vertex − origin`).
+    fn end_ring(&mut self, start: usize, origin: Coord<i32>) -> Result<(), TileError> {
+        for v in &mut self.verts[start..] {
+            *v = to_local(*v, origin)?;
         }
         self.ring_ends.push(offset(self.verts.len())?);
         Ok(())
