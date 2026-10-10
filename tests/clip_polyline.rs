@@ -173,6 +173,36 @@ fn big_config_tile_counts() {
     }
 }
 
+/// A z14-scale diagonal — one segment across 16384 × 16384 tiles of extent 4096 — slices (routing
+/// charges the tiles it touches, not its 2^28-tile bounding box), and every sampled output tile and
+/// each of its neighbours agrees with a per-tile [`SlicerOne`](map_tile_toolkit::SlicerOne) clip.
+#[test]
+fn long_diagonal_slices_at_z14() {
+    const N: i32 = 1 << 14;
+    let cfg = support::slicer(support::DIAGONAL_EXTENT as u32, 64);
+    let line = vec![support::long_diagonal(N)];
+    let all: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> =
+        support::slice_all_runs(&cfg, &line).into_iter().collect();
+    // Each tile row holds the one or two tiles the line crosses, plus buffer neighbours.
+    assert!(
+        all.len() > 2 * N as usize && all.len() < 4 * N as usize,
+        "{}",
+        all.len()
+    );
+    assert!(all.contains_key(&TileId::new(0, 0)) && all.contains_key(&TileId::new(N - 1, N - 1)));
+    for t in all.keys().step_by(97) {
+        for (dx, dy) in (-1..=1).flat_map(|dx| (-1..=1).map(move |dy| (dx, dy))) {
+            let tile = TileId::new(t.x + dx, t.y + dy);
+            let expected = support::slice_tile_runs(&cfg, &line, tile);
+            assert_eq!(
+                all.get(&tile).cloned().unwrap_or_default(),
+                expected,
+                "{tile:?}"
+            );
+        }
+    }
+}
+
 /// Run every cross-check for one fixture at one buffer size, then snapshot the result into
 /// `snapshot_dir`.
 fn slice_at_buffer(

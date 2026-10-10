@@ -384,6 +384,37 @@ pub fn buildings() -> Vec<FixturePolygon> {
         .collect()
 }
 
+/// Tile side of the [`long_diagonal`] / [`diagonal_triangle`] scenes (a typical MVT extent).
+pub const DIAGONAL_EXTENT: i32 = 4096;
+
+/// One segment running diagonally across `tiles × tiles` tiles of extent [`DIAGONAL_EXTENT`] — at
+/// `tiles = 16384` a z14 world-spanning edge. Slightly off 45° and off the tile corners, so it
+/// crosses tile edges at varied positions and passes near (but not through) the corners.
+#[must_use]
+pub fn long_diagonal(tiles: i32) -> Vec<Coord<i32>> {
+    let span = tiles * DIAGONAL_EXTENT;
+    vec![
+        Coord { x: 100, y: 300 },
+        Coord {
+            x: span - 200,
+            y: span - 1700,
+        },
+    ]
+}
+
+/// A right triangle over `tiles × tiles` tiles whose hypotenuse is the [`long_diagonal`] segment;
+/// its other two edges run along a tile row and column, and the half below the diagonal is filled.
+#[must_use]
+pub fn diagonal_triangle(tiles: i32) -> FixturePolygon {
+    let [a, c] = long_diagonal(tiles)[..] else {
+        unreachable!("a long diagonal has two vertices")
+    };
+    FixturePolygon {
+        exterior: vec![a, Coord { x: c.x, y: a.y }, c],
+        holes: Vec::new(),
+    }
+}
+
 /// The rings of a polygon, exterior first — the per-polygon input [`PolygonSlicerAll`] takes.
 #[must_use]
 pub fn rings(p: &FixturePolygon) -> Vec<&[Coord<i32>]> {

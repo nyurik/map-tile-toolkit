@@ -16,7 +16,9 @@
 //!
 //! Scenarios: `small` (the `tests/polylines/fixtures/*.geojson` set on the extent-25 grid) and the
 //! single large [`support::big_polyline`] sliced into many / a few / a single tile (`big_multi`,
-//! `big_few`, `big_single`).
+//! `big_few`, `big_single`), plus — for `all` only — `diagonal_4k` / `diagonal_z14`: one
+//! [`support::long_diagonal`] segment across 4000 × 4000 / 16384 × 16384 (a z14 world) tiles of
+//! extent 4096, whose routing must cost the tiles it touches, not its bounding box.
 //!
 //! The polygon slicers mirror them: `polygon_all` adds each feature to one
 //! [`PolygonSlicerAll`](map_tile_toolkit::PolygonSlicerAll) cleared between features (a bulk tile
@@ -25,8 +27,9 @@
 //! `tests/polygons/fixtures` feature), `buildings` ([`support::buildings`], 2000 four-corner footprints
 //! on a z14-like grid: the bulk of real polygon data), [`support::big_polygon`] at the three `big_*` scales, and —
 //! for `polygon_all` only — `huge_fill`, the z14-like [`support::huge_square`] whose 2^28 covered
-//! tiles must cost nothing per tile, and `many_holes`, [`support::many_holes`] whose 2000 inner rings
-//! must cost their hits, not their count per edge tile.
+//! tiles must cost nothing per tile, `many_holes`, [`support::many_holes`] whose 2000 inner rings
+//! must cost their hits, not their count per edge tile, and `diagonal_4k` / `diagonal_z14`, the
+//! [`support::diagonal_triangle`] whose hypotenuse is that same long diagonal.
 //!
 //! **Baselines.** Each operation has traditional counterparts over the same inputs (see
 //! `benches/baseline/mod.rs`), suffixed so they sort next to it, that clip each geometry into exactly
@@ -76,6 +79,8 @@ enum Input {
     Small,
     /// The single large [`support::big_polyline`] (~3.6k vertices).
     Big,
+    /// One [`support::long_diagonal`] segment across this many tiles per axis.
+    Diagonal(i32),
 }
 
 /// The polylines for an [`Input`] — setup-time work, excluded from the instruction count.
@@ -89,6 +94,7 @@ fn load(input: Input) -> support::Polylines {
             .into_iter()
             .map(<[_]>::to_vec)
             .collect(),
+        Input::Diagonal(tiles) => vec![support::long_diagonal(tiles)],
     }
 }
 
@@ -111,6 +117,8 @@ fn setup_all(cfg: Cfg, input: Input) -> (Cfg, support::Polylines) {
 #[bench::big_multi(support::slicer(25, 0), Input::Big)]
 #[bench::big_few(support::slicer(300, 0), Input::Big)]
 #[bench::big_single(support::slicer(1024, 0), Input::Big)]
+#[bench::diagonal_4k(support::slicer(4096, 64), Input::Diagonal(4000))]
+#[bench::diagonal_z14(support::slicer(4096, 64), Input::Diagonal(1 << 14))]
 fn all((cfg, polylines): (Cfg, support::Polylines)) -> support::Polylines {
     let mut acc = cfg.all();
     for poly in &polylines {
@@ -282,6 +290,8 @@ enum PolyInput {
     Holes,
     /// [`support::buildings`], each building its own feature.
     Buildings,
+    /// The single [`support::diagonal_triangle`] across this many tiles per axis.
+    Diagonal(i32),
 }
 
 /// Multipolygon features (each a list of polygons) for a [`PolyInput`].
@@ -305,6 +315,7 @@ fn load_polygons(input: PolyInput) -> Vec<Vec<FixturePolygon>> {
         PolyInput::Huge => vec![vec![support::huge_square()]],
         PolyInput::Holes => vec![vec![support::many_holes()]],
         PolyInput::Buildings => support::buildings().into_iter().map(|b| vec![b]).collect(),
+        PolyInput::Diagonal(tiles) => vec![vec![support::diagonal_triangle(tiles)]],
     }
 }
 
@@ -328,6 +339,8 @@ fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<Vec<FixturePolygon
 #[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
 #[bench::huge_fill(support::slicer(4096, 64), PolyInput::Huge)]
 #[bench::many_holes(support::slicer(256, 8), PolyInput::Holes)]
+#[bench::diagonal_4k(support::slicer(4096, 64), PolyInput::Diagonal(4000))]
+#[bench::diagonal_z14(support::slicer(4096, 64), PolyInput::Diagonal(1 << 14))]
 fn polygon_all((cfg, features): (Cfg, Vec<Vec<FixturePolygon>>)) -> Vec<Vec<FixturePolygon>> {
     let mut acc = cfg.poly_all();
     for feature in &features {

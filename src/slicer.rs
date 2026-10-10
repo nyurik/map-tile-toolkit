@@ -64,7 +64,7 @@ impl<V, A> TileBuf<V, A> {
     /// Append one run's vertices to the arena and record its end offset.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "a tile holds far fewer than u32::MAX vertices (a polyline is capped at u16 each)"
+        reason = "a tile holds far fewer than u32::MAX vertices"
     )]
     fn push_run(&mut self, run: Vec<V>) {
         self.verts.extend(run);

@@ -234,8 +234,12 @@ purely tile-local, hence inherently order-independent.
 - **Reuse the streaming engine.** `PolygonSlicerAll` routes each ring's edges through
   `Grid::route_within` + a polygon `RouteSink`, inheriting the inner-box fast path (`Located`), the
   `tile_of` skip, and `Overflow` checks. The sink records `(tile, edge)` hits (sorted row-major
-  once); all of a feature's rings share **one** `MAX_TILE_VISITS` budget, which covers routing only —
-  covered tiles are never charged. Rings are not capped at `u16::MAX` vertices (only `u32` indexing).
+  once); all of a feature's rings share **one** `MAX_TILE_VISITS` budget of touched tiles (plus any
+  row an edge crosses without touching a tile, possible only at `buffer == 0`), which
+  covers routing only — covered tiles are never charged. A segment leaving the inner box is walked row
+  by row through exactly the tiles it touches, so a long diagonal edge costs its touched tiles, not
+  its bounding rectangle. Beyond that, the only limits are `u32` indexing, `i32` coordinates and,
+  for polygons, the 2^28-vertex output cap per feature (`OutputTooLarge`).
 - **Excursion windings without walking excursions.** §5's `W_exc` counts an excursion's crossings of
   the tile's ray; walking the excursion per tile would cost `O(ring)` per tile (the ring around an
   ocean is "the excursion" for every coastal tile). Instead the row's crossing list, in edge order,

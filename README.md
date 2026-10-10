@@ -66,6 +66,25 @@ all float/projection work up front (e.g. with [`geo`](https://docs.rs/geo)). For
 the top-left corner to the origin, flip `y`, round to `i32` — landing data in `[0, 2^z · extent)`.
 `buffer` and `Mosaic`'s `extent` are in these same units.
 
+### Limits
+
+Routing walks each segment through exactly the tiles it touches, so cost follows those tiles, never
+a segment's bounding box: a world-spanning diagonal at z14 (extent 4096) touches ~35 000 tiles.
+What remains, each reported as a `TileError` rather than a panic:
+
+* **Coordinates are `i32`**, so `2^z · extent` must fit (up to z18 at extent 4096); geometry touching
+  a tile whose buffered box leaves the `i32` range (an outermost tile, with `buffer > 0`) is
+  `Overflow`.
+* **2^25 tile visits per feature** (`TooManyTiles`) — each tile a segment touches counts once, and
+  so does each tile row it crosses without touching a tile (with `buffer == 0`, a segment can slip
+  between two columns); tiles a polygon merely covers (its fill runs) are free. It bounds the time and per-tile memory one feature
+  can demand; far above any real feature, it only rejects adversarial input.
+* **`u32` indexing** (`GeometryTooLarge`) — at most `u32::MAX` vertices per polyline or polygon
+  feature, matching the slicers' flat storage offsets.
+* **2^28 output vertices per polygon feature** (`OutputTooLarge`) — only rings winding around tiles
+  many times, or many overlapping polygons, get there; they are rejected rather than exhausting
+  memory.
+
 ### Merging tiles back
 
 `Mosaic` is the stateful inverse of `SlicerAll`: add tiles (each tile's runs, in its local frame) and

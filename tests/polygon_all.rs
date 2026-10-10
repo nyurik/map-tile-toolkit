@@ -795,7 +795,7 @@ fn random_star_multipolygons_match_one() {
 
 /// A z14-like ocean: a square spanning 16384 × 16384 tiles of extent 4096 (2^28 tiles) with a
 /// 21 × 21-tile hole. Interior tiles must come back as one or two runs per row — bounded memory and
-/// time proportional to the perimeter and the rows — and the routing budget (2^25 candidate tiles)
+/// time proportional to the perimeter and the rows — and the routing budget (2^25 tile visits)
 /// must not apply to them.
 #[test]
 fn huge_polygon_fills_by_runs() {
@@ -845,4 +845,58 @@ fn huge_polygon_fills_by_runs() {
         .expect("a run covers the tile");
     assert_eq!(one(fill), vec![vec![feature.fill_ring(run).to_vec()]]);
     assert!(one(TileId::new(N / 2, N / 2)).is_empty(), "inside the hole");
+}
+
+/// A z14-scale polygon with a long diagonal edge — the [`support::diagonal_triangle`] over 16384 ×
+/// 16384 tiles of extent 4096 — slices, its edge tiles proportional to the perimeter, and around a
+/// sample of edge tiles every tile agrees with [`PolygonSlicerOne`]: an edge tile's pieces match,
+/// a filled tile is one it fills with whole-tile boxes, and any other tile is one it leaves empty.
+#[test]
+fn long_diagonal_edge_slices_at_z14() {
+    const N: i32 = 1 << 14;
+    let extent = support::DIAGONAL_EXTENT as u32;
+    let polygon = support::diagonal_triangle(N);
+    let mut all = PolygonSlicerAll::<Coord<i32>>::new(extent, 64).expect("config");
+    all.add_feature([support::rings(&polygon)])
+        .expect("a z14 diagonal edge slices");
+    let feature = all.iter_features().next().expect("one feature");
+    let tiles: BTreeMap<TileId, Pieces> = feature
+        .iter_tiles()
+        .map(|t| {
+            let pieces = t
+                .iter_polygons()
+                .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
+                .collect();
+            (t.tile_id(), pieces)
+        })
+        .collect();
+    assert!(tiles.len() < 8 * N as usize, "{}", tiles.len());
+    let mut rows: BTreeMap<i32, Vec<FillRun>> = BTreeMap::new();
+    for r in feature.iter_fill_runs() {
+        rows.entry(r.y).or_default().push(r);
+    }
+    let filled_tiles: u64 = rows.values().flatten().map(|r| r.x.len() as u64).sum();
+    let half = u64::from((N - 2) as u32).pow(2) / 2;
+    assert!(filled_tiles.abs_diff(half) < 2 * N as u64, "{filled_tiles}");
+    let fill_of = |t: TileId| {
+        rows.get(&t.y)
+            .and_then(|runs| runs.iter().find(|r| r.x.contains(&t.x)))
+    };
+
+    let one = |tile| one_tile(std::slice::from_ref(&polygon), extent, 64, tile);
+    for t in tiles.keys().step_by(101) {
+        for (dx, dy) in (-1..=1).flat_map(|dx| (-1..=1).map(move |dy| (dx, dy))) {
+            let tile = TileId::new(t.x + dx, t.y + dy);
+            let expected = one(tile);
+            match (tiles.get(&tile), fill_of(tile)) {
+                (Some(pieces), _) => assert_eq!(pieces, &expected, "{tile:?}"),
+                (None, Some(run)) => assert_eq!(
+                    expected,
+                    vec![vec![feature.fill_ring(run).to_vec()]],
+                    "{tile:?}"
+                ),
+                (None, None) => assert!(expected.is_empty(), "{tile:?}"),
+            }
+        }
+    }
 }
