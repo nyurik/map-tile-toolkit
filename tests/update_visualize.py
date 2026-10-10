@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Refresh `tests/visualize.qgz` so its layers are exactly the GeoJSON files under `tests/`.
 
 The layer tree mirrors the directory tree: one group per directory, sorted, holding its files

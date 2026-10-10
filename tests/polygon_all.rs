@@ -4,7 +4,8 @@
 //! one it leaves empty. (The fixtures' snapshots, shared by both slicers, are in `clip_polygon.rs`.)
 //!
 //! Also here: fill coverage against an independent `geo` point-in-polygon of each tile center;
-//! reassembly of the edge tiles with [`PolygonMosaic`]; and the large-input bounds.
+//! reassembly of the edge tiles with [`PolygonMosaic`]; all of it again under every rotation and
+//! mirror image of the fixtures; planetiler's tricky hole cases; and the large-input bounds.
 
 #![allow(clippy::pedantic, reason = "test tool")]
 
@@ -185,6 +186,7 @@ fn fixture([path]: [&Path; 1]) {
     fixture_matches_one(path);
     fixture_fill_matches_geo(path);
     fixture_reassembles(path);
+    fixture_symmetries(path);
 }
 
 fn fixture_matches_one(path: &Path) {
@@ -258,34 +260,279 @@ fn edge_set<'a>(
 /// (fill runs carry no original edge, so they are not needed).
 fn fixture_reassembles(path: &Path) {
     let features = support::load_polygon_features(path);
-    let input: Vec<&[Coord<i32>]> = features.iter().flatten().flat_map(support::rings).collect();
+    let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
     for buffer in [0, 5] {
-        let mut all = PolygonSlicerAll::<Coord<i32>>::new(EXTENT, buffer).expect("config");
-        for f in &features {
-            all.add_feature(rings_of(f)).expect("slice");
+        reassembles(&features, EXTENT, buffer, stem);
+    }
+}
+
+/// Fixtures with a hole outside its shell (an invalid polygon): a tile the shell does not reach
+/// drops that hole, so only the shell's edges are sure to come back.
+const HOLE_OUTSIDE_SHELL: &[&str] = &["only_hole_touches_other_tile"];
+
+/// Slice `features` with [`PolygonSlicerAll`], feed every edge tile to a [`PolygonMosaic`], and
+/// assert the result has exactly the input rings' edges (for a fixture in [`HOLE_OUTSIDE_SHELL`]:
+/// every shell edge, and nothing that is not an input edge).
+fn reassembles(features: &[Vec<FixturePolygon>], extent: u32, buffer: u16, label: &str) {
+    let input: Vec<&[Coord<i32>]> = features.iter().flatten().flat_map(support::rings).collect();
+    let mut all = PolygonSlicerAll::<Coord<i32>>::new(extent, buffer).expect("config");
+    for f in features {
+        all.add_feature(rings_of(f)).expect("slice");
+    }
+    let mut per_tile: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> = BTreeMap::new();
+    for f in all.iter_features() {
+        for t in f.iter_tiles() {
+            let rings = t
+                .iter_polygons()
+                .flat_map(|p| p.iter_rings().map(|r| r.vertices().to_vec()));
+            per_tile.entry(t.tile_id()).or_default().extend(rings);
         }
-        let mut per_tile: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> = BTreeMap::new();
-        for f in all.iter_features() {
-            for t in f.iter_tiles() {
-                let rings = t
-                    .iter_polygons()
-                    .flat_map(|p| p.iter_rings().map(|r| r.vertices().to_vec()));
-                per_tile.entry(t.tile_id()).or_default().extend(rings);
+    }
+    let mut mosaic = PolygonMosaic::<Coord<i32>>::new(extent, buffer).expect("config");
+    for (tile, rings) in &per_tile {
+        mosaic
+            .add(*tile, rings)
+            .expect("the slicer's own tiles never conflict");
+    }
+    let rebuilt: Vec<Vec<Coord<i32>>> = mosaic.iter_features().collect();
+    let rebuilt = edge_set(rebuilt.iter().map(Vec::as_slice));
+    let input = edge_set(input.iter().copied());
+    let at = format!("{label}: reassembly at extent {extent} buffer {buffer}");
+    if HOLE_OUTSIDE_SHELL
+        .iter()
+        .any(|stem| label.starts_with(stem))
+    {
+        let shells = edge_set(features.iter().flatten().map(|p| p.exterior.as_slice()));
+        assert!(rebuilt.is_subset(&input), "{at}: invented edges");
+        assert!(shells.is_subset(&rebuilt), "{at}: lost shell edges");
+    } else {
+        assert_eq!(rebuilt, input, "{at}");
+    }
+}
+
+/// The eight symmetries of the tile grid: `k % 4` quarter turns about the origin, after a mirror
+/// across the y axis when `k >= 4`. All are exact in integers and map every tile's buffered box onto
+/// another's, so slicing a transformed polygon must give the transformed tiles. A single mirror flips
+/// the winding, so its rings are reversed to keep exteriors and holes wound as they were.
+fn dihedral(polygons: &[FixturePolygon], k: u8) -> Vec<FixturePolygon> {
+    let mirror = k >= 4;
+    let map = |c: &Coord<i32>| {
+        let mut c = if mirror {
+            Coord { x: -c.x, y: c.y }
+        } else {
+            *c
+        };
+        for _ in 0..k % 4 {
+            c = Coord { x: -c.y, y: c.x };
+        }
+        c
+    };
+    let ring = |r: &[Coord<i32>]| {
+        let mut r: Vec<Coord<i32>> = r.iter().map(map).collect();
+        if mirror {
+            r.reverse();
+        }
+        r
+    };
+    let out: Vec<FixturePolygon> = polygons
+        .iter()
+        .map(|p| FixturePolygon {
+            exterior: ring(&p.exterior),
+            holes: p.holes.iter().map(|h| ring(h)).collect(),
+        })
+        .collect();
+    let windings = |ps: &[FixturePolygon]| -> Vec<bool> {
+        ps.iter()
+            .flat_map(support::rings)
+            .map(|r| twice_area(r) > 0)
+            .collect()
+    };
+    assert_eq!(
+        windings(&out),
+        windings(polygons),
+        "symmetry {k} keeps winding"
+    );
+    out
+}
+
+/// Twice the signed (shoelace) area of a closed or open ring.
+fn twice_area(ring: &[Coord<i32>]) -> i64 {
+    let n = ring.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            i64::from(a.x) * i64::from(b.y) - i64::from(b.x) * i64::from(a.y)
+        })
+        .sum()
+}
+
+/// The tile that `tile` becomes under [`dihedral`] symmetry `k` (the one its center maps into).
+fn dihedral_tile(tile: TileId, extent: u32, k: u8) -> TileId {
+    // Doubled coordinates keep the center on the integer grid.
+    let e = extent as i32;
+    let center = |t: i32| (2 * t + 1) * e;
+    let poly = FixturePolygon {
+        exterior: vec![Coord {
+            x: center(tile.x),
+            y: center(tile.y),
+        }],
+        holes: Vec::new(),
+    };
+    let c = dihedral(&[poly], k)[0].exterior[0];
+    TileId::new(c.x.div_euclid(2 * e), c.y.div_euclid(2 * e))
+}
+
+/// Every rotation and mirror image of a fixture still matches the single-tile oracle (fill rings
+/// included) and still reassembles, at both snapshot buffers and on two finer grids — tiles of 10
+/// put boundaries through many fixture vertices, tiles of 7 through few. Each symmetry walks rows
+/// and crossings in a different order, so this catches tie-breaks that hold only one way round.
+fn fixture_symmetries(path: &Path) {
+    let features = support::load_polygon_features(path);
+    let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
+    for k in 0..8 {
+        let features: Vec<Vec<FixturePolygon>> = features.iter().map(|f| dihedral(f, k)).collect();
+        let polygons: Vec<FixturePolygon> = features.iter().flatten().cloned().collect();
+        let label = format!("{stem} (symmetry {k})");
+        for (extent, buffer) in [(EXTENT, 0), (EXTENT, 5), (10, 2), (7, 3)] {
+            check(&polygons, extent, buffer, &label);
+            reassembles(&features, extent, buffer, &label);
+        }
+    }
+}
+
+/// What one tile of a [`Sliced`] feature holds.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Holds {
+    Nothing,
+    Edge,
+    Fill,
+}
+
+fn holds(sliced: &Sliced, tile: TileId) -> Holds {
+    if sliced.tiles.contains_key(&tile) {
+        Holds::Edge
+    } else if sliced.fills.contains_key(&tile) {
+        Holds::Fill
+    } else {
+        Holds::Nothing
+    }
+}
+
+/// A named polygon, and what some of its tiles (x, y) must hold.
+type Case<'a> = (&'a str, FixturePolygon, &'a [(i32, i32, Holds)]);
+
+/// planetiler's `TiledGeometryTest` hole cases in their own frame: its coordinates are in tiles, so
+/// at 10 units per tile they land on integers with the tile boundaries where planetiler has them.
+/// Each case runs under all eight [`dihedral`] symmetries (planetiler checks seven of them) against
+/// the oracle and the mosaic, and makes planetiler's own assertions about particular tiles (plus the
+/// tiles they imply for each hole alone).
+#[test]
+fn planetiler_hole_cases() {
+    // Closed, as the fixtures' rings are.
+    let ring = |pts: &[(i32, i32)]| {
+        pts.iter()
+            .chain(&pts[..1])
+            .map(|&(x, y)| Coord { x, y })
+            .collect::<Vec<_>>()
+    };
+    let polygon = |rings: &[&[(i32, i32)]]| FixturePolygon {
+        exterior: ring(rings[0]),
+        holes: rings[1..].iter().map(|r| ring(r)).collect(),
+    };
+    let outer: &[(i32, i32)] = &[(10, 10), (100, 10), (100, 100), (10, 100)];
+    // testOverlappingHoles: a chevron hole, and a triangle hole in its notch.
+    let chevron: &[(i32, i32)] = &[(20, 20), (20, 90), (90, 90), (30, 50), (90, 20)];
+    let in_notch: &[(i32, i32)] = &[(90, 30), (90, 80), (40, 50)];
+    let overlapping = [
+        (3, 3, Holds::Nothing),
+        (7, 4, Holds::Nothing),
+        (1, 1, Holds::Edge),
+        (9, 9, Holds::Edge),
+    ];
+    // testInsideComplexHole: a hole wrapped round an island of polygon, with a speck hole on it.
+    let complex: &[(i32, i32)] = &[
+        (65, 15),
+        (20, 20),
+        (20, 90),
+        (90, 90),
+        (90, 20),
+        (46, 20),
+        (80, 80),
+        (30, 80),
+        (40, 20),
+    ];
+    let speck: &[(i32, i32)] = &[(55, 65), (55, 66), (56, 66)];
+    let island = [
+        (5, 5, Holds::Fill),
+        (4, 6, Holds::Fill),
+        (5, 6, Holds::Edge),
+    ];
+    // testSideOfHoleIntercepted: the chevron's arm sends a finger back into tile (7, 4).
+    let finger: &[(i32, i32)] = &[
+        (20, 20),
+        (20, 90),
+        (90, 90),
+        (30, 50),
+        (90, 20),
+        (90, 42),
+        (75, 42),
+        (75, 48),
+        (95, 48),
+        (95, 18),
+    ];
+    // testOnlyHoleTouchesOtherCellBottom: a hole outside its speck of a shell touches tile (1, 2).
+    let speck_shell: &[(i32, i32)] = &[(15, 15), (16, 15), (15, 16)];
+    let touching: &[(i32, i32)] = &[(14, 18), (16, 18), (15, 20)];
+
+    let cases: [Case<'_>; 7] = [
+        (
+            "overlapping 1",
+            polygon(&[outer, chevron]),
+            &[(3, 3, Holds::Nothing), (7, 4, Holds::Fill)],
+        ),
+        (
+            "overlapping 2",
+            polygon(&[outer, in_notch]),
+            &[(3, 3, Holds::Fill), (7, 4, Holds::Nothing)],
+        ),
+        (
+            "overlapping 1 2",
+            polygon(&[outer, chevron, in_notch]),
+            &overlapping,
+        ),
+        (
+            "overlapping 2 1",
+            polygon(&[outer, in_notch, chevron]),
+            &overlapping,
+        ),
+        ("complex", polygon(&[outer, complex, speck]), &island),
+        ("finger", polygon(&[outer, finger]), &[(7, 4, Holds::Edge)]),
+        (
+            // Named so `reassembles` expects only the shell back.
+            HOLE_OUTSIDE_SHELL[0],
+            polygon(&[speck_shell, touching]),
+            &[(1, 1, Holds::Edge), (1, 2, Holds::Nothing)],
+        ),
+    ];
+    for (name, polygon, expect) in &cases {
+        for k in 0..8 {
+            let polygons = dihedral(std::slice::from_ref(polygon), k);
+            let label = format!("{name} (symmetry {k})");
+            for buffer in [0, 1, 3] {
+                check(&polygons, 10, buffer, &label);
+                reassembles(std::slice::from_ref(&polygons), 10, buffer, &label);
+            }
+            // planetiler's assertions, made without a buffer.
+            let sliced = all_tiles(&polygons, 10, 0);
+            for &(x, y, want) in *expect {
+                let tile = dihedral_tile(TileId::new(x, y), 10, k);
+                assert_eq!(
+                    holds(&sliced, tile),
+                    want,
+                    "{label}: tile ({x}, {y}) -> {tile:?}"
+                );
             }
         }
-        let mut mosaic = PolygonMosaic::<Coord<i32>>::new(EXTENT, buffer).expect("config");
-        for (tile, rings) in &per_tile {
-            mosaic
-                .add(*tile, rings)
-                .expect("the slicer's own tiles never conflict");
-        }
-        let rebuilt: Vec<Vec<Coord<i32>>> = mosaic.iter_features().collect();
-        assert_eq!(
-            edge_set(rebuilt.iter().map(Vec::as_slice)),
-            edge_set(input.iter().copied()),
-            "{} (buffer {buffer})",
-            path.display()
-        );
     }
 }
 
