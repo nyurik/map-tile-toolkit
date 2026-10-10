@@ -91,14 +91,14 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io if crate's version is newer
-        uses: release-plz/action@v0.5.132
+        uses: release-plz/action@v0.5.140
         id: release
         with: { command: release }
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
       - if: ${{ steps.release.outputs.releases_created == 'false' }}
         name: If version is the same, create a PR proposing new version and changelog for the next release
-        uses: release-plz/action@v0.5.132
+        uses: release-plz/action@v0.5.140
         with: { command: release-pr }
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
