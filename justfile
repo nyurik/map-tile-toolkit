@@ -119,14 +119,16 @@ _coverage *report_args:  (cargo-install 'cargo-llvm-cov')
     #!/usr/bin/env bash
     set -euo pipefail
     # A full clean: `clean --workspace` keeps test binaries built with other features or sources, and
-    # the report would merge their stale line mappings in.
+    # the report would merge their stale line mappings in. It also removes the report directory.
     if rustup toolchain list | grep nightly &> /dev/null; then
         cargo +nightly llvm-cov clean
+        mkdir -p {{quote(parent_directory(coverage_lcov))}}
         cargo +nightly llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
         cargo +nightly llvm-cov --no-report --doctests --workspace --all-features
         cargo +nightly llvm-cov report --include-build-script {{report_args}}
     else
         cargo llvm-cov clean
+        mkdir -p {{quote(parent_directory(coverage_lcov))}}
         cargo llvm-cov --no-report --workspace --all-features {{non_bench_targets}}
         cargo llvm-cov report --include-build-script {{report_args}}
     fi
