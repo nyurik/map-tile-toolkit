@@ -536,6 +536,33 @@ fn planetiler_hole_cases() {
     }
 }
 
+/// A ring's edge tiles past the row's last center-line crossing: from the crossing at x = 32.5,
+/// the ring runs on above the center line out to x = 100 and back, touching row 0's tiles 4..=9
+/// without crossing again. They must still be emitted (a PR review's counterexample).
+#[test]
+fn edge_tiles_past_last_crossing_match_one() {
+    let ring: Vec<Coord<i32>> = [(0, 0), (10, 0), (10, 4), (100, 8), (100, 9), (0, 9), (0, 0)]
+        .map(|(x, y)| Coord { x, y })
+        .to_vec();
+    let polygon = FixturePolygon {
+        exterior: ring,
+        holes: Vec::new(),
+    };
+    for k in 0..8 {
+        let polygons = dihedral(std::slice::from_ref(&polygon), k);
+        for buffer in [0, 1, 4] {
+            check(
+                &polygons,
+                10,
+                buffer,
+                &format!("past last crossing (symmetry {k})"),
+            );
+        }
+    }
+    let all = all_tiles(std::slice::from_ref(&polygon), 10, 0);
+    assert!((1..10).all(|x| all.tiles.contains_key(&TileId::new(x, 0))));
+}
+
 /// Overlapping polygons (an invalid multipolygon) fill the shared tiles once each, in polygon order,
 /// exactly as the single-tile slicer does — even where the later polygon's run starts first, and one
 /// is wound the other way.
