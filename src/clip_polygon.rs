@@ -20,7 +20,7 @@ use core::iter;
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polyline::segment_intersects;
+use crate::clip_polyline::line_meets_box;
 use crate::geom::{point_in_ring, ring_orientation};
 use crate::vertex::{PolyVertex, Vertex};
 
@@ -29,6 +29,10 @@ const LEFT: u8 = 1;
 const RIGHT: u8 = 2;
 const BOTTOM: u8 = 4;
 const TOP: u8 = 8;
+/// All four outside bits.
+const BOX: u8 = LEFT | RIGHT | BOTTOM | TOP;
+/// Not an outcode bit: set beside one for a point above the winding ray's line (`y > cy`).
+const ABOVE: u8 = 16;
 
 /// Outcode of `p` relative to the closed box `[min, max]` (0 iff `p` is inside).
 fn outcode(p: Coord<i32>, min: Coord<i32>, max: Coord<i32>) -> u8 {
@@ -250,6 +254,7 @@ pub(crate) fn fill_box(orient: Ordering, sw: Coord<i32>, ne: Coord<i32>) -> [Coo
 /// # Errors
 ///
 /// [`TileError::Overflow`] if a synthetic corner can't be placed strictly outside the box.
+#[inline]
 pub(crate) fn close_ring<V: PolyVertex>(
     ring: &[V],
     touching: &[u32],
@@ -350,41 +355,106 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     min: Coord<i32>,
     max: Coord<i32>,
 ) -> Result<RingClip<V>, TileError> {
-    let mut pts: Vec<V> = Vec::with_capacity(ring.len());
-    let m = push_distinct(ring, &mut pts);
+    // Borrow the ring when it is already distinct (the usual case), copying only to drop duplicates.
+    let mut copy = Vec::new();
+    let pts = if let Some(n) = distinct_prefix(ring) {
+        &ring[..n]
+    } else {
+        push_distinct(ring, &mut copy);
+        copy.as_slice()
+    };
+    let m = pts.len();
     if m < 3 {
         return Ok(RingClip::Outside);
     }
-    let pos = |i: usize| pts[i % m].position();
-    let edges = u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
-    let touching: Vec<u32> = (0..edges)
-        .filter(|&i| segment_intersects(pos(i as usize), pos(i as usize + 1), min, max))
-        .collect();
+    u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
+
+    // One pass over the edges. Each vertex's outcode is computed once and shared by its two edges: a
+    // shared outside bit rejects an edge (the bounding-box test of `segment_intersects`), an inside
+    // endpoint accepts it, and only the rest need the exact line test. The same pass records every
+    // edge crossing the winding ray (its endpoints on either side of `y = cy`, the only edges
+    // `ray_crossing` can count), so an excursion's winding is a sum over those few, not a walk.
+    let cy = center_y(min, max);
+    let code = |p: Coord<i32>| outcode(p, min, max) | if p.y > cy { ABOVE } else { 0 };
+    let mut touching = Vec::new();
+    let mut crossings: Vec<(u32, i64)> = Vec::new();
+    let (mut a, mut ca) = (pts[0].position(), code(pts[0].position()));
+    for (i, b) in (0..).zip(pts[1..].iter().chain(iter::once(&pts[0]))) {
+        let b = b.position();
+        let cb = code(b);
+        let (oa, ob) = (ca & BOX, cb & BOX);
+        if oa & ob == 0 && (oa == 0 || ob == 0 || line_meets_box(a, b, min, max)) {
+            touching.push(i);
+        }
+        if (ca ^ cb) & ABOVE != 0 {
+            let w = ray_crossing(a, b, cy, max.x);
+            if w != 0 {
+                crossings.push((i, w));
+            }
+        }
+        (a, ca) = (b, cb);
+    }
 
     if touching.is_empty() {
-        // No edge touches the box → the tile is uniformly inside or outside the ring.
-        let ring_pts: Vec<Coord<i32>> = pts.iter().map(Vertex::position).collect();
-        return if point_in_ring(min, &ring_pts) {
+        // No edge touches the box → the tile is uniformly inside or outside the ring, and the box
+        // center's `+x` ray meets edges only outside the box — exactly the recorded crossings — so their
+        // parity is the even-odd containment of the whole tile.
+        let inside = crossings.len() % 2 == 1;
+        debug_assert_eq!(
+            inside,
+            point_in_ring(min, &pts.iter().map(Vertex::position).collect::<Vec<_>>()),
+            "ray parity must agree with point-in-ring containment"
+        );
+        return if inside {
             let mut fill = Vec::with_capacity(5);
-            push_fill_box(&mut fill, ring_orientation(&pts), min, max)?;
+            push_fill_box(&mut fill, ring_orientation(pts), min, max)?;
             Ok(RingClip::Covers(fill))
         } else {
             Ok(RingClip::Outside)
         };
     }
 
-    let cy = center_y(min, max);
+    // Signed crossings among edges `lo..hi` (both within `0..=m`).
+    let sum = |lo: usize, hi: usize| -> i64 {
+        let i = crossings.partition_point(|c| (c.0 as usize) < lo);
+        let j = crossings.partition_point(|c| (c.0 as usize) < hi);
+        crossings[i..j].iter().map(|c| c.1).sum()
+    };
+    let winding = |first: usize, count: usize| {
+        let w = if first + count <= m {
+            sum(first, first + count)
+        } else {
+            sum(first, m) + sum(0, first + count - m)
+        };
+        debug_assert_eq!(
+            w,
+            ray_crossings(
+                (first..=first + count).map(|i| pts[i % m].position()),
+                cy,
+                max.x
+            ),
+            "indexed winding must match walking the excursion"
+        );
+        w
+    };
     let mut out = Vec::new();
-    close_ring(
-        &pts,
-        &touching,
-        min,
-        max,
-        |first, count| ray_crossings((first..=first + count).map(pos), cy, max.x),
-        &mut Vec::new(),
-        &mut out,
-    )?;
+    close_ring(pts, &touching, min, max, winding, &mut Vec::new(), &mut out)?;
     Ok(RingClip::Clipped(out))
+}
+
+/// The length of `ring` without its repeated closing vertices, if that prefix has no consecutive
+/// duplicate positions — exactly what [`push_distinct`] would copy, so it can be borrowed instead.
+/// `None` when an inner duplicate needs the copy.
+fn distinct_prefix<V: Vertex>(ring: &[V]) -> Option<usize> {
+    let first = ring.first()?.position();
+    let mut n = ring.len();
+    while n >= 2 && ring[n - 1].position() == first {
+        n -= 1;
+    }
+    ring[..n]
+        .windows(2)
+        .all(|w| w[0].position() != w[1].position())
+        .then_some(n)
 }
 
 #[cfg(test)]
