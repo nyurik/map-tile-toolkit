@@ -266,9 +266,7 @@ impl Grid {
         sink: &mut S,
     ) -> Result<(), TileError> {
         // Up-front length check before any `emit`, so this input-level error is atomic.
-        if u32::try_from(polyline.len()).is_err() {
-            return Err(TileError::GeometryTooLarge);
-        }
+        u32::try_from(polyline.len()).map_err(|_| TileError::GeometryTooLarge)?;
         // Bound the total tiles visited, so an adversarial spread of long segments can't exhaust
         // time or memory: a polyline needing more than this is rejected rather than crashing.
         let mut budget = MAX_TILE_VISITS;
@@ -514,6 +512,21 @@ mod tests {
         ) -> Result<(), TileError> {
             self.0 += 1;
             Ok(())
+        }
+    }
+
+    #[test]
+    fn mul_div_floor_is_exact_past_i64() {
+        // Spans of ~4·10⁹ (two far-apart full-i32 coordinates) overflow the i64 product.
+        let reference = |n: i64, m: i64, d: i64| {
+            i64::try_from((i128::from(n) * i128::from(m)).div_euclid(i128::from(d))).unwrap()
+        };
+        for (n, m, d) in [
+            (4_000_000_000, 4_294_967_295, 4_294_967_296),
+            (-3_999_999_999, 4_294_967_295, 4_000_000_000),
+            (12, -7, 5),
+        ] {
+            assert_eq!(mul_div_floor(n, m, d), reference(n, m, d), "{n}·{m}/{d}");
         }
     }
 

@@ -77,8 +77,9 @@ What remains, each reported as a `TileError` rather than a panic:
   `Overflow`.
 * **2^25 tile visits per feature** (`TooManyTiles`) — each tile a segment touches counts once, and
   so does each tile row it crosses without touching a tile (with `buffer == 0`, a segment can slip
-  between two columns); tiles a polygon merely covers (its fill runs) are free. It bounds the time and per-tile memory one feature
-  can demand; far above any real feature, it only rejects adversarial input.
+  between two columns); tiles a polygon merely covers (its fill runs) are free. It bounds the time
+  and per-tile memory one feature can demand; far above any real feature, it only rejects
+  adversarial input.
 * **`u32` indexing** (`GeometryTooLarge`) — at most `u32::MAX` vertices per polyline or polygon
   feature, matching the slicers' flat storage offsets.
 * **2^28 output vertices per polygon feature** (`OutputTooLarge`) — only rings winding around tiles
