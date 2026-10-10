@@ -29,6 +29,90 @@ bench filter='':
 # Run only the large-polyline benchmarks (many / a few / a single tile)
 bench-big: (bench 'big')
 
+# Count the slicing benchmarks' CPU instructions into a Markdown report (the CI PR comment), compared
+# with `base_ref` if given, e.g. `just ci-bench target/bench/summary.md main`. Needs `valgrind`; installs
+# the `gungraun-runner` each side needs. Skips the `geo` baselines, which take most of an hour under Valgrind.
+ci-bench output='target/bench/summary.md' base_ref='':  (assert-cmd 'valgrind') (assert-cmd 'python3')
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out_dir="$(realpath -m "$(dirname {{quote(output)}})")"
+    mkdir -p "$out_dir"
+    rm -f "$out_dir"/head.jsonl "$out_dir"/base.jsonl "$out_dir"/base.log
+    # The benchmark functions of the checkout in `$1`, in order, without the `geo` baselines.
+    functions() {
+        (cd "$1" && cargo bench --bench slicing -- --list) \
+            | sed -n 's/^slicing::slicing::\([^:]*\)::.*: benchmark$/\1/p' | awk '!seen[$0]++' | grep -v '_geo$'
+    }
+    # Build the checkout in `$1` against a `gungraun-runner` of the gungraun version it depends on (the two
+    # must match), installing that runner if needed.
+    use_runner() {
+        local ver root
+        ver=$(cd "$1" && cargo metadata --format-version 1 | python3 -c \
+            'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "gungraun"))')
+        root="${CARGO_HOME:-$HOME/.cargo}/gungraun-runner/$ver"
+        if [ ! -x "$root/bin/gungraun-runner" ]; then
+            cargo install --quiet gungraun-runner --version "=$ver" --root "$root"
+        fi
+        export GUNGRAUN_RUNNER="$root/bin/gungraun-runner"
+    }
+    # Count the functions `$2..` of the checkout in `$1`, as gungraun's JSON lines on stdout.
+    count() {
+        local src="$1"; shift
+        for f in "$@"; do
+            (cd "$src" && cargo bench --bench slicing -- "slicing::slicing::$f::*" --output-format json) || return 1
+        done
+    }
+
+    base_note=""
+    if [ -n {{quote(base_ref)}} ]; then
+        base="$(git rev-parse --short {{quote(base_ref)}})"
+        # A worktree outside this one, so cargo does not see two nested packages. It builds into its own
+        # target directory: in a shared one, cargo would take one checkout's binary for the other's.
+        base_src="$(mktemp -d)/base"
+        trap 'git worktree remove --force "$base_src" 2>/dev/null || true' EXIT
+        git worktree add --quiet --detach "$base_src" {{quote(base_ref)}}
+        use_runner "$base_src"
+        # Only the toolkit's slicers: the baselines are the same code on both sides.
+        slicers=$(use_runner . && functions . | grep -v '_stripe$')
+        # Count the base with this commit's benchmark and workloads, so both measure the same work.
+        rm -rf "$base_src/benches" "$base_src/tests/support"
+        cp -r benches "$base_src/benches"
+        cp -r tests/support "$base_src/tests/support"
+        if count "$base_src" $slicers > "$out_dir/base.jsonl" 2>> "$out_dir/base.log"; then
+            base_note="Compared with the base commit $base, counted with this commit's benchmark."
+        else
+            # It may need API or dev-dependencies the base lacks: fall back to the base's own benchmark.
+            rm -rf "$base_src/benches" "$base_src/tests/support"
+            git -C "$base_src" checkout --quiet -- . 2>> "$out_dir/base.log" || true
+            own=$(functions "$base_src" 2>> "$out_dir/base.log" | grep -v '_stripe$' || true)
+            if [ -n "$own" ] && count "$base_src" $own > "$out_dir/base.jsonl" 2>> "$out_dir/base.log"; then
+                base_note="Compared with the base commit $base, counted with its own benchmark, as this commit's does not build there (see the job log): a changed workload also shows as a change."
+            else
+                rm -f "$out_dir/base.jsonl"
+                base_note="The base commit $base could not be benchmarked; see the job log."
+            fi
+            echo "::warning::Could not count the base commit with this commit's benchmark:" >&2
+            tail -n 30 "$out_dir/base.log" >&2
+        fi
+    fi
+
+    use_runner .
+    count . $(functions .) > "$out_dir/head.jsonl"
+    {
+        echo "## Slicing instruction counts"
+        echo
+        echo "Commit $(git rev-parse --short HEAD), $(lscpu | sed -n 's/^Model name: *//p')."
+        echo "Counted with valgrind's callgrind (via gungraun), so the counts are exact and repeat on any CPU with the same features."
+        if [ -n "$base_note" ]; then echo "$base_note"; fi
+        echo
+        if [ -f "$out_dir/base.jsonl" ]; then
+            python3 benches/report.py "$out_dir/head.jsonl" "$out_dir/base.jsonl"
+        else
+            python3 benches/report.py "$out_dir/head.jsonl"
+        fi
+    } > {{quote(output)}}
+    cat {{quote(output)}} >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
 # Profile a `profile` example case under the `hotpath` profiler (per-function timing + allocations),
 # e.g. `just hotpath big-all-multi 5000`. Set HOTPATH_OUTPUT_FORMAT=json + HOTPATH_OUTPUT_PATH for a
 # machine-readable report (this is what the Hotpath Profile CI does).
