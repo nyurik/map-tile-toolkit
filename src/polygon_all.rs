@@ -111,6 +111,103 @@ impl<V: PolyVertex> RouteSink<V> for HitSink<'_> {
     }
 }
 
+/// Row `ty`'s center line: the midpoint of its buffered box `[ty·e − b, ty·e + e − 1 + b]`, rounded
+/// toward zero, as the clip computes it with `midpoint` — in closed form, as this runs for every edge:
+/// the buffer cancels, and the sum `2·ty·e + e − 1` is negative exactly when `ty < 0`, where rounding
+/// toward zero rounds up.
+fn row_center(ty: i64, extent: i64) -> i64 {
+    ty * extent + if ty < 0 { extent / 2 } else { (extent - 1) / 2 }
+}
+
+/// Stable counting sort of `items` into `buckets` buckets by `bucket(item)` (which must lie in
+/// `0..buckets`): in `O(n + buckets)`, keeping each bucket's items in input order. `tmp` and `counts`
+/// are reused scratch.
+fn counting_sort<T: Copy>(
+    items: &mut [T],
+    tmp: &mut Vec<T>,
+    counts: &mut Vec<usize>,
+    buckets: usize,
+    bucket: impl Fn(&T) -> usize,
+) {
+    counts.clear();
+    counts.resize(buckets, 0);
+    for item in items.iter() {
+        counts[bucket(item)] += 1;
+    }
+    // Exclusive prefix sums: where each bucket starts.
+    let mut start = 0;
+    for c in counts.iter_mut() {
+        (*c, start) = (start, start + *c);
+    }
+    tmp.clear();
+    tmp.extend_from_slice(items);
+    for item in tmp.iter() {
+        let at = &mut counts[bucket(item)];
+        items[*at] = *item;
+        *at += 1;
+    }
+}
+
+/// Sort routing `hits` by `(ty, tx, edge)`. They arrive in ascending edge order (rings are routed in
+/// order, numbered by their position in the input; each edge visits its tiles once), so a stable
+/// counting sort by tile finishes the job in `O(n + span)` over the hits' tile span — one pass keyed by
+/// the tile itself when the span's area is small, else a pass by column then one by row (routing bounds
+/// the span per axis). A span much wider than the hits are many (a few hits far apart) falls back to a
+/// comparison sort. `tmp` and `counts` are reused scratch.
+fn sort_hits(hits: &mut [Hit], tmp: &mut Vec<Hit>, counts: &mut Vec<usize>) {
+    let key = |h: &Hit| (h.ty, h.tx, h.edge);
+    let Some(&first) = hits.first() else {
+        return;
+    };
+    let (mut x, mut y) = ((first.tx, first.tx), (first.ty, first.ty));
+    for h in hits.iter() {
+        x = (x.0.min(h.tx), x.1.max(h.tx));
+        y = (y.0.min(h.ty), y.1.max(h.ty));
+    }
+    let (columns, rows) = (
+        x.1.abs_diff(x.0) as usize + 1,
+        y.1.abs_diff(y.0) as usize + 1,
+    );
+    let column = |h: &Hit| h.tx.abs_diff(x.0) as usize;
+    let row = |h: &Hit| h.ty.abs_diff(y.0) as usize;
+    let budget = hits.len().saturating_mul(4);
+    if columns == 1 && rows == 1 {
+        // One tile: already in edge order.
+    } else if hits.len() < 32 || columns + rows > budget {
+        hits.sort_unstable_by_key(key);
+    } else if let Some(tiles) = columns.checked_mul(rows)
+        && tiles <= budget
+    {
+        counting_sort(hits, tmp, counts, tiles, |h| row(h) * columns + column(h));
+    } else {
+        counting_sort(hits, tmp, counts, columns, column);
+        counting_sort(hits, tmp, counts, rows, row);
+    }
+    debug_assert!(hits.is_sorted_by_key(key));
+}
+
+/// Sort `crossings` by `(ty, edge)`. They arrive in ascending edge order (each edge's rows ascending),
+/// so one stable counting sort by row does it, in `O(n + rows)`; a row span much wider than the
+/// crossings are many falls back to a comparison sort. `tmp` and `counts` are reused scratch.
+fn sort_crossings(crossings: &mut [Crossing], tmp: &mut Vec<Crossing>, counts: &mut Vec<usize>) {
+    let key = |c: &Crossing| (c.ty, c.edge);
+    let Some(&first) = crossings.first() else {
+        return;
+    };
+    let y = crossings.iter().fold((first.ty, first.ty), |(lo, hi), c| {
+        (lo.min(c.ty), hi.max(c.ty))
+    });
+    let rows = y.1.abs_diff(y.0) as usize + 1;
+    if crossings.len() < 32 || rows > crossings.len().saturating_mul(4) {
+        crossings.sort_unstable_by_key(key);
+    } else if rows > 1 {
+        counting_sort(crossings, tmp, counts, rows, |c| {
+            c.ty.abs_diff(y.0) as usize
+        });
+    }
+    debug_assert!(crossings.is_sorted_by_key(key));
+}
+
 /// Rebuild `tree` as a Fenwick (binary indexed) tree over `values`, in `O(n)`.
 fn fenwick_build(tree: &mut Vec<i64>, values: impl Iterator<Item = i64>) {
     tree.clear();
@@ -309,6 +406,10 @@ impl<V> Pieces<V> {
 #[derive(Debug, Clone)]
 struct Scratch {
     hits: Vec<Hit>,
+    /// Sorting scratch (see [`sort_hits`] and [`sort_crossings`]).
+    hits_tmp: Vec<Hit>,
+    crossings_tmp: Vec<Crossing>,
+    counts: Vec<usize>,
     crossings: Vec<Crossing>,
     /// The current row's crossings (indices into its edge-ordered slice), by `right_of`.
     by_x: Vec<u32>,
@@ -342,6 +443,9 @@ impl Scratch {
     const fn new() -> Self {
         Self {
             hits: Vec::new(),
+            hits_tmp: Vec::new(),
+            crossings_tmp: Vec::new(),
+            counts: Vec::new(),
             crossings: Vec::new(),
             by_x: Vec::new(),
             fenwick: Vec::new(),
@@ -374,7 +478,7 @@ impl Scratch {
             };
             grid.route_within(closed, &mut sink, &mut budget)?;
         }
-        self.hits.sort_unstable_by_key(|h| (h.ty, h.tx, h.edge));
+        sort_hits(&mut self.hits, &mut self.hits_tmp, &mut self.counts);
         Ok(())
     }
 
@@ -388,9 +492,7 @@ impl Scratch {
         self.crossings.clear();
         let extent = i64::from(grid.extent());
         let buffer = i64::from(grid.buffer());
-        // Row `ty`'s center line: the midpoint of its buffered box, as the clip computes it.
-        let center =
-            |ty: i64| i64::midpoint(ty * extent - buffer, ty * extent + extent - 1 + buffer);
+        let center = |ty: i64| row_center(ty, extent);
         for (ring, info) in (0..).zip(&input.rings) {
             for edge in info.start..info.start + info.len {
                 let a = input.pts[edge as usize].position();
@@ -416,7 +518,11 @@ impl Scratch {
                 }
             }
         }
-        self.crossings.sort_unstable_by_key(|c| (c.ty, c.edge));
+        sort_crossings(
+            &mut self.crossings,
+            &mut self.crossings_tmp,
+            &mut self.counts,
+        );
         Ok(())
     }
 
@@ -1116,6 +1222,64 @@ mod tests {
                     current[..end].iter().sum::<i64>()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn row_center_matches_midpoint() {
+        for extent in [1, 2, 3, 4, 25, 256, 4096] {
+            for buffer in [0, 1, (extent - 1) / 2] {
+                for ty in -5..=5 {
+                    assert_eq!(
+                        row_center(ty, extent),
+                        i64::midpoint(ty * extent - buffer, ty * extent + extent - 1 + buffer),
+                        "extent {extent}, buffer {buffer}, row {ty}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sort_hits_matches_a_plain_sort() {
+        // Routed order: ascending edges, each edge's tiles once. A compact span (with negative tiles)
+        // takes the one-pass tile sort, a diagonal one the column-then-row passes, and a span far
+        // wider than the hits are many the comparison sort.
+        let routed = |tiles: &[(i32, i32)], per_edge: u32| -> Vec<Hit> {
+            (0..)
+                .zip(tiles)
+                .map(|(i, &(tx, ty))| Hit {
+                    ty,
+                    tx,
+                    edge: i / per_edge,
+                    ring: 0,
+                })
+                .collect()
+        };
+        let long_runs: Vec<_> = [(1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)]
+            .iter()
+            .flat_map(|&t| [t; 20])
+            .collect();
+        let short_runs: Vec<_> = (0..100).map(|i| (i % 7 - 3, i % 3 - 1)).collect();
+        let diagonal: Vec<_> = (0..64).map(|i| ((i * 13) % 64, (i * 29) % 64)).collect();
+        let sparse: Vec<_> = (0..40).map(|i| ((i * 977) % 5000, i % 2)).collect();
+        for (tiles, per_edge) in [
+            (&long_runs, 1),
+            (&short_runs, 1),
+            (&short_runs, 4),
+            (&diagonal, 1),
+            (&diagonal, 2),
+            (&sparse, 1),
+        ] {
+            let mut hits = routed(tiles, per_edge);
+            let mut expected = hits.clone();
+            expected.sort_unstable_by_key(|h| (h.ty, h.tx, h.edge));
+            sort_hits(&mut hits, &mut Vec::new(), &mut Vec::new());
+            let key = |h: &Hit| (h.ty, h.tx, h.edge);
+            assert_eq!(
+                hits.iter().map(key).collect::<Vec<_>>(),
+                expected.iter().map(key).collect::<Vec<_>>()
+            );
         }
     }
 

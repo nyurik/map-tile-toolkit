@@ -36,12 +36,18 @@ pub(crate) fn segment_intersects(
         return false;
     }
     // Quick accept: an endpoint lies inside the (closed) box.
-    if inside(a, min, max) || inside(b, min, max) {
-        return true;
-    }
-    // Both endpoints outside and the bounding boxes overlap: the segment meets the box iff its four
-    // corners are not all strictly on one side of the segment's supporting line (each side is the
-    // orientation of `a → b → corner`).
+    inside(a, min, max) || inside(b, min, max) || line_meets_box(a, b, min, max)
+}
+
+/// The last step of [`segment_intersects`], for a segment whose endpoints are both outside the box but
+/// whose bounding box overlaps it: the segment then meets the box iff the box's four corners are not
+/// all strictly on one side of its supporting line (each side is the orientation of `a → b → corner`).
+pub(crate) fn line_meets_box(
+    a: Coord<i32>,
+    b: Coord<i32>,
+    min: Coord<i32>,
+    max: Coord<i32>,
+) -> bool {
     let s = [
         orient(a, b, min),
         orient(a, b, Coord { x: max.x, y: min.y }),

@@ -26,7 +26,23 @@
 //! tiles must cost nothing per tile, and `many_holes`, [`support::many_holes`] whose 2000 inner rings
 //! must cost their hits, not their count per edge tile.
 //!
-//! Filter with e.g. `just bench big`, `just bench big_single`, `just bench all`, `just bench polygon`.
+//! **Baselines.** Each operation has traditional counterparts over the same inputs (see
+//! `benches/baseline/mod.rs`), suffixed so they sort next to it, that clip each geometry into exactly
+//! the tiles the toolkit's all-tiles slicer produces for it (for polygons, its edge tiles plus every
+//! tile of its fill runs; for `one`, the edge tiles only, as there):
+//! * `*_geo` — `geo`'s `BooleanOps` (`intersection` / `clip`) against each tile's buffered box. A
+//!   general sweep-line overlay: an upper bound, not a target. It has no shared work across tiles, so
+//!   polylines get only `one_geo` (an `all_geo` would be the same loop).
+//! * `*_stripe` — a geojson-vt-style axis-stripe clipper (Sutherland–Hodgman for rings, every ring on
+//!   its own): one tile is an x then a y stripe; `all` cuts one stripe per column, then each into its
+//!   rows, as geojson-vt splits a tile. The realistic "traditional" target.
+//!
+//! Both get their `f64` input and tile lists in `setup`, compute intersection points instead of
+//! keeping original vertices, and drop each tile's output instead of storing it. `huge_fill` has no
+//! baseline (2^28 tiles), and `many_holes` only the stripe one.
+//!
+//! Filter with e.g. `just bench big`, `just bench big_single`, `just bench all`, `just bench polygon`,
+//! `just bench stripe`.
 
 #![allow(clippy::pedantic, reason = "benchmark harness")]
 #![allow(
@@ -36,13 +52,16 @@
 
 use std::hint::black_box;
 
-use geo_types::Coord;
+use geo::BooleanOps;
+use geo_types::{Coord, LineString, MultiLineString, MultiPolygon, Polygon};
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use map_tile_toolkit::TileId;
 
+mod baseline;
 #[path = "../tests/support/mod.rs"]
 mod support;
 
+use baseline::Pt;
 use support::{Cfg, FixturePolygon};
 
 /// Per-polyline input for the `one` benchmark: a polyline paired with its precomputed touched tiles.
@@ -128,6 +147,119 @@ fn one((cfg, cases): (Cfg, OneCases)) {
     }
 }
 
+// ---- Polyline baselines: the same inputs and tiles through traditional clippers. ----
+
+/// A ring or line as `f64` points (setup-time conversion).
+fn pts(ring: &[Coord<i32>]) -> Vec<Pt> {
+    ring.iter()
+        .map(|c| [f64::from(c.x), f64::from(c.y)])
+        .collect()
+}
+
+/// A ring or line as an `f64` `geo` line string (setup-time conversion).
+fn line_string(ring: &[Coord<i32>]) -> LineString<f64> {
+    pts(ring).into_iter().map(Coord::from).collect()
+}
+
+/// Per geometry: its rings or lines as `f64` points, and the tiles to clip them into (column-major).
+type StripeCases = Vec<(Vec<Vec<Pt>>, Vec<TileId>)>;
+
+fn setup_stripe(cfg: Cfg, input: Input) -> (Cfg, StripeCases) {
+    let (cfg, cases) = setup_one(cfg, input);
+    (
+        cfg,
+        cases
+            .iter()
+            .map(|(p, t)| (vec![pts(p)], sorted(t)))
+            .collect(),
+    )
+}
+
+/// `tiles`, sorted column-major as the stripe clipper's `clip_all` takes them.
+fn sorted(tiles: &[TileId]) -> Vec<TileId> {
+    let mut tiles = tiles.to_vec();
+    tiles.sort_unstable();
+    tiles
+}
+
+/// The stripe clipper's `all`: each geometry into its tiles, one stripe per column.
+fn stripe_all(cfg: Cfg, cases: &StripeCases, closed: bool) {
+    for (parts, tiles) in cases {
+        baseline::clip_all(
+            black_box(parts),
+            tiles,
+            cfg.extent,
+            cfg.buffer,
+            closed,
+            |t, p| {
+                black_box((t, p));
+            },
+        );
+    }
+}
+
+/// The stripe clipper's `one`: each geometry into each of its tiles separately.
+fn stripe_one(cfg: Cfg, cases: &StripeCases, closed: bool) {
+    for (parts, tiles) in cases {
+        for &tile in tiles {
+            let mut out = Vec::new();
+            baseline::clip_tile(
+                black_box(parts),
+                tile,
+                cfg.extent,
+                cfg.buffer,
+                closed,
+                &mut out,
+            );
+            black_box(out);
+        }
+    }
+}
+
+#[library_benchmark(setup = setup_stripe)]
+#[bench::small(support::grid(), Input::Small)]
+#[bench::big_multi(support::slicer(25, 0), Input::Big)]
+#[bench::big_few(support::slicer(300, 0), Input::Big)]
+#[bench::big_single(support::slicer(1024, 0), Input::Big)]
+fn all_stripe((cfg, cases): (Cfg, StripeCases)) {
+    stripe_all(cfg, &cases, false);
+}
+
+#[library_benchmark(setup = setup_stripe)]
+#[bench::small(support::grid(), Input::Small)]
+#[bench::big_multi(support::slicer(25, 0), Input::Big)]
+#[bench::big_few(support::slicer(300, 0), Input::Big)]
+#[bench::big_single(support::slicer(1024, 0), Input::Big)]
+fn one_stripe((cfg, cases): (Cfg, StripeCases)) {
+    stripe_one(cfg, &cases, false);
+}
+
+/// Per polyline: its `geo` form and its tiles.
+type GeoLines = Vec<(MultiLineString<f64>, Vec<TileId>)>;
+
+fn setup_one_geo(cfg: Cfg, input: Input) -> (Cfg, GeoLines) {
+    let (cfg, cases) = setup_one(cfg, input);
+    let cases = cases
+        .iter()
+        .map(|(p, t)| (MultiLineString(vec![line_string(p)]), t.clone()))
+        .collect();
+    (cfg, cases)
+}
+
+#[library_benchmark(setup = setup_one_geo)]
+#[bench::small(support::grid(), Input::Small)]
+#[bench::big_multi(support::slicer(25, 0), Input::Big)]
+#[bench::big_few(support::slicer(300, 0), Input::Big)]
+#[bench::big_single(support::slicer(1024, 0), Input::Big)]
+fn one_geo((cfg, cases): (Cfg, GeoLines)) {
+    for (line, tiles) in &cases {
+        for &tile in tiles {
+            let rect = baseline::tile_rect(tile, cfg.extent, cfg.buffer);
+            black_box(rect.to_polygon().clip(black_box(line), false));
+        }
+    }
+}
+
 // ---- Polygons ----
 
 /// Which polygon set a polygon benchmark runs over (loaded in `setup`).
@@ -190,17 +322,29 @@ fn polygon_all((cfg, features): (Cfg, Vec<Vec<FixturePolygon>>)) {
 /// Per feature: its polygons and the edge tiles the all-tiles slicer finds (precomputed in setup).
 type PolyOneCases = Vec<(Vec<FixturePolygon>, Vec<TileId>)>;
 
+/// The tiles [`PolygonSlicerAll`](map_tile_toolkit::PolygonSlicerAll) produces for `feature`: its
+/// edge tiles, plus every tile of its fill runs if `fills`.
+fn polygon_tiles(cfg: Cfg, feature: &[FixturePolygon], fills: bool) -> Vec<TileId> {
+    let mut acc = cfg.poly_all();
+    acc.add_feature(feature.iter().map(support::rings))
+        .expect("polygon");
+    let mut tiles = Vec::new();
+    for f in acc.iter_features() {
+        tiles.extend(f.iter_tiles().map(|t| t.tile_id()));
+        if fills {
+            for run in f.iter_fill_runs() {
+                tiles.extend(run.x.map(|x| TileId::new(x, run.y)));
+            }
+        }
+    }
+    tiles
+}
+
 fn setup_polygon_one(cfg: Cfg, input: PolyInput) -> (Cfg, PolyOneCases) {
     let cases = load_polygons(input)
         .into_iter()
         .map(|feature| {
-            let mut acc = cfg.poly_all();
-            acc.add_feature(feature.iter().map(support::rings))
-                .expect("polygon");
-            let tiles = acc
-                .iter_features()
-                .flat_map(|f| f.iter_tiles().map(|t| t.tile_id()).collect::<Vec<_>>())
-                .collect();
+            let tiles = polygon_tiles(cfg, &feature, false);
             (feature, tiles)
         })
         .collect();
@@ -226,8 +370,126 @@ fn polygon_one((cfg, cases): (Cfg, PolyOneCases)) {
     }
 }
 
+// ---- Polygon baselines: the same features (and, for `one`, the same edge tiles). ----
+
+/// Every ring of a feature's polygons, as `f64` points — the stripe clipper clips each on its own.
+fn feature_rings(feature: &[FixturePolygon]) -> Vec<Vec<Pt>> {
+    feature
+        .iter()
+        .flat_map(|p| std::iter::once(&p.exterior).chain(&p.holes))
+        .map(|r| pts(r))
+        .collect()
+}
+
+/// A feature as an `f64` `geo` multipolygon.
+fn multi_polygon(feature: &[FixturePolygon]) -> MultiPolygon<f64> {
+    let polygon = |p: &FixturePolygon| {
+        Polygon::new(
+            line_string(&p.exterior),
+            p.holes.iter().map(|h| line_string(h)).collect(),
+        )
+    };
+    MultiPolygon(feature.iter().map(polygon).collect())
+}
+
+/// Each feature's rings and its tiles: all of them (edge and fill) if `fills`, else the edge tiles.
+fn polygon_stripe_cases(cfg: Cfg, input: PolyInput, fills: bool) -> (Cfg, StripeCases) {
+    let cases = load_polygons(input)
+        .iter()
+        .map(|f| (feature_rings(f), sorted(&polygon_tiles(cfg, f, fills))))
+        .collect();
+    (cfg, cases)
+}
+
+fn setup_polygon_all_stripe(cfg: Cfg, input: PolyInput) -> (Cfg, StripeCases) {
+    polygon_stripe_cases(cfg, input, true)
+}
+
+fn setup_polygon_one_stripe(cfg: Cfg, input: PolyInput) -> (Cfg, StripeCases) {
+    polygon_stripe_cases(cfg, input, false)
+}
+
+#[library_benchmark(setup = setup_polygon_all_stripe)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+#[bench::many_holes(support::slicer(256, 8), PolyInput::Holes)]
+fn polygon_all_stripe((cfg, cases): (Cfg, StripeCases)) {
+    stripe_all(cfg, &cases, true);
+}
+
+#[library_benchmark(setup = setup_polygon_one_stripe)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+fn polygon_one_stripe((cfg, cases): (Cfg, StripeCases)) {
+    stripe_one(cfg, &cases, true);
+}
+
+/// Per feature: its `geo` form and the tiles to intersect it with.
+type GeoPolygons = Vec<(MultiPolygon<f64>, Vec<TileId>)>;
+
+/// Each feature as a `geo` multipolygon and its tiles: edge and fill if `fills`, else edge only.
+fn polygon_geo_cases(cfg: Cfg, input: PolyInput, fills: bool) -> (Cfg, GeoPolygons) {
+    let cases = load_polygons(input)
+        .iter()
+        .map(|f| (multi_polygon(f), polygon_tiles(cfg, f, fills)))
+        .collect();
+    (cfg, cases)
+}
+
+fn setup_polygon_all_geo(cfg: Cfg, input: PolyInput) -> (Cfg, GeoPolygons) {
+    polygon_geo_cases(cfg, input, true)
+}
+
+fn setup_polygon_one_geo(cfg: Cfg, input: PolyInput) -> (Cfg, GeoPolygons) {
+    polygon_geo_cases(cfg, input, false)
+}
+
+/// `geo`'s overlay of each feature with each of its tiles' boxes.
+fn geo_intersections(cfg: Cfg, cases: &GeoPolygons) {
+    for (feature, tiles) in cases {
+        for &tile in tiles {
+            let rect = baseline::tile_rect(tile, cfg.extent, cfg.buffer);
+            black_box(rect.to_polygon().intersection(black_box(feature)));
+        }
+    }
+}
+
+#[library_benchmark(setup = setup_polygon_all_geo)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+fn polygon_all_geo((cfg, cases): (Cfg, GeoPolygons)) {
+    geo_intersections(cfg, &cases);
+}
+
+#[library_benchmark(setup = setup_polygon_one_geo)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+fn polygon_one_geo((cfg, cases): (Cfg, GeoPolygons)) {
+    geo_intersections(cfg, &cases);
+}
+
 library_benchmark_group!(
     name = slicing,
-    benchmarks = [all, one, polygon_all, polygon_one]
+    benchmarks = [
+        all,
+        all_stripe,
+        one,
+        one_stripe,
+        one_geo,
+        polygon_all,
+        polygon_all_stripe,
+        polygon_all_geo,
+        polygon_one,
+        polygon_one_stripe,
+        polygon_one_geo
+    ]
 );
 main!(library_benchmark_groups = slicing);
