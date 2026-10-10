@@ -1,6 +1,6 @@
 [package]
 name = "map-tile-toolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Clip integer polylines and polygons into per-tile pieces on a simple tile grid"
 authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
 repository = "https://github.com/nyurik/map-tile-toolkit"

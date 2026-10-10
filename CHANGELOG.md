@@ -7,5 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/nyurik/map-tile-toolkit/compare/v0.1.0...v0.2.0) - 2026-10-10
+
+### Added
+
+- PolygonSlicerAll, fill runs, and a shared polygon view ([#23](https://github.com/nyurik/map-tile-toolkit/pull/23))
+
+### Fixed
+
+- restore the coverage recipe, with a full clean
+
+### Other
+
+- route segments by an exact tile walk; lift the i16 span and u16 vertex limits ([#22](https://github.com/nyurik/map-tile-toolkit/pull/22))
+- improve coverage ([#31](https://github.com/nyurik/map-tile-toolkit/pull/31))
+- fast paths for small polygons, crossings indexed during routing ([#29](https://github.com/nyurik/map-tile-toolkit/pull/29))
+- drop the baseline benches duplicated by merging #28 after #27 ([#30](https://github.com/nyurik/map-tile-toolkit/pull/30))
+- *(deps)* bump taiki-e/install-action from 2.87.4 to 2.87.23 in the all-actions-version-updates group across 1 directory ([#25](https://github.com/nyurik/map-tile-toolkit/pull/25))
+- geo and stripe baselines, a buildings scenario ([#28](https://github.com/nyurik/map-tile-toolkit/pull/28))
+- one-pass polygon clipping and counting sorts, with geo and stripe baseline benches ([#27](https://github.com/nyurik/map-tile-toolkit/pull/27))
+- move ci-bench into benches/ci-bench.sh, counting both sides from sibling worktrees
+- instruction-count tables as a sticky PR comment, compared with the base commit
+- disable binstall compile in CI
+- update release-plz
+- sort GeoJSON snapshot features by role ([#24](https://github.com/nyurik/map-tile-toolkit/pull/24))
+- *(deps)* update hotpath requirement from 0.26.1 to 0.27.0 in the all-cargo-version-updates group ([#20](https://github.com/nyurik/map-tile-toolkit/pull/20))
+- Polygon support ([#10](https://github.com/nyurik/map-tile-toolkit/pull/10))
+- *(deps)* bump the all-actions-version-updates group across 1 directory with 2 updates ([#18](https://github.com/nyurik/map-tile-toolkit/pull/18))
+- *(deps)* bump the all-cargo-version-updates group across 1 directory with 2 updates ([#19](https://github.com/nyurik/map-tile-toolkit/pull/19))
+- *(deps)* bump taiki-e/install-action from 2.85.0 to 2.85.13 in the all-actions-version-updates group across 1 directory ([#14](https://github.com/nyurik/map-tile-toolkit/pull/14))
+- *(deps)* update hotpath requirement from 0.22.0 to 0.23.1 in the all-cargo-version-updates group across 1 directory ([#15](https://github.com/nyurik/map-tile-toolkit/pull/15))
+- [pre-commit.ci] pre-commit autoupdate ([#13](https://github.com/nyurik/map-tile-toolkit/pull/13))
+- switch to Gungraun benchmarks ([#12](https://github.com/nyurik/map-tile-toolkit/pull/12))
+- *(deps)* bump taiki-e/install-action from 2.83.4 to 2.85.0 in the all-actions-version-updates group ([#11](https://github.com/nyurik/map-tile-toolkit/pull/11))
+- move tests to polyline subdir ([#9](https://github.com/nyurik/map-tile-toolkit/pull/9))
+- more tests
+- cleanup precommit and changelog
+- format geojson tests ([#8](https://github.com/nyurik/map-tile-toolkit/pull/8))
+
 ## [0.1.0](https://github.com/nyurik/map-tile-toolkit/tree/v0.1.0) - 2026-07-27
 - initial release
