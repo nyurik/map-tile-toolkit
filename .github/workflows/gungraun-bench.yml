@@ -35,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { prefix-key: "v0-bench" }
-      - uses: taiki-e/install-action@v2.87.4
+      - uses: taiki-e/install-action@v2.87.23
         with: { tool: 'just' }
       - run: sudo apt-get update && sudo apt-get install -y valgrind
       - name: Fetch the base commit to compare with
