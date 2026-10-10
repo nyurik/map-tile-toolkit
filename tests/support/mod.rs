@@ -348,6 +348,42 @@ pub fn many_holes() -> FixturePolygon {
     }
 }
 
+/// A z14-like block of buildings, the bulk of real polygon data: 2000 four-corner footprints, 10–90
+/// units a side and turned up to ±0.3 rad, scattered over 4 × 4 tiles of extent 4096. Most lie inside
+/// one tile; a few percent cross a tile edge or reach a neighbor's buffer.
+#[must_use]
+pub fn buildings() -> Vec<FixturePolygon> {
+    // A fixed linear congruential sequence, so the benchmark input never changes.
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move |n: u32| -> f64 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        f64::from((state >> 33) as u32 % n)
+    };
+    (0..2000)
+        .map(|_| {
+            let (cx, cy) = (next(4 * 4096), next(4 * 4096));
+            let (hw, hh) = (5.0 + next(40), 5.0 + next(40));
+            let angle = (next(601) - 300.0) / 1000.0;
+            let (sin, cos) = angle.sin_cos();
+            let corner = |dx: f64, dy: f64| Coord {
+                x: (cx + dx * cos - dy * sin).round() as i32,
+                y: (cy + dx * sin + dy * cos).round() as i32,
+            };
+            FixturePolygon {
+                exterior: vec![
+                    corner(-hw, -hh),
+                    corner(hw, -hh),
+                    corner(hw, hh),
+                    corner(-hw, hh),
+                ],
+                holes: vec![],
+            }
+        })
+        .collect()
+}
+
 /// The rings of a polygon, exterior first — the per-polygon input [`PolygonSlicerAll`] takes.
 #[must_use]
 pub fn rings(p: &FixturePolygon) -> Vec<&[Coord<i32>]> {
