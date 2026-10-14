@@ -5,11 +5,11 @@
 //! [iterations]`.
 //!
 //! Cases (`<name>`):
-//! * `all` / `one` — slice the small fixture set into all tiles (one [`SlicerAll`]) / per touched
-//!   tile (a fresh [`SlicerOne`] each).
+//! * `all` / `one` — slice the small fixture set into all tiles ([`Slicer::line`]) / per touched
+//!   tile ([`Slicer::tile_line`]), reading every vertex of every slice.
 //! * `big-all-<cfg>` / `big-one-<cfg>` — the large in-memory `big_polyline` sliced with the
 //!   [`support::big_configs`] `<cfg>` (`multi`, `few`, or `single` — many / a few / one output tile).
-//! * `poly-all-<cfg>` — the large `big_polygon` through one reused `PolygonSlicerAll` with the same
+//! * `poly-all-<cfg>` — the large `big_polygon` through one reused `Slicer::polygon` with the same
 //!   `<cfg>`s, or `poly-all-huge` — the z14-like `huge_square` (2^28 tiles, nearly all covered).
 //!
 //! The second parameter is the iteration count (defaults chosen per scale). Tile ids for the `one`
@@ -20,7 +20,7 @@
 use std::hint::black_box;
 
 use geo_types::Coord;
-use map_tile_toolkit::TileId;
+use map_tile_toolkit::{LineSlice, TileId};
 
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -36,11 +36,22 @@ enum Op {
 /// A polyline paired with the tile ids it touches (precomputed, not part of the hot loop).
 type Case = (Vec<Coord<i32>>, Vec<TileId>);
 
-/// The tiles a polyline touches (precomputed via a throwaway [`SlicerAll`]).
+/// The tiles a polyline touches, sorted (precomputed, not part of the hot loop).
 fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
-    let mut acc = cfg.all();
-    acc.add_feature(poly).expect("polyline");
-    acc.iter_tiles().map(|t| t.tile_id()).collect()
+    support::slice_all_runs(cfg, &[poly.to_vec()])
+        .into_iter()
+        .map(|(tile, _)| tile)
+        .collect()
+}
+
+/// Read every vertex of every slice, as a consumer encoding them would.
+fn consume<'a>(slices: impl Iterator<Item = LineSlice<'a, Coord<i32>>>) {
+    for s in slices {
+        black_box(s.tile());
+        for v in s.run() {
+            black_box(v);
+        }
+    }
 }
 
 // With `--features hotpath`, `#[hotpath::main]` prints a per-function timing table on exit (the
@@ -67,19 +78,15 @@ fn main() {
         })
         .collect();
 
+    let slicer = cfg.slicer();
     for _ in 0..iterations {
         for (poly, tiles) in &cases {
+            let poly = black_box(poly);
             match op {
-                Op::All => {
-                    let mut acc = cfg.all();
-                    acc.add_feature(black_box(poly)).expect("polyline");
-                    black_box(&acc);
-                }
+                Op::All => consume(slicer.line(poly).expect("polyline")),
                 Op::One => {
                     for &tile in tiles {
-                        let mut acc = cfg.one(tile);
-                        acc.add_feature(black_box(poly)).expect("polyline");
-                        black_box(&acc);
+                        consume(slicer.tile_line(tile, poly).expect("polyline"));
                     }
                 }
             }
@@ -87,8 +94,8 @@ fn main() {
     }
 }
 
-/// Slice one large polygon repeatedly through a single slicer, cleared between features — the
-/// per-worker pattern of a bulk tile generator.
+/// Slice one large polygon repeatedly through a single slicer, reading every slice — the per-worker
+/// pattern of a bulk tile generator.
 fn profile_polygon(cfg: &str, iterations: Option<u64>) {
     let (polygon, slicer, default_iters) = if cfg == "huge" {
         (support::huge_square(), support::slicer(4096, 64), 30)
@@ -100,12 +107,24 @@ fn profile_polygon(cfg: &str, iterations: Option<u64>) {
             .unwrap_or_else(|| panic!("unknown polygon config `{cfg}`"));
         (support::big_polygon(), slicer, 3_000)
     };
-    let mut acc = slicer.poly_all();
+    let mut slicer = slicer.slicer();
+    let input = support::rings(&polygon);
     for _ in 0..iterations.unwrap_or(default_iters) {
-        acc.clear();
-        acc.add_feature(black_box([support::rings(&polygon)]))
-            .expect("polygon");
-        black_box(&acc);
+        let mut slices = slicer.polygon(black_box(&input)).expect("polygon");
+        while let Some(slice) = slices.next() {
+            match slice.expect("polygon") {
+                map_tile_toolkit::PolygonSlice::Piece(piece) => {
+                    for ring in piece.rings() {
+                        for v in ring {
+                            black_box(v);
+                        }
+                    }
+                }
+                map_tile_toolkit::PolygonSlice::Run(run) => {
+                    black_box(run);
+                }
+            }
+        }
     }
 }
 

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use geo::{Area, BooleanOps, Euclidean, Length};
 use geo_types::{Coord, LineString, MultiLineString, Polygon};
-use map_tile_toolkit::{PolygonSlicerOne, SlicerOne, TileId};
+use map_tile_toolkit::{Slicer, TileId};
 
 #[path = "../benches/baseline/mod.rs"]
 mod baseline;
@@ -121,13 +121,12 @@ fn check_polygons(polygons: &[FixturePolygon], extent: u32, buffer: u16) {
     for &tile in &tiles {
         let origin = tile.origin(extent).expect("origin");
         let (mut toolkit, mut stripe, mut geo) = (0.0, 0.0, 0.0);
+        let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
         for (p, polygon_rings) in polygons.iter().zip(&rings) {
-            let mut one =
-                PolygonSlicerOne::<Coord<i32>>::new(extent, buffer, tile).expect("config");
-            let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
-            one.add_feature(&p.exterior, &holes).expect("clip");
-            for f in one.iter_features() {
-                let pieces: Vec<_> = f.iter_rings().map(|r| pts(r.vertices(), origin)).collect();
+            let one =
+                support::tile_polygons(&mut slicer, std::slice::from_ref(p), tile).expect("clip");
+            for piece in one {
+                let pieces: Vec<_> = piece.iter().map(|r| pts(r, origin)).collect();
                 toolkit += area(tile, &pieces);
             }
 
@@ -194,12 +193,11 @@ fn check_line(line: &[Coord<i32>], extent: u32, buffer: u16) {
     for &tile in &tiles {
         let rect = baseline::tile_rect(tile, extent, buffer).to_polygon();
         let origin = tile.origin(extent).expect("origin");
-        let mut one = SlicerOne::<Coord<i32>>::new(extent, buffer, tile).expect("config");
-        one.add_feature(line).expect("clip");
-        let runs: Vec<_> = one
-            .iter_features()
-            .flat_map(|f| f.iter_polylines())
-            .map(|r| line_string(&pts(r, origin)))
+        let slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
+        let runs: Vec<_> = slicer
+            .tile_line(tile, line)
+            .expect("clip")
+            .map(|s| line_string(&pts(&s.run().to_vec(), origin)))
             .collect();
         let toolkit = Euclidean.length(&rect.clip(&MultiLineString(runs), false));
 

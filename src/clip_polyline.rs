@@ -1,4 +1,4 @@
-//! Low-level polyline clipping against a single tile box (the engine behind the `Grid` slicer core).
+//! Low-level polyline clipping against a single tile box (the engine behind line slicing).
 //!
 //! Clipping keeps the **original** vertices — never cutting new ones at the tile edge. Every
 //! segment that touches the box contributes both of its endpoints, so a line shows up in every tile
@@ -15,6 +15,7 @@ use crate::geom::orient;
 use crate::vertex::Vertex;
 
 /// Is coordinate `c` inside the closed rectangle `[min, max]`?
+#[inline]
 fn inside(c: Coord<i32>, min: Coord<i32>, max: Coord<i32>) -> bool {
     c.x >= min.x && c.x <= max.x && c.y >= min.y && c.y <= max.y
 }
@@ -24,6 +25,7 @@ fn inside(c: Coord<i32>, min: Coord<i32>, max: Coord<i32>) -> bool {
 /// Integer-only (no division, no floats): reject when the segment's bounding box is disjoint from
 /// the box, accept when an endpoint is inside, otherwise test whether the box straddles the
 /// segment's supporting line via i128 cross products (so full `i32` coordinates cannot overflow).
+#[inline]
 pub(crate) fn segment_intersects(
     a: Coord<i32>,
     b: Coord<i32>,

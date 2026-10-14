@@ -10,16 +10,17 @@
 use std::fs;
 use std::path::Path;
 
-use geo_types::{Coord, Geometry, LineString, MultiLineString, Polygon};
+use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, Point, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
-use map_tile_toolkit::{PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileId};
+use std::collections::BTreeMap;
+
+use map_tile_toolkit::{PolygonSlice, Slicer, TileError, TileId};
 use serde_json::json;
 
 pub const EXTENT: u32 = 25;
 
-/// A slicer config (extent + buffer) shared by the tests, benches, and example. The slicers now own
-/// accumulated state, so the shared value is the *config*, from which each caller spins up a fresh
-/// [`SlicerAll`] / [`SlicerOne`].
+/// A slicer config (extent + buffer) shared by the tests, benches, and example, from which each caller
+/// builds a [`Slicer`] (or a polygon slicer).
 #[derive(Clone, Copy)]
 pub struct Cfg {
     pub extent: u32,
@@ -27,34 +28,92 @@ pub struct Cfg {
 }
 
 impl Cfg {
-    /// A fresh all-tiles slicer for this config (panics on a bad literal config).
+    /// A slicer for this config (panics on a bad literal config).
     #[must_use]
-    pub fn all(self) -> SlicerAll<Coord<i32>> {
-        SlicerAll::new(self.extent, self.buffer).expect("invalid slicer config in test support")
-    }
-
-    /// A fresh single-tile slicer bound to `tile` (panics on a bad literal config).
-    #[must_use]
-    pub fn one(self, tile: TileId) -> SlicerOne<Coord<i32>> {
-        SlicerOne::new(self.extent, self.buffer, tile)
-            .expect("invalid slicer config in test support")
+    pub fn slicer(self) -> Slicer<Coord<i32>> {
+        Slicer::new(self.extent, self.buffer).expect("invalid slicer config in test support")
     }
 }
 
-impl Cfg {
-    /// A fresh all-tiles polygon slicer for this config (panics on a bad literal config).
-    #[must_use]
-    pub fn poly_all(self) -> PolygonSlicerAll<Coord<i32>> {
-        PolygonSlicerAll::new(self.extent, self.buffer)
-            .expect("invalid slicer config in test support")
-    }
+/// One polygon's rings in one tile (exterior first), tile-local.
+pub type Rings = Vec<Vec<Coord<i32>>>;
 
-    /// A fresh single-tile polygon slicer bound to `tile` (panics on a bad literal config).
-    #[must_use]
-    pub fn poly_one(self, tile: TileId) -> PolygonSlicerOne<Coord<i32>> {
-        PolygonSlicerOne::new(self.extent, self.buffer, tile)
-            .expect("invalid slicer config in test support")
+/// A multipolygon feature's slices in every tile, the way a consumer that wants them per tile renders
+/// them: each polygon is sliced on its own, and each tile's pieces, and in each tile of a fill run its
+/// polygon's fill ring, are listed with their polygon's index, in polygon order (each polygon has at
+/// most one item per tile).
+///
+/// # Errors
+///
+/// The first error the slicer yields.
+pub fn slice_polygons(
+    slicer: &mut Slicer<Coord<i32>>,
+    polygons: &[FixturePolygon],
+) -> Result<BTreeMap<TileId, Vec<(u32, Rings)>>, TileError> {
+    let mut tiles: BTreeMap<TileId, Vec<(u32, Rings)>> = BTreeMap::new();
+    for (index, polygon) in (0_u32..).zip(polygons) {
+        let input = rings(polygon);
+        let mut slices = slicer.polygon(&input)?;
+        let mut runs = Vec::new();
+        while let Some(slice) = slices.next() {
+            match slice? {
+                PolygonSlice::Piece(piece) => tiles
+                    .entry(piece.tile())
+                    .or_default()
+                    .push((index, piece.rings().map(|r| r.to_vec()).collect())),
+                PolygonSlice::Run(run) => runs.push(run),
+            }
+        }
+        for run in runs {
+            let ring = slices.fill_ring(&run).to_vec();
+            for x in run.x.clone() {
+                tiles
+                    .entry(TileId::new(x, run.y))
+                    .or_default()
+                    .push((index, vec![ring.clone()]));
+            }
+        }
     }
+    Ok(tiles)
+}
+
+/// A multipolygon feature's pieces in one tile, in polygon order.
+///
+/// # Errors
+///
+/// The first error the slicer yields.
+pub fn tile_polygons(
+    slicer: &mut Slicer<Coord<i32>>,
+    polygons: &[FixturePolygon],
+    tile: TileId,
+) -> Result<Vec<Rings>, TileError> {
+    let mut out = Vec::new();
+    for polygon in polygons {
+        let input = rings(polygon);
+        if let Some(piece) = slicer.tile_polygon(tile, &input)? {
+            out.push(piece.rings().map(|r| r.to_vec()).collect());
+        }
+    }
+    Ok(out)
+}
+
+/// Tile-insertion orders to try: every permutation for a set of up to `exhaustive` tiles, else a
+/// deterministic spread — identity, reverse, and every rotation — for larger sets where `n!` is
+/// impractical.
+#[must_use]
+pub fn orders(n: usize, exhaustive: usize) -> Vec<Vec<usize>> {
+    if n <= exhaustive {
+        return permutations(n);
+    }
+    let base: Vec<usize> = (0..n).collect();
+    let mut out = vec![base.clone()];
+    let mut rev = base;
+    rev.reverse();
+    out.push(rev);
+    for r in 1..n {
+        out.push((0..n).map(|i| (i + r) % n).collect());
+    }
+    out
 }
 
 /// A config with the given extent/buffer.
@@ -131,45 +190,46 @@ pub fn polylines_of(geom: &Geometry<i32>) -> Polylines {
     lines_of(geom).into_iter().map(<[_]>::to_vec).collect()
 }
 
-/// Slice a set of polylines into per-tile runs: each polyline becomes its own feature in a fresh
-/// [`SlicerAll`], then a tile's features are flattened into their runs (feature order, then run
-/// order). Each run is a plain polyline — runs are never assembled into a `MultiLineString`. Geo-free
-/// (works with no cargo feature).
+/// Slice a set of polylines into per-tile runs, grouped by tile (ordered by [`TileId`]). Each polyline
+/// is one part, and within a tile runs come part by part, then in walk order — the order the slicer
+/// yields them in. Each run is a plain polyline — runs are never assembled into a `MultiLineString`.
 pub fn slice_all_runs(
     cfg: &Cfg,
     polylines: &[Vec<Coord<i32>>],
 ) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
-    let mut acc = cfg.all();
-    for line in polylines {
-        acc.add_feature(line.as_slice()).expect("slice");
-    }
-    acc.iter_tiles()
-        .map(|tile| (tile.tile_id(), flatten(&tile)))
-        .filter(|(_, runs)| !runs.is_empty())
-        .collect()
+    let slicer = cfg.slicer();
+    group_runs(
+        polylines
+            .iter()
+            .flat_map(|part| slicer.line(part).expect("slice")),
+    )
 }
 
-/// Clip a set of polylines to one tile → its runs (empty if nothing lands there), each polyline a
-/// feature in a fresh [`SlicerOne`], then flattened into runs.
+/// Group line slices by tile, keeping each tile's runs in yield order.
+pub fn group_runs<'a>(
+    slices: impl IntoIterator<Item = map_tile_toolkit::LineSlice<'a, Coord<i32>>>,
+) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
+    let mut tiles: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> = BTreeMap::new();
+    for slice in slices {
+        tiles
+            .entry(slice.tile())
+            .or_default()
+            .push(slice.run().to_vec());
+    }
+    tiles.into_iter().collect()
+}
+
+/// Clip a set of polylines to one tile → its runs (empty if nothing lands there), part by part.
 pub fn slice_tile_runs(
     cfg: &Cfg,
     polylines: &[Vec<Coord<i32>>],
     tile: TileId,
 ) -> Vec<Vec<Coord<i32>>> {
-    let mut acc = cfg.one(tile);
-    for line in polylines {
-        acc.add_feature(line.as_slice()).expect("slice");
-    }
-    acc.iter_features()
-        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
-        .collect()
-}
-
-/// Flatten all of a tile's features into a single run list (feature order, then run order), matching
-/// the combined per-tile output the batch/per-tile equivalence checks compare.
-fn flatten(tile: &map_tile_toolkit::TileView<'_, Coord<i32>>) -> Vec<Vec<Coord<i32>>> {
-    tile.iter_features()
-        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+    let slicer = cfg.slicer();
+    polylines
+        .iter()
+        .flat_map(|part| slicer.tile_line(tile, part).expect("slice"))
+        .map(|s| s.run().to_vec())
         .collect()
 }
 
@@ -384,6 +444,39 @@ pub fn buildings() -> Vec<FixturePolygon> {
         .collect()
 }
 
+/// A z14-like block of points on `4 × 4` tiles of extent 4096, from a fixed linear congruential
+/// sequence: `n` points, scattered uniformly (`edge_heavy == false`: a few percent land within a
+/// buffer of 64 of a tile edge) or all packed into the buffer bands along the tile edges
+/// (`edge_heavy`: every point reaches two to four tiles).
+#[must_use]
+pub fn scattered_points(n: usize, edge_heavy: bool) -> Vec<Coord<i32>> {
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move |n: u32| -> i32 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        ((state >> 33) as u32 % n) as i32
+    };
+    (0..n)
+        .map(|_| {
+            if edge_heavy {
+                let band = |v: &mut dyn FnMut(u32) -> i32| {
+                    v(4) * 4096 + [v(64), 4095 - v(64)][v(2) as usize]
+                };
+                Coord {
+                    x: band(&mut next),
+                    y: band(&mut next),
+                }
+            } else {
+                Coord {
+                    x: next(4 * 4096),
+                    y: next(4 * 4096),
+                }
+            }
+        })
+        .collect()
+}
+
 /// Tile side of the [`long_diagonal`] / [`diagonal_triangle`] scenes (a typical MVT extent).
 pub const DIAGONAL_EXTENT: i32 = 4096;
 
@@ -415,7 +508,7 @@ pub fn diagonal_triangle(tiles: i32) -> FixturePolygon {
     }
 }
 
-/// The rings of a polygon, exterior first — the per-polygon input [`PolygonSlicerAll`] takes.
+/// The rings of a polygon, exterior first — the per-polygon input [`Slicer::polygon`] takes.
 #[must_use]
 pub fn rings(p: &FixturePolygon) -> Vec<&[Coord<i32>]> {
     std::iter::once(p.exterior.as_slice())
@@ -650,6 +743,93 @@ pub fn tile_polygon(exterior: &[Coord<i32>], holes: &[Vec<Coord<i32>>], tile: Ti
         "#b5211f"
     };
     styled_polygon(exterior, holes, &role, fill, "#111111")
+}
+
+// ---- Point fixtures & rendering (shared by the point snapshot tests) ----
+
+/// Parse a point fixture into its features: a `FeatureCollection` of `Point` or `MultiPoint` features,
+/// each yielding its points (whole-number coordinates truncated to `i32`).
+pub fn load_point_features(path: &Path) -> Vec<Vec<Coord<i32>>> {
+    let text = fs::read_to_string(path).expect("readable fixture");
+    let GeoJson::FeatureCollection(fc) = text.parse().expect("valid GeoJSON") else {
+        panic!(
+            "point fixture must be a FeatureCollection: {}",
+            path.display()
+        );
+    };
+    let point = |p: &Point<f64>| Coord {
+        x: p.x() as i32,
+        y: p.y() as i32,
+    };
+    let features: Vec<Vec<Coord<i32>>> = fc
+        .features
+        .into_iter()
+        .map(|f| {
+            let geom = Geometry::<f64>::try_from(f.geometry.expect("feature has geometry"))
+                .expect("geometry converts");
+            match geom {
+                Geometry::Point(p) => vec![point(&p)],
+                Geometry::MultiPoint(mp) => mp.0.iter().map(point).collect(),
+                other => panic!(
+                    "point fixtures must use Point or MultiPoint features, not {other:?} ({})",
+                    path.display()
+                ),
+            }
+        })
+        .collect();
+    assert!(
+        !features.is_empty(),
+        "point fixture has no features: {}",
+        path.display()
+    );
+    features
+}
+
+/// A GeoJSON `MultiPoint` feature with the given simplestyle marker properties (its `role` among
+/// them): all of `points` in one feature.
+fn styled_multi_point(points: &[Coord<i32>], props: Vec<(&str, JsonValue)>) -> Feature {
+    feature(
+        &Geometry::MultiPoint(MultiPoint(
+            points
+                .iter()
+                .map(|c| Point::new(f64::from(c.x), f64::from(c.y)))
+                .collect(),
+        )),
+        props,
+    )
+}
+
+/// Every original input point in one `MultiPoint` feature (large, bright yellow), the reference every
+/// per-tile feature sits on.
+pub fn input_points(points: &[Coord<i32>]) -> Feature {
+    styled_multi_point(
+        points,
+        vec![
+            ("role", json!("input")),
+            ("marker-color", json!("#f6fd31")),
+            ("marker-size", json!("large")),
+        ],
+    )
+}
+
+/// One tile's points in one `MultiPoint` feature (global coordinates), colored by tile parity so
+/// neighbors contrast, tagged `tile x/y`. `indices` are the positions of the input points they are
+/// copies of, in the [`input_points`] feature, in the same order as `points`.
+pub fn tile_points(points: &[Coord<i32>], tile: TileId, indices: &[u32]) -> Feature {
+    let color = if (tile.x + tile.y).rem_euclid(2) == 0 {
+        "#261fb5"
+    } else {
+        "#b5211f"
+    };
+    styled_multi_point(
+        points,
+        vec![
+            ("role", json!(format!("tile {}/{}", tile.x, tile.y))),
+            ("indices", json!(indices)),
+            ("marker-color", json!(color)),
+            ("marker-size", json!("small")),
+        ],
+    )
 }
 
 /// Serialize `features` as a pretty-printed GeoJSON `FeatureCollection` — the byte form the snapshot

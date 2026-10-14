@@ -11,8 +11,9 @@
 //! function, whose result is handed to the measured function. That function hands its input back, so
 //! freeing it happens outside the count too. Two operations, each over the same input
 //! scenarios:
-//! * `all` — [`SlicerAll::add_feature`] on each polyline into one accumulator.
-//! * `one` — a fresh [`SlicerOne`] per touched tile.
+//! * `all` — [`Slicer::line`](map_tile_toolkit::Slicer::line) on each polyline, reading every
+//!   vertex of every slice (what a consumer does; the slices are lazy).
+//! * `one` — [`Slicer::tile_line`](map_tile_toolkit::Slicer::tile_line) per touched tile, likewise.
 //!
 //! Scenarios: `small` (the `tests/polylines/fixtures/*.geojson` set on the extent-25 grid) and the
 //! single large [`support::big_polyline`] sliced into many / a few / a single tile (`big_multi`,
@@ -20,10 +21,13 @@
 //! [`support::long_diagonal`] segment across 4000 × 4000 / 16384 × 16384 (a z14 world) tiles of
 //! extent 4096, whose routing must cost the tiles it touches, not its bounding box.
 //!
-//! The polygon slicers mirror them: `polygon_all` adds each feature to one
-//! [`PolygonSlicerAll`](map_tile_toolkit::PolygonSlicerAll) cleared between features (a bulk tile
-//! generator's per-worker pattern), `polygon_one` uses a fresh
-//! [`PolygonSlicerOne`](map_tile_toolkit::PolygonSlicerOne) per edge tile. Scenarios: `small` (every
+//! The point benchmarks (`points_all`, `points_one`) slice a 20 000-point feature, point by point, on a 4 × 4 grid of
+//! extent 4096, scattered or packed into the buffer bands (every point in two to four tiles).
+//!
+//! The polygon benchmarks mirror them, through one reused slicer (a bulk tile generator's per-worker
+//! pattern), reading every vertex: `polygon_all` runs
+//! [`Slicer::polygon`](map_tile_toolkit::Slicer::polygon) per polygon, `polygon_one`
+//! [`Slicer::tile_polygon`](map_tile_toolkit::Slicer::tile_polygon) per edge tile. Scenarios: `small` (every
 //! `tests/polygons/fixtures` feature), `buildings` ([`support::buildings`], 2000 four-corner footprints
 //! on a z14-like grid: the bulk of real polygon data), [`support::big_polygon`] at the three `big_*` scales, and —
 //! for `polygon_all` only — `huge_fill`, the z14-like [`support::huge_square`] whose 2^28 covered
@@ -98,14 +102,25 @@ fn load(input: Input) -> support::Polylines {
     }
 }
 
-/// The tiles a polyline touches (precomputed via a throwaway [`SlicerAll`]).
+/// The tiles a polyline touches, sorted (setup-time work).
 fn touched_tiles(cfg: &Cfg, poly: &[Coord<i32>]) -> Vec<TileId> {
-    let mut acc = cfg.all();
-    acc.add_feature(poly).expect("polyline");
-    acc.iter_tiles().map(|t| t.tile_id()).collect()
+    support::slice_all_runs(cfg, &[poly.to_vec()])
+        .into_iter()
+        .map(|(tile, _)| tile)
+        .collect()
 }
 
-// ---- `all`: slice every polyline into all touched tiles, accumulated into one `SlicerAll`. ----
+/// Read every vertex of every slice, as a consumer encoding them would.
+fn consume<'a>(slices: impl Iterator<Item = map_tile_toolkit::LineSlice<'a, Coord<i32>>>) {
+    for s in slices {
+        black_box(s.tile());
+        for v in s.run() {
+            black_box(v);
+        }
+    }
+}
+
+// ---- `all`: slice every polyline into all touched tiles. ----
 
 /// Prepare the `all` inputs: the slicer config and the polyline set (loading is not measured).
 fn setup_all(cfg: Cfg, input: Input) -> (Cfg, support::Polylines) {
@@ -120,15 +135,14 @@ fn setup_all(cfg: Cfg, input: Input) -> (Cfg, support::Polylines) {
 #[bench::diagonal_4k(support::slicer(4096, 64), Input::Diagonal(4000))]
 #[bench::diagonal_z14(support::slicer(4096, 64), Input::Diagonal(1 << 14))]
 fn all((cfg, polylines): (Cfg, support::Polylines)) -> support::Polylines {
-    let mut acc = cfg.all();
+    let slicer = cfg.slicer();
     for poly in &polylines {
-        acc.add_feature(black_box(poly)).expect("polyline");
+        consume(slicer.line(black_box(poly)).expect("polyline"));
     }
-    black_box(acc);
     polylines
 }
 
-// ---- `one`: slice each polyline into each touched tile with a fresh `SlicerOne`. ----
+// ---- `one`: slice each polyline into each touched tile. ----
 
 /// Prepare the `one` inputs: the config and, per polyline, its precomputed touched tiles (the
 /// tile-id computation is excluded from the measured region, matching the old criterion setup).
@@ -150,10 +164,9 @@ fn setup_one(cfg: Cfg, input: Input) -> (Cfg, OneCases) {
 #[bench::big_single(support::slicer(1024, 0), Input::Big)]
 fn one((cfg, cases): (Cfg, OneCases)) -> OneCases {
     for (poly, tiles) in &cases {
+        let poly = black_box(poly);
         for &tile in tiles {
-            let mut acc = cfg.one(tile);
-            acc.add_feature(black_box(poly)).expect("polyline");
-            black_box(&acc);
+            consume(cfg.slicer().tile_line(tile, poly).expect("polyline"));
         }
     }
     cases
@@ -327,8 +340,44 @@ fn polygon_rings(p: &FixturePolygon) -> impl Iterator<Item = &Vec<Coord<i32>>> {
     std::iter::once(&p.exterior).chain(&p.holes)
 }
 
-fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<Vec<FixturePolygon>>) {
-    (cfg, load_polygons(input))
+/// A multipolygon feature as the benchmarks slice it, polygon by polygon: each polygon its rings
+/// (exterior first).
+type PolyFeature = Vec<Vec<Vec<Coord<i32>>>>;
+
+fn as_rings(feature: &[FixturePolygon]) -> PolyFeature {
+    feature
+        .iter()
+        .map(|p| polygon_rings(p).cloned().collect())
+        .collect()
+}
+
+/// The slices of one polygon of a [`PolyFeature`].
+type PolySlices<'a> = map_tile_toolkit::PolygonSlices<'a, Coord<i32>, Vec<Coord<i32>>>;
+
+/// Read every vertex of every slice, as a consumer encoding them would.
+fn consume_polygons(slices: &mut PolySlices<'_>) {
+    while let Some(slice) = slices.next() {
+        match slice.expect("polygon") {
+            map_tile_toolkit::PolygonSlice::Piece(piece) => {
+                black_box(piece.tile());
+                for ring in piece.rings() {
+                    for v in ring {
+                        black_box(v);
+                    }
+                }
+            }
+            map_tile_toolkit::PolygonSlice::Run(run) => {
+                black_box(run);
+            }
+        }
+    }
+}
+
+fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<PolyFeature>) {
+    (
+        cfg,
+        load_polygons(input).iter().map(|f| as_rings(f)).collect(),
+    )
 }
 
 #[library_benchmark(setup = setup_polygon_all)]
@@ -341,36 +390,39 @@ fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<Vec<FixturePolygon
 #[bench::many_holes(support::slicer(256, 8), PolyInput::Holes)]
 #[bench::diagonal_4k(support::slicer(4096, 64), PolyInput::Diagonal(4000))]
 #[bench::diagonal_z14(support::slicer(4096, 64), PolyInput::Diagonal(1 << 14))]
-fn polygon_all((cfg, features): (Cfg, Vec<Vec<FixturePolygon>>)) -> Vec<Vec<FixturePolygon>> {
-    let mut acc = cfg.poly_all();
+fn polygon_all((cfg, features): (Cfg, Vec<PolyFeature>)) -> Vec<PolyFeature> {
+    let mut slicer = cfg.slicer();
     for feature in &features {
-        acc.clear();
-        acc.add_feature(black_box(feature.iter().map(polygon_rings)))
-            .expect("polygon");
-        black_box(&acc);
+        for polygon in feature {
+            consume_polygons(&mut slicer.polygon(black_box(polygon)).expect("polygon"));
+        }
     }
     features
 }
 
 /// Per feature: its polygons and the edge tiles the all-tiles slicer finds (precomputed in setup).
-type PolyOneCases = Vec<(Vec<FixturePolygon>, Vec<TileId>)>;
+type PolyOneCases = Vec<(PolyFeature, Vec<TileId>)>;
 
-/// The tiles [`PolygonSlicerAll`](map_tile_toolkit::PolygonSlicerAll) produces for `feature`: its
-/// edge tiles, plus every tile of its fill runs if `fills`.
+/// The tiles [`Slicer::polygon`](map_tile_toolkit::Slicer::polygon) produces for `feature`, sorted
+/// and distinct: its edge tiles, plus every tile of its fill runs if `fills`.
 fn polygon_tiles(cfg: Cfg, feature: &[FixturePolygon], fills: bool) -> Vec<TileId> {
-    let mut acc = cfg.poly_all();
-    acc.add_feature(feature.iter().map(support::rings))
-        .expect("polygon");
-    let mut tiles = Vec::new();
-    for f in acc.iter_features() {
-        tiles.extend(f.iter_tiles().map(|t| t.tile_id()));
-        if fills {
-            for run in f.iter_fill_runs() {
-                tiles.extend(run.x.map(|x| TileId::new(x, run.y)));
+    let mut slicer = cfg.slicer();
+    let mut tiles = std::collections::BTreeSet::new();
+    for rings in as_rings(feature) {
+        let mut slices = slicer.polygon(&rings).expect("polygon");
+        while let Some(slice) = slices.next() {
+            match slice.expect("polygon") {
+                map_tile_toolkit::PolygonSlice::Piece(piece) => {
+                    tiles.insert(piece.tile());
+                }
+                map_tile_toolkit::PolygonSlice::Run(run) if fills => {
+                    tiles.extend(run.x.map(|x| TileId::new(x, run.y)));
+                }
+                map_tile_toolkit::PolygonSlice::Run(_) => {}
             }
         }
     }
-    tiles
+    tiles.into_iter().collect()
 }
 
 fn setup_polygon_one(cfg: Cfg, input: PolyInput) -> (Cfg, PolyOneCases) {
@@ -378,7 +430,7 @@ fn setup_polygon_one(cfg: Cfg, input: PolyInput) -> (Cfg, PolyOneCases) {
         .into_iter()
         .map(|feature| {
             let tiles = polygon_tiles(cfg, &feature, false);
-            (feature, tiles)
+            (as_rings(&feature), tiles)
         })
         .collect();
     (cfg, cases)
@@ -391,15 +443,19 @@ fn setup_polygon_one(cfg: Cfg, input: PolyInput) -> (Cfg, PolyOneCases) {
 #[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
 #[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
 fn polygon_one((cfg, cases): (Cfg, PolyOneCases)) -> PolyOneCases {
+    let mut slicer = cfg.slicer();
     for (feature, tiles) in &cases {
         for &tile in tiles {
-            let mut acc = cfg.poly_one(tile);
-            for p in feature {
-                let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
-                acc.add_feature(black_box(&p.exterior), &holes)
+            for polygon in feature {
+                let piece = slicer
+                    .tile_polygon(tile, black_box(polygon))
                     .expect("polygon");
+                for ring in piece.iter().flat_map(|p| p.rings()) {
+                    for v in ring {
+                        black_box(v);
+                    }
+                }
             }
-            black_box(&acc);
         }
     }
     cases
@@ -519,6 +575,54 @@ fn polygon_one_geo((cfg, cases): (Cfg, GeoPolygons)) -> GeoPolygons {
     cases
 }
 
+// ---- Points: `point` (all tiles) and `tile_point` (every tile of the 4 × 4 grid), one point at a time. ----
+
+/// Which point set a points benchmark slices (a multipoint feature, point by point; generated in `setup`).
+#[derive(Clone, Copy)]
+enum PointInput {
+    /// 20 000 points scattered over the grid: a few percent near a tile edge.
+    Scattered,
+    /// 20 000 points all within the buffer bands along the tile edges: two to four tiles each.
+    EdgeHeavy,
+}
+
+fn setup_points(cfg: Cfg, input: PointInput) -> (Cfg, Vec<Coord<i32>>) {
+    let points = support::scattered_points(20_000, matches!(input, PointInput::EdgeHeavy));
+    (cfg, points)
+}
+
+#[library_benchmark(setup = setup_points)]
+#[bench::scattered(support::slicer(4096, 64), PointInput::Scattered)]
+#[bench::edge_heavy(support::slicer(4096, 64), PointInput::EdgeHeavy)]
+#[bench::scattered_unbuffered(support::slicer(4096, 0), PointInput::Scattered)]
+fn points_all((cfg, points): (Cfg, Vec<Coord<i32>>)) -> Vec<Coord<i32>> {
+    let slicer = cfg.slicer();
+    for &point in black_box(&points) {
+        for slice in slicer.point(point).expect("point") {
+            black_box((slice.tile(), slice.point()));
+        }
+    }
+    points
+}
+
+#[library_benchmark(setup = setup_points)]
+#[bench::scattered(support::slicer(4096, 64), PointInput::Scattered)]
+#[bench::edge_heavy(support::slicer(4096, 64), PointInput::EdgeHeavy)]
+fn points_one((cfg, points): (Cfg, Vec<Coord<i32>>)) -> Vec<Coord<i32>> {
+    let slicer = cfg.slicer();
+    for ty in 0..4 {
+        for tx in 0..4 {
+            for &point in black_box(&points) {
+                let local = slicer
+                    .tile_point(TileId::new(tx, ty), point)
+                    .expect("point");
+                black_box(local);
+            }
+        }
+    }
+    points
+}
+
 library_benchmark_group!(
     name = slicing,
     benchmarks = [
@@ -532,7 +636,9 @@ library_benchmark_group!(
         polygon_all_geo,
         polygon_one,
         polygon_one_stripe,
-        polygon_one_geo
+        polygon_one_geo,
+        points_all,
+        points_one
     ]
 );
 main!(library_benchmark_groups = slicing);

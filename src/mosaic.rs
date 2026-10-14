@@ -1,8 +1,8 @@
 //! Stateful reassembly of sliced tiles back into whole features — the accumulating inverse of the
-//! slicers.
+//! [`Slicer`](crate::Slicer).
 //!
-//! [`Mosaic`] rejoins **polyline** tiles ([`SlicerAll`](crate::SlicerAll)); [`PolygonMosaic`] rejoins
-//! **polygon** tiles ([`PolygonSlicerOne`](crate::PolygonSlicerOne)). Both take each tile's geometry
+//! [`Mosaic`] rejoins **polyline** tiles ([`Slicer::line`](crate::Slicer::line)); [`PolygonMosaic`] rejoins
+//! **polygon** tiles ([`Slicer::polygon`](crate::Slicer::polygon)). Both take each tile's geometry
 //! in its local frame, rebase it into the global frame (`local + tile·extent`), and link geometry
 //! across borders by shared **directed edges**. [`add`](Mosaic::add) rejects a tile inconsistent with
 //! those already present — naming the ones it conflicts with, and leaving the mosaic unchanged — in
@@ -314,7 +314,7 @@ impl<V: Vertex> PolygonMosaic<V> {
     ///
     /// # Errors
     ///
-    /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`TileError::InvalidExtent`] if `extent` is `0`, or `extent + buffer` exceeds `i32::MAX`.
     /// - [`TileError::BufferTooLarge`] if `buffer` is not strictly less than half the `extent`.
     pub fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
         Ok(Self {

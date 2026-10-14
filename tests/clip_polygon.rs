@@ -4,13 +4,13 @@
 //! `Polygon` or `MultiPolygon` features (whole-number coordinates in valid lon/lat range so fixtures
 //! and snapshots render on a map); a `MultiPolygon` is clipped as its separate parts. Every fixture
 //! is clipped, one tile at a time with
-//! [`PolygonSlicerOne`], across the whole tile span the polygon could reach (padded by one tile) —
+//! [`Slicer::tile_polygon`], across the whole tile span the polygon could reach (padded by one tile) —
 //! this single per-tile pass already fills tiles that sit fully inside the polygon (the containment
 //! case) as well as border tiles.
 //!
-//! Every fixture is also sliced in one pass with [`PolygonSlicerAll`] (each GeoJSON feature as one
-//! multipolygon feature), and the result must be **identical**: its edge tiles, plus a
-//! [`fill_ring`](map_tile_toolkit::PolygonFeatureView::fill_ring) in every tile of every fill run,
+//! Every fixture is also sliced into all tiles with [`Slicer::polygon`] (polygon by polygon, a
+//! multipolygon feature's parts one after another), and the result must be **identical**: its edge tiles, plus a
+//! [`fill_ring`](map_tile_toolkit::PolygonSlices::fill_ring) in every tile of every fill run,
 //! give exactly the per-tile output above, so one snapshot covers both slicers.
 //!
 //! The surviving per-tile rings are snapshotted as a `FeatureCollection`: the input polygon(s)
@@ -27,7 +27,7 @@ use std::path::Path;
 
 use geo_types::Coord;
 use insta::assert_binary_snapshot;
-use map_tile_toolkit::{PolygonSlicerAll, PolygonSlicerOne, TileId};
+use map_tile_toolkit::{Slicer, TileId};
 
 mod support;
 
@@ -53,31 +53,26 @@ struct TiledFeature {
     holes: Vec<Vec<Coord<i32>>>,
 }
 
-/// Clip every polygon (exterior + holes) to a single `tile` with a fresh [`PolygonSlicerOne`],
+/// One tile's piece (local rings, exterior first) as a [`TiledFeature`] in the global frame.
+fn tiled(tile: TileId, rings: support::Rings) -> TiledFeature {
+    let origin = tile.origin(EXTENT).expect("tile in range");
+    let mut rings = rings
+        .into_iter()
+        .map(|ring| ring.into_iter().map(|c| c + origin).collect::<Vec<_>>());
+    TiledFeature {
+        exterior: rings.next().expect("exterior"),
+        holes: rings.collect(),
+    }
+}
+
+/// Clip every polygon (exterior + holes) to a single `tile` with [`Slicer::tile_polygon`],
 /// returning the surviving per-tile features in the global frame.
 fn clip_tile(polygons: &[FixturePolygon], buffer: u16, tile: TileId) -> Vec<TiledFeature> {
-    let mut slicer =
-        PolygonSlicerOne::<Coord<i32>>::new(EXTENT, buffer, tile).expect("valid config");
-    for p in polygons {
-        let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
-        slicer.add_feature(&p.exterior, &holes).expect("clip");
-    }
-    let origin = tile.origin(EXTENT).expect("tile in range");
-    let globalize = |ring: &[Coord<i32>]| ring.iter().map(|&c| c + origin).collect::<Vec<_>>();
-    slicer
-        .iter_features()
-        .map(|f| {
-            let mut exterior = Vec::new();
-            let mut holes = Vec::new();
-            for r in f.iter_rings() {
-                if r.is_hole() {
-                    holes.push(globalize(r.vertices()));
-                } else {
-                    exterior = globalize(r.vertices());
-                }
-            }
-            TiledFeature { exterior, holes }
-        })
+    let mut slicer = Slicer::<Coord<i32>>::new(EXTENT, buffer).expect("valid config");
+    support::tile_polygons(&mut slicer, polygons, tile)
+        .expect("clip")
+        .into_iter()
+        .map(|rings| tiled(tile, rings))
         .collect()
 }
 
@@ -99,54 +94,20 @@ fn clip_all_tiles(polygons: &[FixturePolygon], buffer: u16) -> BTreeMap<TileId, 
     out
 }
 
-/// Slice each feature (a list of polygons) in one pass with [`PolygonSlicerAll`] and expand the result
-/// into per-tile pieces the way a consumer renders it: each edge tile's polygons, and in each tile of
-/// a fill run its polygon's fill ring. Within a tile, pieces follow the features, then the polygons.
+/// Slice each feature (a list of polygons, one polygon at a time) with [`Slicer::polygon`] and expand the result
+/// into per-tile pieces the way a consumer renders it: each edge tile's pieces, and in each tile of a
+/// fill run its polygon's fill ring. Within a tile, pieces follow the features, then the polygons.
 fn slice_all_tiles(
     features: &[Vec<FixturePolygon>],
     buffer: u16,
 ) -> BTreeMap<TileId, Vec<TiledFeature>> {
-    let mut all = PolygonSlicerAll::<Coord<i32>>::new(EXTENT, buffer).expect("valid config");
-    for f in features {
-        all.add_feature(f.iter().map(support::rings))
-            .expect("slice");
-    }
-    let globalize = |tile: TileId, ring: &[Coord<i32>]| {
-        let origin = tile.origin(EXTENT).expect("tile in range");
-        ring.iter().map(|&c| c + origin).collect::<Vec<_>>()
-    };
+    let mut slicer = Slicer::<Coord<i32>>::new(EXTENT, buffer).expect("valid config");
     let mut out: BTreeMap<TileId, Vec<TiledFeature>> = BTreeMap::new();
-    for f in all.iter_features() {
-        for t in f.iter_tiles() {
-            for p in t.iter_polygons() {
-                let mut rings = p.iter_rings().map(|r| globalize(t.tile_id(), r.vertices()));
-                let exterior = rings.next().expect("exterior");
-                out.entry(t.tile_id()).or_default().push(TiledFeature {
-                    exterior,
-                    holes: rings.collect(),
-                });
-            }
-        }
-        // Overlapping polygons can fill one tile from several runs; emit them in polygon order.
-        let mut fills: BTreeMap<TileId, Vec<(u32, TiledFeature)>> = BTreeMap::new();
-        for run in f.iter_fill_runs() {
-            let ring = f.fill_ring(&run);
-            for x in run.x.clone() {
-                let tile = TileId::new(x, run.y);
-                fills.entry(tile).or_default().push((
-                    run.polygon,
-                    TiledFeature {
-                        exterior: globalize(tile, &ring),
-                        holes: Vec::new(),
-                    },
-                ));
-            }
-        }
-        for (tile, mut pieces) in fills {
-            pieces.sort_by_key(|(polygon, _)| *polygon);
+    for f in features {
+        for (tile, pieces) in support::slice_polygons(&mut slicer, f).expect("slice") {
             out.entry(tile)
                 .or_default()
-                .extend(pieces.into_iter().map(|(_, piece)| piece));
+                .extend(pieces.into_iter().map(|(_, rings)| tiled(tile, rings)));
         }
     }
     out
@@ -182,7 +143,7 @@ fn snapshot_at_buffer(stem: &str, features: &[Vec<FixturePolygon>], buffer: u16,
     assert_eq!(
         slice_all_tiles(features, buffer),
         per_tile,
-        "PolygonSlicerAll and PolygonSlicerOne differ for {stem} (buffer {buffer})"
+        "Slicer::polygon and Slicer::tile_polygon differ for {stem} (buffer {buffer})"
     );
 
     // Duplicating every vertex must not change the clip (consecutive dups are dropped).

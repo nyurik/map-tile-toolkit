@@ -13,18 +13,24 @@ grid, keeping the geometry's original vertices. No new vertexes are ever created
 
 ## Usage
 
-* Each feature may contain feature-level and vertex-level attributes (generic).
-* `SlicerAll` accumulates every tile a polyline touches, even if there are no vertices in that tile.
-* `SlicerOne` accumulates one fixed tile.
+* `Slicer` takes **one geometry** at a time — a line, a point or a polygon — and returns a lazy
+  iterator over its slices: `line` / `point` / `polygon` for every tile the geometry reaches (even
+  tiles holding none of its vertices), `tile_line` / `tile_point` / `tile_polygon` for one given tile.
+* Vertices may carry a payload (generic `Vertex`); feature-level data stays with the caller, who
+  pairs it with each slice of the feature being sliced.
 * `Mosaic` assembles tiles back into features, joining features that match on both sides of the edge, and rejecting inconsistent tiles. Mosaic does not require all original tiles to be added.
 
-Add each **feature** (polyline), then read the pieces back through borrowed iterators — never owned `Vec`s. Nothing panics: bad input returns a `TileError`.
+Slicing is lazy: each slice is computed only when the iterator reaches it, so stopping early stops
+the work. A line run is never copied — it borrows the caller's vertices, so a line with millions of
+vertices costs no extra memory — and a polygon piece is built in the slicer's reused working memory.
+Slices come in no particular order: a tile can get several slices of one line (where it left and
+re-entered the tile). Nothing panics: bad input yields a `TileError`.
 
 ```rust
 use geo_types::coord;
-use map_tile_toolkit::{SlicerAll, TileError};
+use map_tile_toolkit::{Slicer, TileError};
 
-fn example() -> Result<(), TileError> {
+fn main() -> Result<(), TileError> {
     let line = [
         coord!{ x: 5, y: 5 },
         coord!{ x: 20, y: 20 },
@@ -33,18 +39,12 @@ fn example() -> Result<(), TileError> {
 
     // `extent = 25` → 25-unit tiles;
     // `buffer = 0` = tight clip box (must be < extent / 2).
-    let mut slicer = SlicerAll::new(25, 0)?;
-    slicer.add_feature(&line)?;
+    let slicer = Slicer::new(25, 0)?;
 
-    // tiles → features → polylines, each polyline in that tile's
-    // local frame. A feature can yield several polylines
-    // in one tile (the line left and re-entered).
-    for tile in slicer.iter_tiles() {
-        for feature in tile.iter_features() {
-            for polyline in feature.iter_polylines() {
-                // polyline: &[Coord<i32>]
-                let _ = (tile.tile_id(), polyline);
-            }
+    // One slice per run, each in its tile's local frame.
+    for slice in slicer.line(&line)? {
+        for vertex in slice.run() {
+            let _ = (slice.tile(), vertex); // vertex: Coord<i32>
         }
     }
 
@@ -52,15 +52,59 @@ fn example() -> Result<(), TileError> {
 }
 ```
 
-`SlicerOne::new(extent, buffer, tile)` clips to one tile and skips the tile level (`iter_features`
-directly); it yields exactly what `SlicerAll` yields for that tile. `add_feature` is atomic — a
-failed polyline leaves the accumulator unchanged — and `clear()` resets it for reuse.
+`slicer.tile_line(tile, &line)` clips to one tile and yields exactly the slices `line` yields for
+that tile.
+
+### Multi-geometries
+
+The slicer has no notion of a multi-geometry. To slice a `MultiLineString`, `MultiPoint` or
+`MultiPolygon`, call it **once per element** (`line` for each line, `point` for each point, `polygon`
+for each polygon). The caller has to manage the association between a feature's attributes and each
+of its slices anyway, tile by tile; doing that for the elements of one multi-feature is no extra
+work compared with doing it for several features, and it keeps the slicer free of per-element
+indices, and of any state that grows with the feature. Slices of several elements that land in one
+tile are simply several slices in that tile, which the caller groups (the runs of a `MultiLineString`
+into one geometry in that tile, say).
+
+### Points
+
+`slicer.point(p)` yields the point in every tile whose buffered box holds it: its own tile, plus up
+to three neighbors when it lies within `buffer` of an edge (a point at a corner of four tiles lands
+in all four). Each item is the tile and the point in that tile's local frame, payload unchanged;
+the iterator knows its length up front (one to four items). `slicer.tile_point(tile, p)` asks one
+tile and returns the local point, if the tile holds it.
+
+```rust
+use geo_types::coord;
+use map_tile_toolkit::{Slicer, TileError, TileId};
+
+fn main() -> Result<(), TileError> {
+    let slicer = Slicer::new(256, 8)?;
+
+    // One unit past the corner of tile (1, 1): within the buffer of three neighbors as well.
+    let point = coord! { x: 257, y: 256 };
+    let slices = slicer.point(point)?;
+    assert_eq!(slices.len(), 4);
+    for slice in slices {
+        let _ = (slice.tile(), slice.point()); // TileId, and the point as Coord<i32> in that tile
+    }
+
+    assert_eq!(
+        slicer.tile_point(TileId::new(1, 1), point)?,
+        Some(coord! { x: 1, y: 0 })
+    );
+    assert_eq!(slicer.tile_point(TileId::new(5, 5), point)?, None);
+    Ok(())
+}
+```
 
 ### Coordinate space
 
 The slicer is integer-only and dimensionless: `extent` is both the tile side and its output
-resolution (the vector-tile `extent`). A vertex `x` belongs to tile `x.div_euclid(extent)` and is
-emitted at `x − tile·extent ∈ [0, extent)`; add `tile · extent` to recover global coordinates. Do
+resolution (the vector-tile `extent`). A vertex `x` belongs to tile `x.div_euclid(extent)`, whose own
+area is `[0, extent)` in its local frame `x − tile·extent`; slices come in that frame, so vertices in
+the buffer, a line's first vertex past an edge, and a polygon's synthetic corners lie outside it. Add
+`tile · extent` to recover global coordinates. Do
 all float/projection work up front (e.g. with [`geo`](https://docs.rs/geo)). For web-mercator at zoom
 `z`: project, simplify, then apply one affine — scale `s = 2^z · extent / circumference`, translate
 the top-left corner to the origin, flip `y`, round to `i32` — landing data in `[0, 2^z · extent)`.
@@ -69,26 +113,24 @@ the top-left corner to the origin, flip `y`, round to `i32` — landing data in 
 ### Limits
 
 Routing walks each segment through exactly the tiles it touches, so cost follows those tiles, never
-a segment's bounding box: a world-spanning diagonal at z14 (extent 4096) touches ~35 000 tiles.
-What remains, each reported as a `TileError` rather than a panic:
+a segment's bounding box: a world-spanning diagonal at z14 (extent 4096) touches ~35 000 tiles. Rows
+a segment crosses between two unbuffered tiles (`buffer == 0`) are skipped at once. What remains,
+each reported as a `TileError` rather than a panic:
 
 * **Coordinates are `i32`**, so `2^z · extent` must fit (up to z18 at extent 4096); geometry touching
   a tile whose buffered box leaves the `i32` range (an outermost tile, with `buffer > 0`) is
-  `Overflow`.
-* **2^25 tile visits per feature** (`TooManyTiles`) — each tile a segment touches counts once, and
-  so does each tile row it crosses without touching a tile (with `buffer == 0`, a segment can slip
-  between two columns); tiles a polygon merely covers (its fill runs) are free. It bounds the time
-  and per-tile memory one feature can demand; far above any real feature, it only rejects
-  adversarial input.
-* **`u32` indexing** (`GeometryTooLarge`) — at most `u32::MAX` vertices per polyline or polygon
-  feature, matching the slicers' flat storage offsets.
-* **2^28 output vertices per polygon feature** (`OutputTooLarge`) — only rings winding around tiles
-  many times, or many overlapping polygons, get there; they are rejected rather than exhausting
-  memory.
+  `Overflow`. Every slicing call reads the geometry once, to bound it, and returns the error from
+  the call, so the iterators cannot fail midway. Bounding is per geometry, so a line or polygon
+  spanning more than `2^31` units on one axis is rejected whole.
+* **`u32` indexing** (`GeometryTooLarge`) — at most `u32::MAX` rings or edges per polygon, from the
+  call, and `u32::MAX` vertices per piece, the one error a polygon iterator can still yield.
+
+There is no budget on how many tiles a geometry may reach: slicing is lazy, so memory stays bounded
+however far it reaches, and the work is only what the caller pulls.
 
 ### Merging tiles back
 
-`Mosaic` is the stateful inverse of `SlicerAll`: add tiles (each tile's runs, in its local frame) and
+`Mosaic` is the stateful inverse of `Slicer::line`: add tiles (each tile's runs, in its local frame) and
 it reassembles whole features across borders in the global frame. It rejects a tile that is
 inconsistent with those already added — a shared segment that disagrees (coordinates or payload), or
 a tile that owns an endpoint's cell yet fails to carry its edge (e.g. a line spanning into a neighbor
@@ -97,20 +139,23 @@ the neighbor never corroborates) — naming the conflicting tile ids and leaving
 reassembled feature.
 
 ```rust
+use std::collections::BTreeMap;
+
 use geo_types::coord;
-use map_tile_toolkit::{Mosaic, SlicerAll, TileError};
+use map_tile_toolkit::{Mosaic, Slicer, TileError};
 
-fn example() -> Result<(), TileError> {
-    let mut slicer = SlicerAll::new(25, 0)?;
-    slicer.add_feature([
-        coord!{ x: 5, y: 5 },
-        coord!{ x: 60, y: 40 }
-    ])?;
+fn main() -> Result<(), TileError> {
+    let slicer = Slicer::new(25, 0)?;
+    let line = [coord!{ x: 5, y: 5 }, coord!{ x: 60, y: 40 }];
 
+    // Gather each tile's runs, then hand each tile to the mosaic.
+    let mut tiles = BTreeMap::<_, Vec<_>>::new();
+    for slice in slicer.line(&line)? {
+        tiles.entry(slice.tile()).or_default().push(slice.run().to_vec());
+    }
     let mut mosaic = Mosaic::new(slicer.extent())?;
-    for tile in slicer.iter_tiles() {
-        let runs: Vec<_> = tile.iter_features().flat_map(|f| f.iter_polylines()).collect();
-        mosaic.add(tile.tile_id(), &runs).expect("consistent tiles never conflict");
+    for (tile, runs) in &tiles {
+        mosaic.add(*tile, runs).expect("consistent tiles never conflict");
     }
     for feature in mosaic.iter_features() {
         let _ = feature; // Vec<Coord<i32>> in global coordinates
@@ -121,19 +166,28 @@ fn example() -> Result<(), TileError> {
 
 ### Polygons
 
-`PolygonSlicerOne::new(extent, buffer, tile)` clips polygons (an exterior ring plus holes) to one
-tile. `PolygonSlicerAll::new(extent, buffer)` slices whole **multipolygon** features into every tile
-they reach, and yields for each tile exactly what `PolygonSlicerOne` yields there. Original vertices
-are kept; where a ring leaves the tile, the gap is bridged by synthetic corners just outside the
-buffered box, so each ring stays closed and correctly wound but is valid only inside the box — fine
-for renderers that clip to the tile (MVT), not for consumers that need OGC-valid output.
-`PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
+`slicer.polygon(&rings)` slices a **polygon** — its rings, exterior first — into every tile it
+reaches, and `slicer.tile_polygon(tile, &rings)` into one tile (its piece there, if any). A
+multipolygon is sliced one polygon at a time.
+Original vertices are kept; where a ring leaves the tile, the gap is bridged by synthetic corners
+just outside the buffered box, so each ring stays closed and correctly wound but is valid only inside
+the box — fine for renderers that clip to the tile (MVT), not for consumers that need OGC-valid
+output. `PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
 
-Tiles a feature covers entirely are never materialized: `PolygonSlicerAll` reports them as
-`FillRun { y, x: Range<i32>, polygon }` row spans, so a polygon covering 10⁸ tiles costs one run per
-row, and time and memory grow with its perimeter rather than its area. `fill_ring(&run)` gives the
-one ring `PolygonSlicerOne` yields for that polygon in each of the run's tiles (a box just outside the
-buffered tile, wound like the polygon), so expanding the runs reproduces its output exactly.
+The polygon is sliced row by row, and nothing outside the current tile row is kept: the call reads
+the rings once, to bound and index them, and the iterator holds one row plus a small index of the
+polygon's edges by row (a polygon inside one tile skips even that, and is lent as it is). A tile gets
+one **piece** — the exterior and the holes that reach the tile — built in one reused buffer, so the
+iterator is *lending*: a piece is valid until the next `next()`, and the loop is `while let`. Each
+ring is closed, its first vertex repeated at the end (drop it for an MVT `ClosePath`). Polygons need
+`&mut Slicer` for that buffer; lines and points need only `&Slicer`.
+
+Tiles a polygon covers entirely are never materialized: they come as `FillRun { y, x }` row
+spans, so a polygon covering 10⁸ tiles costs one run per row, and time and memory grow with its
+perimeter rather than its area. `slices.fill_ring(&run)` (or `slicer.fill_ring(&run)`, once the
+iterator is done) is the one ring `tile_polygon` yields for that polygon in each of the run's tiles —
+five tile-local vertices, a box just outside the buffered tile, wound like the polygon — so expanding
+the runs reproduces it exactly.
 
 Slicing preserves each ring's winding. `signed_area_2x` gives a ring's exact orientation, so
 normalize it once per feature if the output needs a fixed convention. MVT needs exteriors with a
@@ -141,9 +195,9 @@ positive area in its y-down tile coordinates, and holes with a negative one.
 
 ```rust
 use geo_types::coord;
-use map_tile_toolkit::{PolygonSlicerAll, TileError, signed_area_2x};
+use map_tile_toolkit::{PolygonSlice, Slicer, TileError, signed_area_2x};
 
-fn example() -> Result<(), TileError> {
+fn main() -> Result<(), TileError> {
     let mut exterior = vec![
         coord! { x: 5, y: 5 }, coord! { x: 120, y: 5 },
         coord! { x: 120, y: 120 }, coord! { x: 5, y: 120 },
@@ -156,61 +210,56 @@ fn example() -> Result<(), TileError> {
     if signed_area_2x(&exterior) < 0 { exterior.reverse(); }
     if signed_area_2x(&hole) > 0 { hole.reverse(); }
 
-    let mut slicer = PolygonSlicerAll::new(25, 2)?;
-    // One feature is a multipolygon: each polygon is its rings, exterior first.
-    slicer.add_feature([[exterior.as_slice(), hole.as_slice()]])?;
-    for feature in slicer.iter_features() {
-        // Tiles a ring edge touches: tile → polygons → rings
-        // (each ring closed, in the tile's local frame).
-        for tile in feature.iter_tiles() {
-            for polygon in tile.iter_polygons() {
-                for ring in polygon.iter_rings() {
-                    let _ = (tile.tile_id(), ring.is_hole(), ring.vertices());
+    let mut slicer = Slicer::new(25, 2)?;
+    // A polygon is its rings, exterior first.
+    let rings = [exterior, hole];
+    let mut slices = slicer.polygon(&rings)?;
+    while let Some(slice) = slices.next() {
+        match slice? {
+            // The polygon in one tile: its rings, exterior first, each closed and tile-local.
+            PolygonSlice::Piece(piece) => {
+                for ring in piece.rings() {
+                    let _ = (piece.tile(), ring.to_vec());
                 }
             }
-        }
-        // Tiles entirely inside one of its polygons, as row spans: in each tile (x, y)
-        // for x in run.x, that polygon is the single ring `fill_ring` (tile-local).
-        for run in feature.iter_fill_runs() {
-            let _ = (run.y, &run.x, run.polygon, feature.fill_ring(&run));
+            // Tiles (x, y) for x in run.x, entirely inside the polygon: each holds it as the
+            // single ring `slices.fill_ring(&run)`.
+            PolygonSlice::Run(run) => {
+                let _ = (run.y, &run.x, slices.fill_ring(&run));
+            }
         }
     }
     Ok(())
 }
 ```
 
-A per-worker slicer can be reused across features: `clear()` keeps every buffer's capacity, so it
-stops allocating once warmed up, and `shrink_to_fit()` releases what an outlier feature left behind.
-`add_feature` is atomic, like the polyline slicers.
+One slicer per worker can be reused across polygons: it keeps its working memory's capacity, so it
+stops allocating once warmed up, and `shrink_to_fit()` releases what an outlier polygon left behind.
 
 ### Payloads
 
-The slicers carry data on two independent axes: a **per-vertex** payload (the `Vertex` type) and a
-**per-feature** attribute (the `A` type). Use either, both, or neither.
+Data rides along on two independent axes: a **per-vertex** payload (the `Vertex` type), and
+**per-feature** attributes, which the caller pairs with each slice. Use either, both, or neither.
 
 #### Per-vertex payload
 
-The slicers are generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` pairs a position with any
+The slicer is generic over a `Vertex` (default `Coord<i32>`); `Measured<M>` pairs a position with any
 `Copy + PartialEq` payload (an M value, an id) that rides through slicing and merging **unchanged** —
 nothing is interpolated, since no new vertices are cut.
 
 ```rust
-use map_tile_toolkit::{Measured, SlicerAll, TileError};
+use map_tile_toolkit::{Measured, Slicer, TileError};
 
-fn example() -> Result<(), TileError> {
+fn main() -> Result<(), TileError> {
     // Each vertex carries a payload (here an id); it survives slicing untouched.
-    let mut slicer = SlicerAll::new(25, 0)?;
-    slicer.add_feature([
+    let slicer = Slicer::new(25, 0)?;
+    let line = [
         Measured::new(5, 5, 100),
         Measured::new(20, 20, 200),
         Measured::new(60, 40, 300),
-    ])?;
-    for tile in slicer.iter_tiles() {
-        for feature in tile.iter_features() {
-            for run in feature.iter_polylines() {
-                let _ = run.iter().map(|v| (v.position, v.m)).collect::<Vec<_>>();
-            }
-        }
+    ];
+    for slice in slicer.line(&line)? {
+        let _ = slice.run().iter().map(|v| (v.position, v.m)).collect::<Vec<_>>();
     }
     Ok(())
 }
@@ -219,41 +268,34 @@ fn example() -> Result<(), TileError> {
 #### Per-feature attributes (MVT-style)
 
 Data that belongs to a whole feature — an optional id, a key/value property map — is *not*
-per-vertex, so it rides on the slicer's second generic axis `A` (default `()`, a zero-sized type
-that costs nothing) rather than in the vertex payload. Attach it with `add_feature_with(line, attr)`
-and read it back per tile-piece with `feature.attr()` — no side table, no per-vertex handles. `A`
-only needs to be `Clone`.
+per-vertex. The slicer takes one geometry at a time, so the caller pairs every slice with the data
+of the feature it came from: no side table, no per-vertex handles, nothing for the slicer to carry.
+For a multi-feature that means the same loop over its elements (see [Multi-geometries](#multi-geometries)).
 
 ```rust
-use geo_types::{Coord, coord};
-use map_tile_toolkit::{SlicerAll, TileError};
+use geo_types::coord;
+use map_tile_toolkit::{Slicer, TileError};
 
-#[derive(Clone)]
 struct Attrs {
     id: Option<u64>,
     name: &'static str
 }
 
-fn example() -> Result<(), TileError> {
-    let mut slicer = SlicerAll::new(25, 0)?;
-    slicer.add_feature_with(
-        [coord! { x: 5, y: 5 }, coord! { x: 60, y: 40 }],
-        Attrs { id: Some(1), name: "Main St" },
-    )?;
-    for tile in slicer.iter_tiles() {
-        for feature in tile.iter_features() {
-            let attrs = feature.attr(); // &Attrs, duplicated onto every tile the feature touches
-            let _ = (attrs.id, attrs.name);
-        }
+fn main() -> Result<(), TileError> {
+    let slicer = Slicer::new(25, 0)?;
+    let attrs = Attrs { id: Some(1), name: "Main St" };
+    let line = [coord! { x: 5, y: 5 }, coord! { x: 60, y: 40 }];
+    for slice in slicer.line(&line)? {
+        // Every slice of this feature goes with `attrs`, in whichever tile it lands.
+        let _ = (slice.tile(), attrs.id, attrs.name);
     }
     Ok(())
 }
 ```
 
-A feature that is split comes out two ways — within one tile its runs stay grouped as a single
-feature (render a `MultiLineString`); across tiles its attributes are duplicated onto each tile's
-piece. The two axes are orthogonal, so `SlicerAll<Measured<M>, Attrs>` carries per-vertex M *and*
-per-feature attributes at once. See [`examples/mvt_features.rs`](examples/mvt_features.rs) for the
+A line that is split comes out in pieces: within one tile, each run is its own slice (group
+them by tile to render a `MultiLineString`); across tiles, the feature's attributes go with each
+tile's piece. `Slicer<Measured<M>>` carries per-vertex M alongside. See [`examples/mvt_features.rs`](examples/mvt_features.rs) for the
 full round-trip emitting per-tile `GeoJSON` with ids and properties preserved.
 
 ## Development
@@ -262,12 +304,14 @@ This project uses [just](https://github.com/casey/just#readme) (`cargo install j
 the command list and `just test` to test. Tests are data-driven: each `tests/polylines/fixtures/*.geojson`
 polyline is sliced by both paths (asserted byte-identical) and snapshotted as a `.geojson`
 `FeatureCollection` (original line plus every per-tile piece) that renders on a map. Polygon fixtures
-in `tests/polygons/fixtures/` are snapshotted per tile (`snapshots*/`); `PolygonSlicerOne` and
-`PolygonSlicerAll` (its fill runs expanded into fill rings) must produce identical output, and every
-`PolygonSlicerAll` tile is also checked against `PolygonSlicerOne` on finer grids. Run `just bless`
-to regenerate snapshots. To inspect them, load `tests/polylines/fixtures/grid.geojson` (the tile grid, offset
-0.5px to sit between integer coordinates) and the `tests/polylines/snapshots/*.geojson` files in QGIS or any
-`GeoJSON` viewer.
+in `tests/polygons/fixtures/` are snapshotted per tile (`snapshots*/`); `tile_polygon` and
+`polygon` (its fill runs expanded into fill rings) must produce identical output, also checked on
+finer grids and under every rotation and mirror image. Point fixtures in `tests/points/fixtures/` are
+snapshotted the same way; `point`, `tile_point`, and the closed buffered box rule must agree. The
+fixtures' multi-geometries are sliced one element at a time, as a caller would. Run `just bless`
+to regenerate snapshots. To inspect them, run `just visualize-tests` and open `tests/visualize.qgz` in QGIS (every
+fixture and snapshot as a layer, over `tests/grid.geojson`, the tile grid offset 0.5px to sit between integer
+coordinates), or load the `.geojson` files in any `GeoJSON` viewer.
 
 ## License
 

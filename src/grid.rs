@@ -1,26 +1,13 @@
-//! The stateless slicing engine shared by [`SlicerAll`](crate::SlicerAll) and
-//! [`SlicerOne`](crate::SlicerOne).
+//! The stateless slicing engine under the [`Slicer`](crate::Slicer).
 //!
-//! [`Grid`] holds only the tile geometry (extent + buffer) and knows how to clip one polyline —
-//! into a single tile ([`Grid::slice_one`]) or, by routing it into every tile it touches, into a
-//! [`RouteSink`] ([`Grid::route`]). It
-//! keeps no accumulated state; the two public slicers layer feature accumulation on top of it.
+//! [`Grid`] holds only the tile geometry (extent + buffer): tile boxes and owners, the lazy
+//! per-segment tile walk ([`SegmentTiles`]) behind the line slicer, and the per-row column span
+//! ([`Seg::row_span`]) behind the polygon row scan. It keeps no accumulated state.
 
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polyline::{segment_intersects, to_local};
 use crate::tile::{TileId, tile_of};
-use crate::vertex::Vertex;
-
-/// Upper bound on the tiles [`Grid::route`] will visit (one per tile each segment touches, plus one
-/// per tile row a segment crosses between two unbuffered tiles without touching either) before
-/// giving up with [`TileError::TooManyTiles`]. This is the only reach limit: it bounds the time and
-/// the per-tile output memory a single feature can demand, so adversarial input (say, thousands of
-/// world-spanning zigzags) is rejected rather than exhausting the host. It sits far above any
-/// realistic feature — a local way visits a handful of tiles per segment, a world-spanning z16
-/// diagonal (extent 4096, buffer 64) ~140 000 — and ~33M visits is well under a second.
-pub(crate) const MAX_TILE_VISITS: i64 = 1 << 25;
 
 /// `c` shifted by `d` on both axes. Used for the `± buffer` corner offsets, where the caller has
 /// already proved the result stays in `i32` (so no checked arithmetic).
@@ -45,45 +32,8 @@ fn mul_div_floor(n: i64, m: i64, d: i64) -> i64 {
     }
 }
 
-/// Sink for [`Grid::route`]: receives every `(tile, segment)` the routing produces and decides how to
-/// store it. [`SlicerAll`](crate::SlicerAll) implements it to append clipped vertices straight into
-/// its per-tile buffers, with no intermediate hit list, sort, or copy.
-pub(crate) trait RouteSink<V: Vertex> {
-    /// Called once at the start of a polyline, before any segment — lets the sink break run continuity
-    /// across separate polylines.
-    fn begin_polyline(&mut self);
-
-    /// Called before each segment's `emit`s, in walk order — lets the sink tell whether a tile's run
-    /// continues (the same tile was emitted to by the immediately preceding segment).
-    fn begin_segment(&mut self);
-
-    /// Route the segment `a`–`c` (the original vertices) into `tile`, whose local-frame origin is
-    /// `origin` (`tile · extent`). The sink localizes and stores.
-    ///
-    /// # Errors
-    ///
-    /// [`TileError::Overflow`] if a vertex lies more than an `i32` span from `origin`.
-    fn emit(&mut self, tile: TileId, origin: Coord<i32>, a: V, c: V) -> Result<(), TileError>;
-
-    /// Called after each segment `a`–`c` is routed (and charged to the tile budget), with `row` the
-    /// tile row whose cells' inner boxes hold the whole segment, if one does.
-    ///
-    /// # Errors
-    ///
-    /// As the sink reports; the default does nothing.
-    fn end_segment(
-        &mut self,
-        a: Coord<i32>,
-        c: Coord<i32>,
-        row: Option<i32>,
-    ) -> Result<(), TileError> {
-        let _ = (a, c, row);
-        Ok(())
-    }
-}
-
 /// A vertex's owner tile with its core cell and inner box precomputed in **global** coordinates, so
-/// membership tests are plain comparisons with no division. [`Grid::route`] caches the last one
+/// membership tests are plain comparisons with no division. The line slicer caches the last one
 /// across the vertex walk: consecutive vertices in the same tile reuse it, and a segment whose two
 /// endpoints both lie in the inner box touches only that one tile.
 ///
@@ -92,9 +42,9 @@ pub(crate) trait RouteSink<V: Vertex> {
 /// - the **inner box** `[base + buffer, base + extent − 1 − buffer]` is the core shrunk by the
 ///   buffer; a segment with both endpoints inside it stays ≥ `buffer` from every edge, so it cannot
 ///   reach any neighboring tile's buffered box.
-#[derive(Clone, Copy)]
-struct Located {
-    owner: TileId,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Located {
+    pub(crate) owner: TileId,
     core_lo: Coord<i32>,
     core_hi: Coord<i32>,
     inner_lo: Coord<i32>,
@@ -103,7 +53,7 @@ struct Located {
 
 impl Located {
     /// Does `c`'s owner tile equal this one (is `c` in the core cell)?
-    fn contains_core(&self, c: Coord<i32>) -> bool {
+    pub(crate) fn contains_core(&self, c: Coord<i32>) -> bool {
         c.x >= self.core_lo.x
             && c.x <= self.core_hi.x
             && c.y >= self.core_lo.y
@@ -111,11 +61,168 @@ impl Located {
     }
 
     /// Is `c` in the inner box (≥ `buffer` from every cell edge)?
-    fn contains_inner(&self, c: Coord<i32>) -> bool {
+    pub(crate) fn contains_inner(&self, c: Coord<i32>) -> bool {
         c.x >= self.inner_lo.x
             && c.x <= self.inner_hi.x
             && c.y >= self.inner_lo.y
             && c.y <= self.inner_hi.y
+    }
+}
+
+/// A segment ordered by `y` (`lo.y <= hi.y`), widened to `i64`, for the row-by-row walk.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Seg {
+    lo: Coord<i64>,
+    hi: Coord<i64>,
+    dx: i64,
+    dy: i64,
+}
+
+impl Seg {
+    pub(crate) fn new(lo: Coord<i64>, hi: Coord<i64>) -> Self {
+        Self {
+            lo,
+            hi,
+            dx: hi.x - lo.x,
+            dy: hi.y - lo.y,
+        }
+    }
+
+    /// `x` where the segment is at offset `off` (`0..=dy`) above `lo.y`, rounded up or down.
+    #[inline]
+    fn x_at(self, off: i64, up: bool) -> i64 {
+        match off {
+            0 => self.lo.x,
+            _ if off == self.dy => self.hi.x,
+            _ if up => self.lo.x - mul_div_floor(-off, self.dx, self.dy),
+            _ => self.lo.x + mul_div_floor(off, self.dx, self.dy),
+        }
+    }
+
+    /// The sub-segment's integer `x`-extent inside row `ty`'s buffered slab: empty (`min > max`)
+    /// when it runs between two integer columns there.
+    #[inline]
+    fn row_x(self, ty: i64, extent: i64, buffer: i64) -> (i64, i64) {
+        // The row's buffered slab clipped to the segment's `y`-range, as offsets from `lo.y`; never
+        // empty, since only rows whose slab meets `[lo.y, hi.y]` are asked for.
+        let base = ty * extent;
+        let start = (base - buffer).max(self.lo.y) - self.lo.y;
+        let end = (base + extent - 1 + buffer).min(self.hi.y) - self.lo.y;
+        // `x(y) = lo.x + (y − lo.y)·dx/dy` at the slab's two ends (monotone in `y`): rounding the low
+        // end up and the high end down keeps exactly the integers it spans, and so the closed integer
+        // boxes it meets. An end at a vertex is exact, which spares the division for most short
+        // segments.
+        if self.dy == 0 {
+            (self.lo.x.min(self.hi.x), self.lo.x.max(self.hi.x))
+        } else if self.dx >= 0 {
+            (self.x_at(start, true), self.x_at(end, false))
+        } else {
+            (self.x_at(end, true), self.x_at(start, false))
+        }
+    }
+
+    /// The tile columns `first..=last` of row `ty` whose buffered boxes the segment touches
+    /// (`first > last` for a row it crosses between two unbuffered tiles).
+    #[inline]
+    pub(crate) fn row_span(self, ty: i64, extent: i64, buffer: i64) -> (i64, i64) {
+        let (x_min, x_max) = self.row_x(ty, extent, buffer);
+        (
+            (x_min - buffer).div_euclid(extent),
+            (x_max + buffer).div_euclid(extent),
+        )
+    }
+
+    /// For a row `ty` the segment crosses without touching any tile (possible only with `buffer ==
+    /// 0`, between two integer columns): the next row that can hold an integer `x`. The rows in
+    /// between keep `x` strictly between the same two integers, so they touch nothing either.
+    fn next_row_after_gap(self, ty: i64, extent: i64) -> i64 {
+        if self.dx == 0 {
+            return ty + 1; // a vertical segment sits on an integer column: never a gap
+        }
+        let (x_min, x_max) = self.row_x(ty, extent, 0);
+        // The next integer the segment reaches as `y` grows, and the offset where it gets there:
+        // the first integer `off` with `x(lo.y + off)` at or past it.
+        let n = if self.dx > 0 {
+            x_max + 1 - self.lo.x
+        } else {
+            self.lo.x - (x_min - 1)
+        };
+        // `|n| <= |dx|`, so the quotient stays within `dy`.
+        let off = -mul_div_floor(-n, self.dy, self.dx.abs());
+        ((self.lo.y + off).div_euclid(extent)).max(ty + 1)
+    }
+}
+
+/// The tiles whose buffered box a segment touches, lazily: rows ascending, columns ascending within a
+/// row, with the rows a segment crosses between two unbuffered tiles skipped at once instead of one
+/// by one.
+#[derive(Clone, Debug)]
+pub(crate) struct SegmentTiles {
+    seg: Seg,
+    extent: i64,
+    buffer: i64,
+    /// The next row to look at, and the last row.
+    ty: i64,
+    ty_end: i64,
+    /// The row being yielded, and its next and last columns.
+    row: i64,
+    tx: i64,
+    tx_end: i64,
+}
+
+impl SegmentTiles {
+    pub(crate) fn new(grid: Grid, a: Coord<i32>, c: Coord<i32>) -> Self {
+        let (extent, buffer) = (i64::from(grid.extent), i64::from(grid.buffer));
+        let wide = |p: Coord<i32>| Coord {
+            x: i64::from(p.x),
+            y: i64::from(p.y),
+        };
+        let (lo, hi) = if a.y <= c.y {
+            (wide(a), wide(c))
+        } else {
+            (wide(c), wide(a))
+        };
+        Self {
+            seg: Seg::new(lo, hi),
+            extent,
+            buffer,
+            ty: (lo.y - buffer).div_euclid(extent),
+            ty_end: (hi.y + buffer).div_euclid(extent),
+            row: 0,
+            tx: 1,
+            tx_end: 0,
+        }
+    }
+}
+
+impl Iterator for SegmentTiles {
+    /// A touched tile. The caller has proved (see [`Grid::check_tiles`]) that every tile the segment
+    /// can touch has an `i32` id.
+    type Item = TileId;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "tile ids were proved to fit i32 by Grid::check_tiles"
+    )]
+    fn next(&mut self) -> Option<TileId> {
+        loop {
+            if self.tx <= self.tx_end {
+                let tile = TileId::new(self.tx as i32, self.row as i32);
+                self.tx += 1;
+                return Some(tile);
+            }
+            if self.ty > self.ty_end {
+                return None;
+            }
+            let ty = self.ty;
+            let (first, last) = self.seg.row_span(ty, self.extent, self.buffer);
+            if first <= last {
+                (self.row, self.tx, self.tx_end) = (ty, first, last);
+                self.ty = ty + 1;
+            } else {
+                self.ty = self.seg.next_row_after_gap(ty, self.extent);
+            }
+        }
     }
 }
 
@@ -140,12 +247,15 @@ impl Grid {
     ///
     /// # Errors
     ///
-    /// - [`TileError::InvalidExtent`] if `extent` is `0` or greater than `i32::MAX`.
+    /// - [`TileError::InvalidExtent`] if `extent` is `0`, or `extent + buffer` is greater than
+    ///   `i32::MAX` — no tile's buffered box (grown one more unit for a polygon's fill box) would fit
+    ///   `i32`, so nothing could be sliced.
     /// - [`TileError::BufferTooLarge`] if `2 * buffer >= extent` — the buffer must stay under half a
     ///   tile, so a vertex near an edge spills into at most one neighbor per axis and the
     ///   tile-minus-buffer inner box stays non-empty (both relied on by the routing).
     pub(crate) const fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
-        if extent == 0 || extent > i32::MAX.cast_unsigned() {
+        // `extent + buffer` cannot overflow `u64`.
+        if extent == 0 || extent as u64 + buffer as u64 > i32::MAX as u64 {
             return Err(TileError::InvalidExtent);
         }
         // `2 * buffer` cannot overflow: `buffer <= u16::MAX`, so the product fits `u32`.
@@ -163,6 +273,16 @@ impl Grid {
         self.extent.cast_unsigned()
     }
 
+    /// [`Self::extent`] as the `i32` it is stored as.
+    pub(crate) const fn extent_i32(self) -> i32 {
+        self.extent
+    }
+
+    /// [`Self::buffer`] as the `i32` it is stored as.
+    pub(crate) const fn buffer_i32(self) -> i32 {
+        self.buffer
+    }
+
     /// The buffer kept around every tile, in tile-space units.
     #[expect(
         clippy::cast_possible_truncation,
@@ -173,266 +293,19 @@ impl Grid {
         self.buffer as u16
     }
 
-    /// Clip one `polyline` to a single tile, keeping original vertices. Returns the kept runs in the
-    /// tile's **local coordinates** — the tile's `[0, 0]` corner is the origin, so a kept vertex lands
-    /// in `0..extent` (buffer vertices past the low edge go negative). The result is empty when nothing
-    /// of `polyline` touches the tile's (buffered) box.
-    ///
-    /// A vertex is **kept** when either of its segments touches the box, so a border crossing keeps the
-    /// first vertex just outside. A run breaks only where a vertex is *dropped* (both its segments miss
-    /// the box): a single-segment excursion out of and back into the tile keeps its whole geometry as
-    /// one run (both outside vertices are kept), while a longer excursion — which drops the vertices in
-    /// between — comes back as separate runs.
-    ///
-    /// # Errors
-    ///
-    /// [`TileError::Overflow`] if `tile`'s (buffered) box coordinates overflow `i32` (a tile far
-    /// outside the representable range for this `extent`), or a kept vertex lies more than an `i32`
-    /// span from the tile origin.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(crate) fn slice_one<V: Vertex>(
-        self,
-        polyline: &[V],
-        tile: TileId,
-    ) -> Result<Vec<Vec<V>>, TileError> {
-        let poly = polyline;
-        let (min, max) = self.tile_buffered_bounds(tile)?;
-        // The tile origin is `min` grown back by the buffer: `tile_buffered_bounds` already proved
-        // `origin − buffer` fits `i32` and `origin` is the checked base corner, so this cannot
-        // overflow — no need to recompute (and re-check) `tile · extent`.
-        let origin = shift(min, self.buffer);
-        // Clip and localize in one pass: store each kept vertex already offset by the tile origin, so
-        // there is no separate localization pass over the output. Each vertex is emitted once its keep
-        // status is fully known (both its segments seen), so we act on `prev`, carrying whether the
-        // segment *into* `prev` touched the box.
-        let mut runs = Vec::new();
-        let mut cur: Vec<V> = Vec::new();
-        let mut prev: Option<V> = None;
-        let mut left_hit = false;
-        for &c in poly {
-            if let Some(a) = prev {
-                if a.position() == c.position() {
-                    continue; // drop a consecutive duplicate vertex (keep `prev`/`left_hit`)
-                }
-                let this_hit = segment_intersects(a.position(), c.position(), min, max);
-                if left_hit || this_hit {
-                    cur.push(to_local(a, origin)?); // `a` is kept by one of its segments
-                } else if cur.len() >= 2 {
-                    runs.push(std::mem::take(&mut cur)); // `a` is dropped: close the run before it
-                } else {
-                    cur.clear();
-                }
-                left_hit = this_hit;
-            }
-            prev = Some(c);
-        }
-        // The last vertex is kept iff its only segment (the final one) touched the box.
-        if left_hit && let Some(a) = prev {
-            cur.push(to_local(a, origin)?);
-        }
-        if cur.len() >= 2 {
-            runs.push(cur);
-        }
-
-        Ok(runs)
+    /// The buffered box `(min, max)` of a located tile, as [`Self::tile_buffered_bounds`] returns it
+    /// (already proved to fit `i32` when the tile was located).
+    pub(crate) const fn box_of(self, loc: &Located) -> (Coord<i32>, Coord<i32>) {
+        (
+            shift(loc.core_lo, -self.buffer),
+            shift(loc.core_hi, self.buffer),
+        )
     }
 
-    /// Walk one `polyline` once, driving `sink` with every `(tile, segment)` it produces — the same
-    /// routing the per-tile clip agrees with, streamed instead of collected into a hit list, so
-    /// [`SlicerAll`](crate::SlicerAll) writes clipped vertices straight into its buffers with no
-    /// intermediate allocation, sort, or copy.
-    ///
-    /// Each segment (skipping consecutive duplicate positions) is routed into every tile whose
-    /// buffered box it touches, in walk order. Fast path: a segment lying entirely within one tile's
-    /// inner box (≥ `buffer` from every edge — the common case) goes straight to that tile, skipping
-    /// `tile_of` and the geometry test; the owning tile is cached across the walk (see [`Located`]).
-    /// Any other segment is walked row by row through exactly the tiles it touches ([`Self::walk`]),
-    /// so its cost follows those tiles, not its bounding rectangle.
-    /// The sink gets each touched tile's id, local-frame origin, and the segment's two **original**
-    /// vertices (it localizes).
-    ///
-    /// `begin_polyline` is called once, then `begin_segment` before each segment's `emit`s, so the
-    /// sink can track run continuity.
-    ///
-    /// # Errors
-    ///
-    /// - [`TileError::GeometryTooLarge`] — the polyline has more than `u32::MAX` vertices (the
-    ///   slicers' flat storage indexes vertices with `u32`).
-    /// - [`TileError::TooManyTiles`], [`TileError::Overflow`] — as in [`Self::route_within`], with a
-    ///   fresh `MAX_TILE_VISITS` budget.
-    pub(crate) fn route<V: Vertex, S: RouteSink<V>>(
-        self,
-        polyline: &[V],
-        sink: &mut S,
-    ) -> Result<(), TileError> {
-        // Up-front length check before any `emit`, so this input-level error is atomic.
-        u32::try_from(polyline.len()).map_err(|_| TileError::GeometryTooLarge)?;
-        // Bound the total tiles visited, so an adversarial spread of long segments can't exhaust
-        // time or memory: a polyline needing more than this is rejected rather than crashing.
-        let mut budget = MAX_TILE_VISITS;
-        self.route_within(polyline, sink, &mut budget)
-    }
-
-    /// [`Self::route`] without the vertex-count cap, charging every tile visited to the caller's
-    /// `budget` — so several polylines (a polygon's rings) can share one working-set bound.
-    ///
-    /// # Errors
-    ///
-    /// - [`TileError::TooManyTiles`] — its segments would visit more tiles than remain in `budget`.
-    /// - [`TileError::Overflow`] — a touched tile's buffered box overflows `i32` (an outermost tile,
-    ///   with `buffer > 0`), or (from the sink) a kept vertex lies more than an `i32` span from its
-    ///   tile origin.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(crate) fn route_within<V: Vertex, S: RouteSink<V>>(
-        self,
-        polyline: &[V],
-        sink: &mut S,
-        budget: &mut i64,
-    ) -> Result<(), TileError> {
-        let poly = polyline;
-
-        // Empty polyline → nothing to route.
-        if poly.is_empty() {
-            return Ok(());
-        }
-
-        sink.begin_polyline();
-        // Carry the previous vertex and its located tile, so a segment whose two endpoints share one
-        // tile's inner box needs no division or geometry test at all.
-        let mut prev: Option<V> = None;
-        let mut prev_loc: Option<Located> = None;
-        for v in poly {
-            let c = v.position();
-            if let Some(a) = prev {
-                let a_pos = a.position();
-                if a_pos == c {
-                    continue; // drop a consecutive duplicate vertex (keep `prev`/`prev_loc`)
-                }
-                sink.begin_segment();
-                // `a`'s tile: carried from the previous step, or located now for the first segment.
-                let la = match prev_loc {
-                    Some(l) => l,
-                    None => self.locate(a_pos)?,
-                };
-                if la.contains_inner(a_pos) && la.contains_inner(c) {
-                    // Fast path: the whole segment lies in `la`'s inner box, so it touches only that
-                    // tile (`la.core_lo` is that tile's origin) — no `tile_of`, `tile_bounds`, or
-                    // geometry test.
-                    *budget -= 1;
-                    if *budget < 0 {
-                        return Err(TileError::TooManyTiles);
-                    }
-                    sink.emit(la.owner, la.core_lo, a, *v)?;
-                    sink.end_segment(a_pos, c, Some(la.owner.y))?;
-                    prev_loc = Some(la); // `c` is in `la`'s core, so its tile is `la`
-                } else {
-                    // Slow path: walk the segment through exactly the tiles it touches.
-                    self.walk(a, *v, sink, budget)?;
-                    sink.end_segment(a_pos, c, None)?;
-                    // `c`'s tile for the next step: reuse `la` if `c` shares its core, else locate it
-                    // (its tile was just visited by the walk, so this cannot newly error).
-                    prev_loc = Some(if la.contains_core(c) {
-                        la
-                    } else {
-                        self.locate(c)?
-                    });
-                }
-            }
-            prev = Some(*v);
-        }
-        Ok(())
-    }
-
-    /// Route segment `a`–`c` into exactly the tiles whose buffered box it touches, charging each to
-    /// `budget` — so a long diagonal costs the tiles it crosses, not its bounding rectangle. A row the
-    /// segment crosses without touching a tile (it runs through the gap between two unbuffered
-    /// tiles) is charged one visit too, so every row the walk iterates is paid for.
-    ///
-    /// Rows ascend, then columns within a row. Inside a row's buffered `y`-slab the segment is a
-    /// sub-segment whose `x`-extent is one interval, and a tile of the row touches the segment iff its
-    /// buffered `x`-range meets that interval — the separating-axis answer [`segment_intersects`]
-    /// gives per tile, computed once per row with exact rounding. Each touched tile's box is built
-    /// with checked math; since the endpoints' own tiles are always touched, a segment reaching past
-    /// the `i32` range reports [`TileError::Overflow`].
-    ///
-    /// # Errors
-    ///
-    /// - [`TileError::TooManyTiles`] — the touched tiles and gap rows exceed the remaining `budget`.
-    /// - [`TileError::Overflow`] — a touched tile's buffered box overflows `i32`, or (from the sink) a
-    ///   kept vertex lies more than an `i32` span from its tile origin.
-    fn walk<V: Vertex, S: RouteSink<V>>(
-        self,
-        a: V,
-        c: V,
-        sink: &mut S,
-        budget: &mut i64,
-    ) -> Result<(), TileError> {
-        let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
-        let wide = |p: Coord<i32>| Coord {
-            x: i64::from(p.x),
-            y: i64::from(p.y),
-        };
-        // Order the endpoints by `y`, so rows ascend and the `y` offsets below are non-negative.
-        let (lo, hi) = if a.position().y <= c.position().y {
-            (wide(a.position()), wide(c.position()))
-        } else {
-            (wide(c.position()), wide(a.position()))
-        };
-        let (dx, dy) = (hi.x - lo.x, hi.y - lo.y);
-        for ty in (lo.y - buffer).div_euclid(extent)..=(hi.y + buffer).div_euclid(extent) {
-            // The row's buffered slab clipped to the segment's `y`-range, as offsets from `lo.y`;
-            // never empty, since these are exactly the rows whose slab meets `[lo.y, hi.y]`.
-            let base = ty * extent;
-            let start = (base - buffer).max(lo.y) - lo.y;
-            let end = (base + extent - 1 + buffer).min(hi.y) - lo.y;
-            // The sub-segment's `x`-extent, `x(y) = lo.x + (y − lo.y)·dx/dy` at the slab's two ends
-            // (monotone in `y`): rounding the low end up and the high end down keeps exactly the
-            // integers it spans, and so the closed integer boxes it meets. An end at a vertex is
-            // exact, which spares the division for most short segments.
-            let x_at = |off: i64, up: bool| match off {
-                0 => lo.x,
-                _ if off == dy => hi.x,
-                _ if up => lo.x - mul_div_floor(-off, dx, dy),
-                _ => lo.x + mul_div_floor(off, dx, dy),
-            };
-            let (x_min, x_max) = if dy == 0 {
-                (lo.x.min(hi.x), lo.x.max(hi.x))
-            } else if dx >= 0 {
-                (x_at(start, true), x_at(end, false))
-            } else {
-                (x_at(end, true), x_at(start, false))
-            };
-            let (first, last) = (
-                (x_min - buffer).div_euclid(extent),
-                (x_max + buffer).div_euclid(extent),
-            );
-            // Charge every row, even one whose sub-segment runs through the gap between two
-            // unbuffered tiles and touches none (only possible with `buffer == 0`): otherwise a
-            // near-vertical segment along such a gap would cost one free iteration per row.
-            *budget -= (last - first + 1).max(1);
-            if *budget < 0 {
-                return Err(TileError::TooManyTiles);
-            }
-            if first > last {
-                continue;
-            }
-            // Every touched box of the row lies within the row's outermost buffered corners, so
-            // checking those once covers each tile's origin and box.
-            let fits = |v: i64| i32::try_from(v).map_err(|_| TileError::Overflow);
-            fits(first * extent - buffer)?;
-            fits(last * extent + extent - 1 + buffer)?;
-            fits(base - buffer)?;
-            fits(base + extent - 1 + buffer)?;
-            let (ty, origin_y) = (fits(ty)?, fits(base)?);
-            for tx in fits(first)?..=fits(last)? {
-                let origin = Coord {
-                    x: tx * self.extent,
-                    y: origin_y,
-                };
-                sink.emit(TileId::new(tx, ty), origin, a, c)?;
-            }
-        }
-        Ok(())
+    /// The origin (`tile · extent`) of the tile whose buffered box starts at `min`, as returned by
+    /// [`Self::tile_buffered_bounds`] — which already proved `origin − buffer` fits `i32`.
+    pub(crate) const fn origin_of(self, min: Coord<i32>) -> Coord<i32> {
+        shift(min, self.buffer)
     }
 
     /// The closed integer bounds `(min, max)` of `tile`'s clip box (in output space), grown by
@@ -460,60 +333,165 @@ impl Grid {
         ))
     }
 
-    /// The tile whose inner box holds every point of `points`, and its origin: then every segment
-    /// between them touches that tile's buffered box and no other's. `None` if they span more than one
-    /// inner box, or there are none (or the tile overflows, left to the general path to report).
-    pub(crate) fn inner_tile(
-        self,
-        mut points: impl Iterator<Item = Coord<i32>>,
-    ) -> Option<(TileId, Coord<i32>)> {
-        let first = points.next()?;
-        let located = self.locate(first).ok()?;
-        (located.contains_inner(first) && points.all(|p| located.contains_inner(p)))
-            .then_some((located.owner, located.core_lo))
+    /// The buffered box `(min, max)` of `tile`, with plain arithmetic: the caller has proved it fits
+    /// `i32` (see [`Self::check_tiles`]), so unlike [`Self::tile_buffered_bounds`] it cannot fail.
+    pub(crate) fn tile_box(self, tile: TileId) -> (Coord<i32>, Coord<i32>) {
+        let base = Coord {
+            x: tile.x * self.extent,
+            y: tile.y * self.extent,
+        };
+        (
+            shift(base, -self.buffer),
+            shift(base, self.extent - 1 + self.buffer),
+        )
     }
 
-    /// Locate the tile owning `c` (in output space), with its core and inner boxes precomputed (see
-    /// [`Located`]). Built on [`Self::tile_buffered_bounds`], so it reports [`TileError::Overflow`] for exactly
-    /// the tiles the routing scan would — `min = base − buffer` and `max = base + extent − 1 + buffer`,
-    /// from which the core (`base .. base + extent − 1`) and inner (`base + buffer .. max − 2·buffer`)
-    /// follow by `± buffer` (all within `[min, max]`, so no further overflow).
-    fn locate(self, c: Coord<i32>) -> Result<Located, TileError> {
+    /// Prove that every tile whose buffered box can meet the bounding box `[lo, hi]` has a box that
+    /// fits `i32` (so [`Self::tile_box`], [`Self::locate_fit`] and a tile id from a walk over geometry
+    /// inside it cannot overflow).
+    ///
+    /// The tiles form a rectangle, and a box grows with the tile index, so only the corner tiles need
+    /// testing.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::Overflow`] if a corner tile's box leaves the `i32` range.
+    #[inline]
+    pub(crate) fn check_tiles(self, lo: Coord<i32>, hi: Coord<i32>) -> Result<(), TileError> {
+        // Away from the `i32` limits (the usual case) no box can overflow: the tiles lie within
+        // `2^30 + extent + buffer < 2^31` of the origin. Each coordinate, biased by `2^30`, is below
+        // `2^31` exactly when it is in `-2^30..2^30`, so one OR tests all four.
+        if self.near_origin(lo, hi) {
+            return Ok(());
+        }
+        self.check_tiles_exact(lo, hi, 0)
+    }
+
+    /// Whether the bounding box `[lo, hi]` lies so far from the `i32` limits that no tile meeting it
+    /// can overflow, with room to spare: the tiles lie within `2^30 + extent + buffer < 2^31 − 1` of
+    /// the origin. Each coordinate, biased by `2^30`, is below `2^31` exactly when it is in
+    /// `-2^30..2^30`, so one OR tests all four.
+    #[inline]
+    fn near_origin(self, lo: Coord<i32>, hi: Coord<i32>) -> bool {
+        let biased = |v: i32| v.cast_unsigned().wrapping_add(1 << 30);
+        let in_range = biased(lo.x) | biased(lo.y) | biased(hi.x) | biased(hi.y);
+        self.extent < 1 << 29 && in_range < 1 << 31
+    }
+
+    /// [`Self::check_tiles`] without the shortcut, with every box grown `margin` more units.
+    fn check_tiles_exact(
+        self,
+        lo: Coord<i32>,
+        hi: Coord<i32>,
+        margin: i64,
+    ) -> Result<(), TileError> {
+        let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
+        let (min, max) = (i64::from(i32::MIN), i64::from(i32::MAX));
+        for (lo, hi) in [(lo.x, hi.x), (lo.y, hi.y)] {
+            let first = (i64::from(lo) - buffer).div_euclid(extent);
+            let last = (i64::from(hi) + buffer).div_euclid(extent);
+            if first * extent - buffer - margin < min
+                || last * extent + extent - 1 + buffer + margin > max
+            {
+                return Err(TileError::Overflow);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_tiles`], and also that `p − origin` fits `i32` for every point `p` of `[lo, hi]`
+    /// and the origin of every tile it checks: what a line run, whose vertices are lent in the local
+    /// frame of a tile they only reach, needs.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::Overflow`] if either fails.
+    pub(crate) fn check_bounds(self, lo: Coord<i32>, hi: Coord<i32>) -> Result<(), TileError> {
+        if self.near_origin_and_small(lo, hi) {
+            return Ok(());
+        }
+        self.check_tiles(lo, hi)?;
+        let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
+        for (lo, hi) in [(lo.x, hi.x), (lo.y, hi.y)] {
+            let first = (i64::from(lo) - buffer).div_euclid(extent);
+            let last = (i64::from(hi) + buffer).div_euclid(extent);
+            if i64::from(hi) - first * extent > i64::from(i32::MAX)
+                || i64::from(lo) - last * extent < i64::from(i32::MIN)
+            {
+                return Err(TileError::Overflow);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_bounds`], and also that every box it checks, grown one more unit, fits `i32`:
+    /// what a polygon needs, whose pieces get synthetic corners just outside a tile's box.
+    ///
+    /// # Errors
+    ///
+    /// [`TileError::Overflow`] if any check fails.
+    pub(crate) fn check_polygon_bounds(
+        self,
+        lo: Coord<i32>,
+        hi: Coord<i32>,
+    ) -> Result<(), TileError> {
+        if self.near_origin_and_small(lo, hi) {
+            return Ok(());
+        }
+        self.check_bounds(lo, hi)?;
+        self.check_tiles_exact(lo, hi, 1)
+    }
+
+    /// [`Self::near_origin`], and `[lo, hi]` spans under `2^30` on each axis: then every point of it
+    /// is also within `2^30 + extent + buffer + 1 < 2^31` of the origin of every tile it reaches, so
+    /// every check of [`Self::check_polygon_bounds`] passes.
+    #[inline]
+    fn near_origin_and_small(self, lo: Coord<i32>, hi: Coord<i32>) -> bool {
+        self.near_origin(lo, hi) && hi.x.abs_diff(lo.x) < 1 << 30 && hi.y.abs_diff(lo.y) < 1 << 30
+    }
+
+    /// Locate the tile owning `c`, a vertex inside bounds [`Self::check_tiles`] accepted, with its core
+    /// and inner boxes precomputed (see [`Located`]): `min = base − buffer` and
+    /// `max = base + extent − 1 + buffer` fit `i32`, and the core (`base .. base + extent − 1`) and
+    /// inner (`base + buffer .. max − 2·buffer`) boxes follow by `± buffer`, so plain arithmetic
+    /// cannot fail.
+    pub(crate) fn locate_fit(self, c: Coord<i32>) -> Located {
         let owner = tile_of(c, self.extent);
-        let (min, max) = self.tile_buffered_bounds(owner)?;
-        Ok(Located {
+        let (min, max) = self.tile_box(owner);
+        Located {
             owner,
             core_lo: shift(min, self.buffer),
             core_hi: shift(max, -self.buffer),
             inner_lo: shift(min, 2 * self.buffer),
             inner_hi: shift(max, -2 * self.buffer),
-        })
+        }
+    }
+
+    /// The tile whose inner box (≥ `buffer` from every cell edge) holds the whole bounding box
+    /// `[lo, hi]`, with its origin, if one does and its buffered box fits `i32`; one division per
+    /// axis.
+    pub(crate) fn inner_tile(self, lo: Coord<i32>, hi: Coord<i32>) -> Option<(TileId, Coord<i32>)> {
+        let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
+        let axis = |lo: i32, hi: i32| {
+            let (lo, hi) = (i64::from(lo), i64::from(hi));
+            let base = lo.div_euclid(extent) * extent;
+            let inside = lo >= base + buffer && hi <= base + extent - 1 - buffer;
+            let fits = base - buffer >= i64::from(i32::MIN)
+                && base + extent - 1 + buffer <= i64::from(i32::MAX);
+            // `base` fits `i32` (its buffered box does), and so does `base / extent`.
+            #[expect(clippy::cast_possible_truncation, reason = "checked to fit just above")]
+            (inside && fits).then_some(((base / extent) as i32, base as i32))
+        };
+        let (tx, x) = axis(lo.x, hi.x)?;
+        let (ty, y) = axis(lo.y, hi.y)?;
+        Some((TileId::new(tx, ty), Coord { x, y }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Counts the tiles routing emits to.
-    struct Emits(usize);
-
-    impl RouteSink<Coord<i32>> for Emits {
-        fn begin_polyline(&mut self) {}
-
-        fn begin_segment(&mut self) {}
-
-        fn emit(
-            &mut self,
-            _: TileId,
-            _: Coord<i32>,
-            _: Coord<i32>,
-            _: Coord<i32>,
-        ) -> Result<(), TileError> {
-            self.0 += 1;
-            Ok(())
-        }
-    }
+    use crate::clip_polyline::segment_intersects;
 
     #[test]
     fn mul_div_floor_is_exact_past_i64() {
@@ -528,46 +506,6 @@ mod tests {
         ] {
             assert_eq!(mul_div_floor(n, m, d), reference(n, m, d), "{n}·{m}/{d}");
         }
-    }
-
-    #[test]
-    fn budget_bounds_segments_inside_one_tile() {
-        // Both segments stay in one tile's inner box (the fast path); the budget covers only the first.
-        let grid = Grid::new(4096, 8).expect("config");
-        let line = [(100, 100), (200, 100), (300, 100)].map(|(x, y)| Coord { x, y });
-        let (mut budget, mut sink) = (1, Emits(0));
-        let err = grid.route_within(&line, &mut sink, &mut budget).err();
-        assert_eq!(err, Some(TileError::TooManyTiles));
-        assert_eq!(
-            sink.0, 1,
-            "the first segment was routed before the budget ran out"
-        );
-    }
-
-    /// Records the tiles each `emit` reaches, in order.
-    struct Tiles(Vec<TileId>);
-
-    impl RouteSink<Coord<i32>> for Tiles {
-        fn begin_polyline(&mut self) {}
-        fn begin_segment(&mut self) {}
-        fn emit(
-            &mut self,
-            tile: TileId,
-            _: Coord<i32>,
-            _: Coord<i32>,
-            _: Coord<i32>,
-        ) -> Result<(), TileError> {
-            self.0.push(tile);
-            Ok(())
-        }
-    }
-
-    /// The tiles the walk routes segment `a`–`c` into, and the visits it charged for them.
-    fn walked(grid: Grid, a: Coord<i32>, c: Coord<i32>) -> Result<(Vec<TileId>, i64), TileError> {
-        let mut sink = Tiles(Vec::new());
-        let mut budget = MAX_TILE_VISITS;
-        grid.walk(a, c, &mut sink, &mut budget)?;
-        Ok((sink.0, MAX_TILE_VISITS - budget))
     }
 
     /// The previous routing: test every tile of the segment's buffered bounding box, row-major.
@@ -587,8 +525,9 @@ mod tests {
         Ok(out)
     }
 
-    /// The walk visits exactly the tiles (in the same order) that the bounding-box scan accepts, and
-    /// reports `Overflow` for exactly the same segments near the `i32` limits.
+    /// The lazy walk visits exactly the tiles (in the same order) that the bounding-box scan accepts,
+    /// skipping the gap rows between unbuffered tiles; and [`Grid::check_bounds`] rejects exactly what
+    /// the scan's tile boxes cannot hold, so a walk it accepted never meets an overflow.
     #[test]
     fn walk_matches_bounding_box_scan() {
         // A deterministic xorshift stream, reduced to `0..n`.
@@ -623,28 +562,37 @@ mod tests {
                 2 => c.x = i32::try_from(i64::from(a.x) + below(3) - 1).unwrap_or(a.x),
                 _ => {}
             }
-            let walk = walked(grid, a, c).map(|(tiles, charged)| {
-                // One charge per visited tile, plus one per row the walk crosses without a visit.
-                let tile_y = |v: i32, d: i64| (i64::from(v) + d).div_euclid(i64::from(extent));
-                let rows = tile_y(a.y.max(c.y), i64::from(buffer))
-                    - tile_y(a.y.min(c.y), -i64::from(buffer))
-                    + 1;
-                let mut visited_rows: Vec<i32> = tiles.iter().map(|t| t.y).collect();
-                visited_rows.dedup();
-                let gap_rows = rows - i64::try_from(visited_rows.len()).unwrap();
-                assert!(
-                    buffer == 0 || gap_rows == 0,
-                    "only unbuffered tiles leave gaps"
-                );
+            let (lo, hi) = (
+                Coord {
+                    x: a.x.min(c.x),
+                    y: a.y.min(c.y),
+                },
+                Coord {
+                    x: a.x.max(c.x),
+                    y: a.y.max(c.y),
+                },
+            );
+            // Rejected bounds are exactly those with a tile box (or tile id) beyond `i32`.
+            let reference = scanned(grid, a, c);
+            let rejected = grid.check_tiles(lo, hi).is_err();
+            assert_eq!(
+                rejected,
+                reference.is_err(),
+                "{extent}/{buffer} {a:?}-{c:?}"
+            );
+            if rejected {
+                overflows += 1;
+                continue;
+            }
+            let reference = reference.expect("accepted bounds hold every tile box");
+            let walk: Vec<TileId> = SegmentTiles::new(grid, a, c).collect();
+            assert_eq!(walk, reference, "{extent}/{buffer} {a:?}-{c:?}");
+            for &tile in &walk {
                 assert_eq!(
-                    charged,
-                    i64::try_from(tiles.len()).unwrap() + gap_rows,
-                    "one charge per visit or gap row"
+                    grid.tile_box(tile),
+                    grid.tile_buffered_bounds(tile).unwrap()
                 );
-                tiles
-            });
-            overflows += usize::from(walk == Err(TileError::Overflow));
-            assert_eq!(walk, scanned(grid, a, c), "{extent}/{buffer} {a:?}-{c:?}");
+            }
         }
         assert!(
             overflows > 100,

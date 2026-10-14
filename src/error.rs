@@ -1,8 +1,8 @@
-//! The error type returned by the slicers and the [`Mosaic`](crate::Mosaic) combiner.
+//! The error type returned by the [`Slicer`](crate::Slicer) and the [`Mosaic`](crate::Mosaic) combiners.
 //!
 //! This crate never panics on caller input: every operation that cannot proceed returns one of
-//! these variants instead. All coordinate math is checked, so out-of-range inputs are reported
-//! rather than overflowing or producing a wrong result.
+//! these variants instead. Out-of-range inputs are reported rather than overflowing or producing a
+//! wrong result: coordinate math is checked, or runs on values proven in range up front.
 
 use thiserror::Error;
 
@@ -13,8 +13,9 @@ use crate::TileId;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum TileError {
-    /// The per-tile output resolution / tile side (`extent`) was zero, or larger than `i32::MAX`.
-    #[error("extent must be between 1 and {}", i32::MAX)]
+    /// The per-tile output resolution / tile side (`extent`) was zero, or `extent + buffer` was
+    /// larger than `i32::MAX`.
+    #[error("extent must be between 1 and {} minus the buffer", i32::MAX)]
     InvalidExtent,
 
     /// The `buffer` was too large for the tile size: it must be **strictly less than half** the
@@ -22,24 +23,13 @@ pub enum TileError {
     #[error("buffer must be strictly less than half the extent")]
     BufferTooLarge,
 
-    /// A line (or a polygon feature) has more than `u32::MAX` vertices, rings or pieces — beyond the
-    /// `u32` offsets of the slicers' flat storage.
-    #[error("geometry too large: at most {} vertices are supported", u32::MAX)]
+    /// A polygon has more than `u32::MAX` rings or edges, or one of its pieces more than `u32::MAX`
+    /// vertices — beyond the `u32` indices the slicer keeps.
+    #[error(
+        "geometry too large: at most {} rings or edges are supported",
+        u32::MAX
+    )]
     GeometryTooLarge,
-
-    /// The geometry reaches too many tiles to slice: its segments collectively touch more tiles than
-    /// the slicer's working-set bound of 2^25 tile visits per feature (a tile counts once per segment
-    /// touching it, and so does a tile row a segment crosses without touching any tile; tiles a
-    /// polygon merely covers are free). Far above any realistic feature, even a
-    /// world-spanning diagonal at z16, it guards time and memory against adversarial input.
-    #[error("geometry reaches too many tiles to slice")]
-    TooManyTiles,
-
-    /// Slicing one polygon feature would produce more vertices than the slicer allows (2^28). Valid
-    /// geometry stays far below that; only rings winding around tiles many times, or many overlapping
-    /// polygons, come close, and they are rejected rather than exhausting memory.
-    #[error("slicing the feature would produce too many vertices")]
-    OutputTooLarge,
 
     /// Coordinate arithmetic overflowed `i32` — a coordinate or tile lies too close to the limits of
     /// the representable range for the given `extent`/`buffer`.

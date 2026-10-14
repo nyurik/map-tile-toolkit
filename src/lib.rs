@@ -19,21 +19,17 @@ pub use geom::signed_area_2x;
 // Low-level per-tile polygon-ring clipping (keep-original with synthetic clip-boundary corners).
 mod clip_polygon;
 
-// The stateless slicing engine shared by both slicers.
+// The stateless tile geometry under the slicer: tile boxes and the lazy per-segment tile walk.
 mod grid;
 
+// Lazy polygon slicing: the row-by-row scanline behind `Slicer::polygon`.
+mod polygon;
+pub use polygon::{FillRun, PolygonPiece, PolygonSlice, PolygonSlices};
+
 mod slicer;
-pub use slicer::{FeatureView, SlicerAll, SlicerOne, TileView};
-
-// Borrowed views of clipped polygons, shared by both polygon slicers.
-mod polygon_view;
-pub use polygon_view::{PolygonView, RingView};
-
-mod polygon_slicer;
-pub use polygon_slicer::PolygonSlicerOne;
-
-mod polygon_all;
-pub use polygon_all::{FillRun, PolygonFeatureView, PolygonSlicerAll, PolygonTileView};
+pub use slicer::{
+    LineSlice, LineSlices, Local, LocalIter, PointSlice, PointSlices, Slicer, TileLines,
+};
 
 mod mosaic;
 pub use mosaic::{Mosaic, PolygonMosaic};

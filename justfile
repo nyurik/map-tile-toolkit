@@ -148,6 +148,13 @@ env-info:
     @echo "CARGO_BUILD_WARNINGS='$CARGO_BUILD_WARNINGS'"
     @echo "RUST_BACKTRACE='$RUST_BACKTRACE'"
 
+# Regenerate tests/visualize.qgz (QGIS) from every GeoJSON file under tests/, keeping its view state
+visualize-tests:  (assert-cmd 'python3')
+    python3 tests/visualize_tests.py tests/visualize.qgz
+    @echo "--------- done --------"
+    @echo "Start QGIS and open this file:"
+    @echo "$(realpath tests/visualize.qgz)"
+
 # Reformat all code `cargo fmt`. If nightly is available, use it for better results
 fmt:
     #!/usr/bin/env bash
@@ -187,11 +194,13 @@ fmt-geojson:  (assert-cmd 'node') (assert-cmd 'npm') (assert-cmd 'jq')
     }
     round_coords "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
     round_coords "{{justfile_directory()}}"/tests/polygons/fixtures/*.geojson
+    round_coords "{{justfile_directory()}}"/tests/points/fixtures/*.geojson
     # The shell expands the file list (absolute paths); run node from the temp dir so the bare import
     # resolves against the throwaway install.
     cd "$tmp"
     node fmt.mjs "{{justfile_directory()}}"/tests/polylines/{fixtures,bad-fixtures}/*.geojson
     node fmt.mjs "{{justfile_directory()}}"/tests/polygons/fixtures/*.geojson
+    node fmt.mjs "{{justfile_directory()}}"/tests/points/fixtures/*.geojson
 
 # Get a package field from the metadata
 get-crate-field field package=main_crate:  (assert-cmd 'jq')
@@ -242,10 +251,6 @@ test-fmt: && (fmt-toml '--check' '--check-format')
 # Find unused dependencies. Uses `cargo-udeps`
 udeps:  (cargo-install 'cargo-udeps')
     cargo +nightly udeps --workspace --all-features --all-targets
-
-# Refresh tests/visualize.qgz (QGIS) so its layer groups mirror every GeoJSON file under tests/
-update-visualize:  (assert-cmd 'python3')
-    python3 tests/update_visualize.py
 
 # Update all dependencies, including breaking changes. Requires nightly toolchain (install with `rustup install nightly`)
 update:
