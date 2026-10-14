@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/nyurik/map-tile-toolkit/compare/v0.2.0...v0.3.0) - 2026-10-14
+
+### Added
+
+- [**breaking**] lazy one-feature Slicer replaces the accumulating slicers ([#34](https://github.com/nyurik/map-tile-toolkit/pull/34))
+
+### Other
+
+- *(deps)* update hotpath requirement from 0.27.0 to 0.28.4 in the all-cargo-version-updates group ([#32](https://github.com/nyurik/map-tile-toolkit/pull/32))
+
 ## [0.2.0](https://github.com/nyurik/map-tile-toolkit/compare/v0.1.0...v0.2.0) - 2026-10-10
 
 ### Added
