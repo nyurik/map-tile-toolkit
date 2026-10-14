@@ -3,16 +3,17 @@
 //!
 //! For a structured input (some polylines, a slicer config, and an arbitrary probe tile):
 //!
-//! 1. **No panic, ever.** A single-tile `SlicerOne` on an arbitrary (possibly extreme) tile, and a
-//!    `SlicerAll`, must return `Ok`/`Err` — never panic or overflow. The fuzz build enables overflow
-//!    checks, so any unchecked arithmetic surfaces here as a crash.
-//! 2. Per polyline, when `SlicerAll` accepts it, the results hold up:
-//!    - **All-tiles round-trips through single-tile:** every tile's runs equal what a `SlicerOne`
-//!      bound to that tile produces.
+//! 1. **No panic, ever.** `Slicer::tile_line` on an arbitrary (possibly extreme) tile, and
+//!    `Slicer::line`, must return `Ok`/`Err` — never panic or overflow. The fuzz build enables
+//!    overflow checks, so any unchecked arithmetic surfaces here as a crash.
+//! 2. Per polyline, when `Slicer::line` returns no error, the results hold up:
+//!    - **All-tiles round-trips through single-tile:** every tile's runs equal what
+//!      `Slicer::tile_line` produces for that tile.
 //!    - **All-tiles == exhaustive per-tile scan** over the reachable span (skipped when a tiny
 //!      extent makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
-//! 3. Accumulating all polylines never panics, and a `Mosaic` fed those same tiles reassembles them:
+//! 3. Slicing all polylines as one multi-part feature never panics, and a `Mosaic` fed those same
+//!    tiles reassembles them:
 //!    every tile is accepted (a slicer's own tiles are self-consistent), the reassembled directed-edge
 //!    set equals the original input's, insertion order does not matter, and purging every tile empties
 //!    it.
@@ -29,7 +30,7 @@ use std::collections::{BTreeMap, HashSet};
 use arbitrary::Arbitrary;
 use geo_types::Coord;
 use libfuzzer_sys::fuzz_target;
-use map_tile_toolkit::{Mosaic, SlicerAll, SlicerOne, TileId};
+use map_tile_toolkit::{Mosaic, Slicer, TileId};
 
 /// Cap on tiles scanned by the exhaustive oracle per run (each scanned tile re-walks the polyline),
 /// so a tiny extent can't blow up time.
@@ -48,43 +49,40 @@ struct Input {
 
 type Runs = Vec<Vec<Coord<i32>>>;
 
-/// Flatten a `SlicerAll`'s accumulated features into `tile → combined runs`.
-fn drain_all(acc: &SlicerAll<Coord<i32>>) -> BTreeMap<TileId, Runs> {
-    acc.iter_tiles()
-        .map(|t| {
-            let runs = t
-                .iter_features()
-                .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
-                .collect();
-            (t.tile_id(), runs)
-        })
-        .collect()
+/// Slice a feature (its parts) into all touched tiles, grouped as `tile → runs` (part by part, in
+/// yield order). `None` if the slicer yields an error (overflowing input — a valid outcome).
+fn slice_all_map<L: AsRef<[Coord<i32>]>>(
+    extent: u32,
+    buffer: u16,
+    parts: &[L],
+) -> Option<BTreeMap<TileId, Runs>> {
+    let slicer = Slicer::new(extent, buffer).expect("extent validated");
+    let mut map: BTreeMap<TileId, Runs> = BTreeMap::new();
+    for part in parts {
+        for s in slicer.line(part.as_ref()).ok()? {
+            map.entry(s.tile()).or_default().push(s.run().to_vec());
+        }
+    }
+    Some(map)
 }
 
-/// Slice one polyline into all touched tiles, flattened to `tile → runs`. `None` if the slicer
-/// rejects it (oversized/overflowing — a valid outcome, not a bug).
-fn slice_all_map(extent: u32, buffer: u16, poly: &[Coord<i32>]) -> Option<BTreeMap<TileId, Runs>> {
-    let mut acc = SlicerAll::new(extent, buffer).expect("extent validated");
-    acc.add_feature(poly).ok()?;
-    Some(drain_all(&acc))
-}
-
-/// Clip one polyline to a single tile, flattened to its runs. Must succeed (callers only use tiles
-/// the all-tiles pass produced, or tiles inside the reachable span).
+/// Clip one polyline to a single tile, as its runs. Must succeed (callers only use tiles the
+/// all-tiles pass produced, or tiles inside the reachable span).
 fn slice_one_runs(extent: u32, buffer: u16, tile: TileId, poly: &[Coord<i32>]) -> Runs {
-    let mut one = SlicerOne::new(extent, buffer, tile).expect("extent validated");
-    one.add_feature(poly).expect("slice must succeed for an in-range tile");
-    one.iter_features()
-        .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
+    let slicer = Slicer::new(extent, buffer).expect("extent validated");
+    slicer
+        .tile_line(tile, poly)
+        .expect("an in-range tile")
+        .map(|s| s.run().to_vec())
         .collect()
 }
 
 fuzz_target!(|input: Input| {
     let extent = u32::from(input.extent);
     let buffer = input.buffer;
-    if SlicerAll::<Coord<i32>>::new(extent, buffer).is_err() {
+    let Ok(slicer) = Slicer::<Coord<i32>>::new(extent, buffer) else {
         return; // extent 0 is rejected — nothing to test
-    }
+    };
 
     // Bound the input size so each run stays fast.
     let polylines: Vec<Vec<Coord<i32>>> = input
@@ -105,19 +103,22 @@ fuzz_target!(|input: Input| {
 
     for poly in &polylines {
         // (1) A single-tile clip on an arbitrary tile must never panic (Ok or Err both fine).
-        if let Ok(mut one) = SlicerOne::new(extent, buffer, probe) {
-            let _ = one.add_feature(poly);
+        if let Ok(one) = slicer.tile_line(probe, poly) {
+            one.for_each(drop);
         }
 
-        // The all-tiles pass must never panic; Err is a valid outcome for oversized/overflowing input.
-        let Some(all) = slice_all_map(extent, buffer, poly) else {
+        // The all-tiles pass must never panic; Err is a valid outcome for overflowing input.
+        let Some(all) = slice_all_map(extent, buffer, &[poly]) else {
             continue;
         };
 
         // (2) Every all-tiles result round-trips through single-tile slicing (which must succeed).
         for (&tile, runs) in &all {
             let one = slice_one_runs(extent, buffer, tile, poly);
-            assert_eq!(&one, runs, "single-tile disagrees with all-tiles at {tile:?}");
+            assert_eq!(
+                &one, runs,
+                "single-tile disagrees with all-tiles at {tile:?}"
+            );
         }
 
         // (3) Exhaustive per-tile scan of the reachable span reproduces the all-tiles result, when
@@ -141,21 +142,20 @@ fuzz_target!(|input: Input| {
 
         // (4) Duplicating every vertex must not change the result.
         let duped: Vec<Coord<i32>> = poly.iter().flat_map(|&c| [c, c]).collect();
-        let all_duped = slice_all_map(extent, buffer, &duped)
+        let all_duped = slice_all_map(extent, buffer, &[&duped])
             .expect("duplicating vertices cannot make a valid polyline invalid");
-        assert_eq!(all, all_duped, "duplicating every vertex changed the result");
+        assert_eq!(
+            all, all_duped,
+            "duplicating every vertex changed the result"
+        );
     }
 
-    // (5) Accumulating all polylines never panics.
-    let mut acc = SlicerAll::new(extent, buffer).expect("extent validated");
-    for poly in &polylines {
-        if acc.add_feature(poly).is_err() {
-            return; // oversized/overflowing — nothing more to check
-        }
-    }
-    let map = drain_all(&acc);
+    // (5) Slicing all polylines as one multi-part feature never panics.
+    let Some(map) = slice_all_map(extent, buffer, &polylines) else {
+        return; // overflowing — nothing more to check
+    };
 
-    // (6) `Mosaic` reassembles a `SlicerAll`'s own tiles: self-consistent tiles never conflict, every
+    // (6) `Mosaic` reassembles the slicer's own tiles: self-consistent tiles never conflict, every
     // touched tile registers, and the reassembled global edges equal the original input's. Insertion
     // order must not matter (forward vs reversed give the same connectivity), and purging every tile
     // empties it.

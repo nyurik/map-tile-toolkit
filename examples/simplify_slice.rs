@@ -1,6 +1,6 @@
 //! Load a file of WKT polylines in Web Mercator (EPSG:3857), simplify each one for a target zoom
 //! level, project it onto the integer tile grid, and slice every geometry into its tiles with a
-//! [`SlicerAll`]. Built as a `cargo flamegraph` target: parsing/simplification/projection all happen
+//! [`Slicer`]. Built as a `cargo flamegraph` target: parsing/simplification/projection all happen
 //! up front, then a single tight loop does the slicing and [`black_box`]es the output so the profile
 //! shows only the slicing cost.
 //!
@@ -13,8 +13,8 @@
 //! * **project** — one tile at `<zoom>` spans `divisor = EARTH_CIRCUMFERENCE / 2^zoom` metres, cut
 //!   into `EXTENT` units, so the whole world is `2^zoom * EXTENT` integer units across. Web Mercator
 //!   metres map into that `i32` grid (Y flipped so tile row 0 is at the north edge).
-//! * **slice** — accumulate every geometry into one [`SlicerAll`] (all lines share a single tile
-//!   grid), then walk its tiles → features → polylines through [`black_box`].
+//! * **slice** — slice every geometry with one [`Slicer`] (all lines share a single tile grid),
+//!   reading each slice's tile and vertices through [`black_box`].
 
 #![allow(clippy::pedantic, reason = "profiling helper")]
 
@@ -23,7 +23,9 @@ use std::time::Instant;
 
 use geo::Simplify;
 use geo_types::{Coord, LineString};
-use map_tile_toolkit::SlicerAll;
+use std::collections::BTreeSet;
+
+use map_tile_toolkit::Slicer;
 use wkt::TryFromWkt;
 
 /// Web Mercator world circumference in metres (the EPSG:3857 axis range is `±HALF`).
@@ -93,28 +95,26 @@ fn main() {
 
     // --- slice: the hot loop the flamegraph is meant to show ---
     let t = Instant::now();
-    let mut tiles = 0u64;
     let mut skipped = 0u64;
-    // Accumulate every geometry into one slicer: all lines share a single tile grid, the way you would
-    // build a whole tiled dataset in one pass.
-    let mut acc = SlicerAll::new(EXTENT, 0).expect("valid slicer config");
-    for geom in &geoms {
-        if acc.add_feature(black_box(geom.0.as_slice())).is_err() {
-            skipped += 1;
-        }
-    }
-    // Read the accumulated tiles back through the borrowed iterators (no owned `Geometry`).
     let mut pieces = 0u64;
-    for tile in acc.iter_tiles() {
-        black_box(tile.tile_id());
-        for feature in tile.iter_features() {
-            for polyline in feature.iter_polylines() {
-                black_box(polyline);
-                pieces += 1;
+    let mut seen = BTreeSet::new();
+    // One slicer for every geometry: all lines share a single tile grid, the way you would build a
+    // whole tiled dataset in one pass. Each slice is read as it comes (nothing is accumulated).
+    let slicer = Slicer::new(EXTENT, 0).expect("valid slicer config");
+    for geom in &geoms {
+        let Ok(slices) = slicer.line(black_box(geom.0.as_slice())) else {
+            skipped += 1;
+            continue;
+        };
+        for slice in slices {
+            seen.insert(black_box(slice.tile()));
+            for v in slice.run() {
+                black_box(v);
             }
+            pieces += 1;
         }
-        tiles += 1;
     }
+    let tiles = seen.len();
     black_box(pieces);
     eprintln!(
         "sliced {} geometries into {tiles} tiles / {pieces} pieces ({skipped} skipped) in {:?}",

@@ -2,21 +2,19 @@
 //! attributes — an optional integer **id** and a map of key/value **properties** — then emit the
 //! per-tile pieces as GeoJSON.
 //!
-//! Feature attributes live at the *feature* level, not the vertex level, so they ride on the
-//! slicer's second generic axis `A` (here [`Attrs`]) rather than in the vertex payload. You attach
-//! one with [`add_feature_with`], and read it back per tile-piece with [`FeatureView::attr`] — no
-//! per-vertex bookkeeping, and nothing to pay when you don't need it (`A` defaults to the zero-sized
-//! `()`).
+//! Feature attributes live at the *feature* level, not the vertex level. The [`Slicer`] takes one
+//! feature at a time, so the caller simply pairs every slice it yields with the attributes of the
+//! feature being sliced — no per-vertex bookkeeping, and nothing for the slicer to carry.
 //!
 //! A feature that gets split is handled two complementary ways, both shown here:
-//! * **within one tile** — where the line left and re-entered, a `FeatureView` yields several runs,
-//!   emitted as a single **`MultiLineString`** feature;
+//! * **within one tile** — where the line left and re-entered, the tile gets several runs (separate
+//!   slices, grouped here by tile) and they are emitted as a single **`MultiLineString`** feature;
 //! * **across tiles** — the feature reappears in each tile it touches, its attributes **duplicated**
 //!   onto every piece.
 //!
-//! The two generic axes are orthogonal: to also carry a **per-vertex** M value, change the vertex
-//! type from `Coord<i32>` to [`Measured<M>`](map_tile_toolkit::Measured) — the attribute handling
-//! below stays exactly the same.
+//! To also carry a **per-vertex** M value, change the vertex type from `Coord<i32>` to
+//! [`Measured<M>`](map_tile_toolkit::Measured) — the attribute handling below stays exactly the
+//! same.
 //!
 //! Run `cargo run --example mvt_features` to print a GeoJSON `FeatureCollection` (global
 //! coordinates) you can drop into <https://geojson.io>.
@@ -28,11 +26,11 @@ use std::collections::BTreeMap;
 use geo_types::Coord;
 use geojson::feature::Id;
 use geojson::{Feature, FeatureCollection, GeometryValue, Position};
-use map_tile_toolkit::{SlicerAll, TileId};
+use map_tile_toolkit::{Slicer, TileId};
 use serde_json::{Map, json};
 
-/// A feature's non-geometric content: the MVT optional id and its string properties. This is the
-/// slicer's per-feature attribute type `A`; it only has to be `Clone`.
+/// A feature's non-geometric content: the MVT optional id and its string properties. The slicer
+/// never sees it; the caller pairs it with each slice of the feature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Attrs {
     id: Option<u64>,
@@ -59,16 +57,9 @@ fn main() {
 
     let inputs = sample_inputs();
 
-    // --- build: one feature per input line, each carrying its attributes ---
-    let mut slicer = SlicerAll::<Coord<i32>, Attrs>::new(EXTENT, 0).expect("valid config");
-    for input in &inputs {
-        slicer
-            .add_feature_with(&input.line, input.attrs.clone())
-            .expect("valid geometry");
-    }
-
-    // --- read back: every per-tile piece already knows its feature's attributes ---
-    let tiled = tile_features(&slicer, EXTENT);
+    // --- slice: one feature at a time, each slice paired with that feature's attributes ---
+    let slicer = Slicer::<Coord<i32>>::new(EXTENT, 0).expect("valid config");
+    let tiled = tile_features(slicer, &inputs, EXTENT);
 
     // --- emit: one GeoJSON feature per tiled piece (LineString, or MultiLineString if split) ---
     let features: Vec<Feature> = tiled.iter().map(to_geojson).collect();
@@ -83,30 +74,33 @@ fn main() {
         "{} input features → {} tiled pieces across {} tiles",
         inputs.len(),
         tiled.len(),
-        slicer.len(),
+        tiled
+            .iter()
+            .map(|t| t.tile)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
     );
 }
 
-/// Walk the sliced tiles and rebuild every per-tile feature, taking its attributes straight from the
-/// [`FeatureView`](map_tile_toolkit::FeatureView) — no side table, no per-vertex handles.
-fn tile_features(slicer: &SlicerAll<Coord<i32>, Attrs>, extent: u32) -> Vec<TiledFeature> {
-    let mut out = Vec::new();
-    for tile in slicer.iter_tiles() {
-        let id = tile.tile_id();
-        let origin = id.origin(extent).expect("tile in range");
-        for view in tile.iter_features() {
-            let runs = view
-                .iter_polylines()
-                .map(|run| run.iter().map(|&c| c + origin).collect())
-                .collect();
-            out.push(TiledFeature {
-                tile: id,
-                attrs: view.attr().clone(),
-                runs,
-            });
+/// Slice every input and rebuild the per-tile features: a feature's runs in one tile become one
+/// piece carrying that feature's attributes, ordered by tile, then input order.
+fn tile_features(slicer: Slicer<Coord<i32>>, inputs: &[Input], extent: u32) -> Vec<TiledFeature> {
+    let mut pieces: BTreeMap<(TileId, usize), TiledFeature> = BTreeMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        for slice in slicer.line(&input.line).expect("valid geometry") {
+            let origin = slice.tile().origin(extent).expect("tile in range");
+            pieces
+                .entry((slice.tile(), index))
+                .or_insert_with(|| TiledFeature {
+                    tile: slice.tile(),
+                    attrs: input.attrs.clone(),
+                    runs: Vec::new(),
+                })
+                .runs
+                .push(slice.run().iter().map(|c| c + origin).collect());
         }
     }
-    out
+    pieces.into_values().collect()
 }
 
 /// Convert one tiled piece to a GeoJSON feature: a `LineString` for a single run or a

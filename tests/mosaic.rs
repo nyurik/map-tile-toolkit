@@ -7,9 +7,8 @@
 //! once. It runs at **both** buffer sizes: flush tiles (buffer 0) and overlapping tiles (buffer 5).
 //! A buffer only duplicates near-edge segments into more tiles, so rebasing (`local + tile·extent`)
 //! must collapse those duplicates back onto the same global edges — either way the mosaic recovers
-//! the exact same original geometry. The extent is chosen coarse enough that the whole fixture set
-//! lands in a handful of tiles, so all permutations stay enumerable; an assertion trips loudly if
-//! that count grows past a safe bound.
+//! the exact same original geometry. Up to seven tiles, every insertion order is tried; a larger
+//! fixture set is checked under a deterministic spread of orders (identity, reverse, every rotation).
 //!
 //! Reassembly is compared by **directed-edge set**: the mosaic re-chains the geometry by connectivity,
 //! so a self-touching path or a shared junction may come back split/joined differently than the input
@@ -23,7 +22,7 @@ use std::path::{Path, PathBuf};
 use geo_types::Coord;
 use map_tile_toolkit::{Mosaic, TileError, TileId};
 
-use crate::support::{Cfg, permutations};
+use crate::support::{Cfg, orders};
 
 mod support;
 
@@ -84,7 +83,7 @@ fn validate_mosaic(label: &str, cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) {
     assert!(!tiles.is_empty(), "{label}: fixtures produced no tiles");
 
     let mut canonical: Option<Vec<Vec<Coord<i32>>>> = None;
-    for order in permutations(tiles.len()) {
+    for order in orders(tiles.len(), 7) {
         let mut mosaic = Mosaic::new(cfg.extent).expect("valid config");
         for &i in &order {
             let (tile, runs) = &tiles[i];
@@ -118,29 +117,21 @@ fn validate_mosaic(label: &str, cfg: &Cfg, polylines: &[Vec<Coord<i32>>]) {
     );
 }
 
-// --- Behaviors this valid-data file doesn't cover: payload conflicts live in mvalue.rs, membership
+// --- Behaviors this valid-data file doesn't cover: payload conflicts live in payload.rs, membership
 // conflicts (inconsistent tiles) in mosaic_bad.rs. ---
 
 #[test]
-fn invalid_extent_is_rejected() {
-    assert_eq!(
-        Mosaic::<Coord<i32>>::new(0).err(),
-        Some(TileError::InvalidExtent)
-    );
-    assert_eq!(
-        Mosaic::<Coord<i32>>::new(u32::MAX).err(),
-        Some(TileError::InvalidExtent)
-    );
-}
+fn bad_config_and_far_tiles_are_errors_and_an_empty_mosaic_is_empty() {
+    for extent in [0, u32::MAX] {
+        assert_eq!(
+            Mosaic::<Coord<i32>>::new(extent).err(),
+            Some(TileError::InvalidExtent)
+        );
+    }
+    let empty = Mosaic::<Coord<i32>>::new(25).expect("valid config");
+    assert_eq!(empty.iter_features().count(), 0);
 
-#[test]
-fn empty_mosaic_yields_no_features() {
-    let mosaic = Mosaic::<Coord<i32>>::new(25).expect("valid config");
-    assert_eq!(mosaic.iter_features().count(), 0);
-}
-
-#[test]
-fn far_tile_overflows_instead_of_panicking() {
+    // A tile whose global frame leaves `i32` is an error, not a panic, and changes nothing.
     let mut mosaic = Mosaic::new(4096).expect("valid config");
     let run = vec![Coord { x: 0, y: 0 }, Coord { x: 1, y: 0 }];
     let bad = mosaic.add(TileId::new(i32::MAX, 0), &[run]);

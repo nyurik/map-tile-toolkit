@@ -1,21 +1,19 @@
-//! Fuzz the all-tiles polygon slicer: it must **never panic**, and every `Ok` result must agree with
-//! the single-tile slicer, tile by tile.
+//! Fuzz the polygon slicer: it must **never panic**, and every feature it slices without error must
+//! agree with the single-tile slicer, tile by tile.
 //!
 //! For a structured input (up to two multipolygon features of arbitrary — often self-intersecting or
 //! overlapping — rings, and a slicer config):
 //!
-//! 1. **No panic, ever.** `PolygonSlicerAll::add_feature` returns `Ok`/`Err`; the fuzz build enables
-//!    overflow checks, so unchecked arithmetic surfaces as a crash.
-//! 2. For every feature it accepts, over the whole reachable tile span (skipped when the span is too
-//!    large to scan cheaply):
-//!    - every **edge tile** holds exactly what a `PolygonSlicerOne` bound to it yields for each
-//!      polygon, in order;
-//!    - every **fill-run** tile holds exactly what the single-tile slicer yields there too, once each
-//!      run's fill ring is placed in it (in polygon order), and no tile is both;
-//!    - every **other** tile is one the single-tile slicer leaves empty.
+//! 1. **No panic, ever.** `Slicer::polygon` yields `Ok`/`Err` items; the fuzz build enables overflow
+//!    checks, so unchecked arithmetic surfaces as a crash.
+//! 2. For every feature sliced without error, over the whole reachable tile span (skipped when the
+//!    span is too large to scan cheaply), every tile holds exactly what `Slicer::tile_polygon`
+//!    yields there: its edge-tile pieces and its fill runs' fill rings, in polygon order. Each
+//!    polygon lists a tile once, never as both an edge tile and a fill tile.
 //!
-//!    The second feature checks that features stored one after another read back independently.
-//! 3. Re-adding after `clear()` reproduces the same output.
+//!    The second feature checks that features sliced one after another, by the same slicer, read
+//!    back independently.
+//! 3. Slicing the same features again reproduces the same output.
 //!
 //! Coordinates start as `i8`, so each run stays cheap, then are scaled by a power of two (with the
 //! extent, so the tile layout keeps its shape) and moved by an offset, so the crossing and box math
@@ -28,7 +26,7 @@ use std::collections::BTreeMap;
 use arbitrary::Arbitrary;
 use geo_types::Coord;
 use libfuzzer_sys::fuzz_target;
-use map_tile_toolkit::{PolygonSlicerAll, PolygonSlicerOne, TileId};
+use map_tile_toolkit::{PolygonSlice, Slicer, TileId};
 
 /// Cap on tiles scanned by the single-tile oracle per feature.
 const SCAN_CAP: i64 = 2_048;
@@ -53,66 +51,65 @@ type Rings = Vec<Vec<Coord<i32>>>;
 /// Per polygon, its rings.
 type Pieces = Vec<Rings>;
 
-/// One feature's output: its edge tiles' pieces and its filled tiles' fill rings, as pieces.
-type Output = (BTreeMap<TileId, Pieces>, BTreeMap<TileId, Pieces>);
+/// One feature's output: what every tile holds, edge pieces and fill rings, in polygon order.
+type Output = BTreeMap<TileId, Pieces>;
 
-/// What the single-tile slicer yields for `tile`, or `None` if the tile itself is out of range.
-fn one_tile(polygons: &Polygons, extent: u32, buffer: u16, tile: TileId) -> Option<Pieces> {
-    let mut one = PolygonSlicerOne::<Coord<i32>>::new(extent, buffer, tile).expect("config");
+/// What the single-tile slicer yields for `tile`, or `None` if it errors (the tile itself, or a
+/// corner or vertex, out of the `i32` range).
+fn one_tile(slicer: &mut Slicer<Coord<i32>>, polygons: &Polygons, tile: TileId) -> Option<Pieces> {
+    let mut out = Vec::new();
     for rings in polygons {
-        let Some((exterior, holes)) = rings.split_first() else {
-            continue;
-        };
-        let holes: Vec<&[Coord<i32>]> = holes.iter().map(Vec::as_slice).collect();
-        one.add_feature(exterior, &holes).ok()?;
+        if let Some(piece) = slicer.tile_polygon(tile, rings).ok()? {
+            out.push(piece.rings().map(|r| r.to_vec()).collect());
+        }
     }
-    Some(
-        one.iter_features()
-            .map(|f| f.iter_rings().map(|r| r.vertices().to_vec()).collect())
-            .collect(),
-    )
+    Some(out)
 }
 
-fn output(all: &PolygonSlicerAll<Coord<i32>>) -> Vec<Output> {
-    all.iter_features()
-        .map(|f| {
-            let mut tiles = BTreeMap::new();
-            let mut fills: BTreeMap<TileId, Vec<(u32, Rings)>> = BTreeMap::new();
-            for t in f.iter_tiles() {
-                let pieces = t
-                    .iter_polygons()
-                    .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-                    .collect();
-                assert!(
-                    tiles.insert(t.tile_id(), pieces).is_none(),
-                    "tile listed twice"
-                );
-            }
-            for run in f.iter_fill_runs() {
-                assert!(!run.x.is_empty(), "empty fill run");
-                let ring = f.fill_ring(&run).to_vec();
-                for x in run.x.clone() {
-                    let tile = TileId::new(x, run.y);
-                    assert!(!tiles.contains_key(&tile), "{tile:?} is both edge and fill");
-                    let polys = fills.entry(tile).or_default();
+/// One multipolygon feature sliced polygon by polygon into every tile, checking that each polygon
+/// lists a tile once; `None` if the slicer yields an error (a valid outcome near the `i32` limits).
+fn output(slicer: &mut Slicer<Coord<i32>>, polygons: &Polygons) -> Option<Output> {
+    let mut tiles: BTreeMap<TileId, Vec<(u32, Rings)>> = BTreeMap::new();
+    for (polygon, rings) in (0_u32..).zip(polygons) {
+        let mut slices = slicer.polygon(rings).ok()?;
+        let mut runs = Vec::new();
+        while let Some(slice) = slices.next() {
+            match slice.ok()? {
+                PolygonSlice::Piece(p) => {
+                    let polys = tiles.entry(p.tile()).or_default();
                     assert!(
-                        polys.iter().all(|(p, _)| *p != run.polygon),
-                        "{tile:?} filled twice by polygon {}",
-                        run.polygon
+                        polys.iter().all(|(q, _)| *q != polygon),
+                        "{:?} listed twice by polygon {polygon}",
+                        p.tile(),
                     );
-                    polys.push((run.polygon, vec![ring.clone()]));
+                    polys.push((polygon, p.rings().map(|r| r.to_vec()).collect()));
                 }
+                PolygonSlice::Run(run) => runs.push(run),
             }
-            let fills = fills
-                .into_iter()
-                .map(|(tile, mut polys)| {
-                    polys.sort_by_key(|(p, _)| *p);
-                    (tile, polys.into_iter().map(|(_, rings)| rings).collect())
-                })
-                .collect();
-            (tiles, fills)
-        })
-        .collect()
+        }
+        for run in runs {
+            assert!(!run.x.is_empty(), "empty fill run");
+            let ring = slices.fill_ring(&run).to_vec();
+            for x in run.x.clone() {
+                let polys = tiles.entry(TileId::new(x, run.y)).or_default();
+                assert!(
+                    polys.iter().all(|(q, _)| *q != polygon),
+                    "tile ({x}, {}) is both edge and fill, or filled twice, by polygon {polygon}",
+                    run.y,
+                );
+                polys.push((polygon, vec![ring.clone()]));
+            }
+        }
+    }
+    Some(
+        tiles
+            .into_iter()
+            .map(|(tile, mut polys)| {
+                polys.sort_by_key(|(q, _)| *q);
+                (tile, polys.into_iter().map(|(_, rings)| rings).collect())
+            })
+            .collect(),
+    )
 }
 
 /// Scale and move one feature's coordinates, dropping vertices that leave `i32`.
@@ -142,7 +139,8 @@ fn place(polygons: &[Vec<Vec<(i8, i8)>>], scale: i64, origin: (i32, i32)) -> Pol
 }
 
 /// Check one accepted feature's output against the single-tile slicer over its reachable span.
-fn check(polygons: &Polygons, (tiles, fills): &Output, extent: u32, buffer: u16) {
+fn check(slicer: &mut Slicer<Coord<i32>>, polygons: &Polygons, tiles: &Output) {
+    let (extent, buffer) = (slicer.extent(), slicer.buffer());
     let coords = polygons.iter().flatten().flatten();
     let (Some(min_x), Some(max_x)) = (
         coords.clone().map(|c| c.x).min(),
@@ -168,27 +166,16 @@ fn check(polygons: &Polygons, (tiles, fills): &Output, extent: u32, buffer: u16)
                 continue;
             };
             let id = TileId::new(tx, ty);
-            let Some(one) = one_tile(polygons, extent, buffer, id) else {
+            let Some(one) = one_tile(slicer, polygons, id) else {
                 // A padding tile past the `i32` limits: the all-tiles slicer cannot have used it.
-                assert!(
-                    !tiles.contains_key(&id) && !fills.contains_key(&id),
-                    "{id:?} is out of range"
-                );
+                assert!(!tiles.contains_key(&id), "{id:?} is out of range");
                 continue;
             };
-            if let Some(pieces) = tiles.get(&id) {
-                assert_eq!(
-                    pieces, &one,
-                    "edge tile {id:?} disagrees with the single-tile slicer"
-                );
-            } else if let Some(pieces) = fills.get(&id) {
-                assert_eq!(
-                    pieces, &one,
-                    "fill tile {id:?} disagrees with the single-tile slicer"
-                );
-            } else {
-                assert!(one.is_empty(), "tile {id:?} missing: {one:?}");
-            }
+            let got = tiles.get(&id).cloned().unwrap_or_default();
+            assert_eq!(
+                got, one,
+                "tile {id:?} disagrees with the single-tile slicer"
+            );
         }
     }
 }
@@ -199,7 +186,7 @@ fuzz_target!(|input: Input| {
         return;
     };
     let buffer = u16::from(input.buffer);
-    let Ok(mut all) = PolygonSlicerAll::<Coord<i32>>::new(extent, buffer) else {
+    let Ok(mut slicer) = Slicer::<Coord<i32>>::new(extent, buffer) else {
         return; // invalid config — rejected, nothing to test
     };
     let features: Vec<Polygons> = input
@@ -209,25 +196,14 @@ fuzz_target!(|input: Input| {
         .map(|f| place(f, scale, input.origin))
         .collect();
 
-    // A feature is recorded only if it reaches some tile, so pair the outputs with what was kept.
-    let mut kept = Vec::new();
-    for polygons in &features {
-        let before = all.len();
-        if all.add_feature(polygons).is_ok() && all.len() > before {
-            kept.push(polygons);
+    // One slicer for every feature, as a bulk tile generator uses it.
+    let outputs: Vec<Option<Output>> = features.iter().map(|f| output(&mut slicer, f)).collect();
+    let again: Vec<Option<Output>> = features.iter().map(|f| output(&mut slicer, f)).collect();
+    assert_eq!(again, outputs, "slicing again changed the result");
+
+    for (polygons, out) in features.iter().zip(&outputs) {
+        if let Some(out) = out {
+            check(&mut slicer, polygons, out);
         }
-    }
-    let outputs = output(&all);
-    assert_eq!(outputs.len(), kept.len());
-
-    all.clear();
-    for polygons in &kept {
-        all.add_feature(*polygons)
-            .expect("the same feature slices again");
-    }
-    assert_eq!(output(&all), outputs, "clear() changed the result");
-
-    for (polygons, out) in kept.iter().zip(&outputs) {
-        check(polygons, out, extent, buffer);
     }
 });

@@ -2,7 +2,7 @@
 //! of the polygon slicer.
 //!
 //! One test per polygon fixture (`tests/polygons/fixtures/*.geojson`): slice the fixture's polygons
-//! into per-tile rings with [`PolygonSlicerOne`] across the padded tile span, then reassemble them with
+//! into per-tile rings with [`Slicer::tile_polygon`] across the padded tile span, then reassemble them with
 //! [`PolygonMosaic`] under many tile-insertion orders. Every order must succeed (a slicer's own tiles
 //! are self-consistent, so none conflict) and reassemble the **same** rings, whose directed-edge set
 //! must equal the input polygons' edge set — proving the mosaic dropped the synthetic clip-boundary
@@ -24,11 +24,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use geo_types::Coord;
-use map_tile_toolkit::{PolygonMosaic, PolygonSlicerOne, TileError, TileId};
+use map_tile_toolkit::{PolygonMosaic, Slicer, TileError, TileId};
 
 mod support;
 
-use crate::support::{EXTENT, FixturePolygon, permutations};
+use crate::support::{EXTENT, FixturePolygon, orders};
 
 mod files {
     use test_each_file::test_each_path;
@@ -58,16 +58,23 @@ fn edge_set(rings: &[Vec<Coord<i32>>]) -> HashSet<(Coord<i32>, Coord<i32>)> {
     set
 }
 
-/// The rings a single-tile slicer produced, flattened across its features (exterior + holes) in the
+/// The rings `polygons` clip to in `tile`, flattened across its pieces (exterior + holes) in the
 /// tile-local frame — exactly what a caller collects from one tile's output to feed the mosaic.
-fn tile_rings(slicer: &PolygonSlicerOne<Coord<i32>>) -> Vec<Vec<Coord<i32>>> {
-    let mut rings = Vec::new();
-    for f in slicer.iter_features() {
-        for r in f.iter_rings() {
-            rings.push(r.vertices().to_vec());
-        }
+fn tile_rings(polygons: &[FixturePolygon], buffer: u16, tile: TileId) -> Vec<Vec<Coord<i32>>> {
+    let mut slicer = Slicer::<Coord<i32>>::new(EXTENT, buffer).expect("valid config");
+    support::tile_polygons(&mut slicer, polygons, tile)
+        .expect("clip")
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// One polygon with no holes.
+fn shell(exterior: Vec<Coord<i32>>) -> FixturePolygon {
+    FixturePolygon {
+        exterior,
+        holes: Vec::new(),
     }
-    rings
 }
 
 /// Slice all `polygons` into per-tile ring lists (local frame) across the padded span, keeping only
@@ -79,34 +86,11 @@ fn slice_tiles(polygons: &[FixturePolygon], buffer: u16) -> Vec<(TileId, Vec<Vec
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let tile = TileId::new(x, y);
-            let mut slicer =
-                PolygonSlicerOne::<Coord<i32>>::new(EXTENT, buffer, tile).expect("valid config");
-            for p in polygons {
-                let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
-                slicer.add_feature(&p.exterior, &holes).expect("clip");
-            }
-            let rings = tile_rings(&slicer);
+            let rings = tile_rings(polygons, buffer, tile);
             if !rings.is_empty() {
                 out.push((tile, rings));
             }
         }
-    }
-    out
-}
-
-/// Tile-insertion orders to try: every permutation for a small set (exhaustive), else a deterministic
-/// spread — identity, reverse, and every rotation — for larger sets where `n!` is impractical.
-fn orders(n: usize) -> Vec<Vec<usize>> {
-    if n <= 6 {
-        return permutations(n);
-    }
-    let base: Vec<usize> = (0..n).collect();
-    let mut out = vec![base.clone()];
-    let mut rev = base;
-    rev.reverse();
-    out.push(rev);
-    for r in 1..n {
-        out.push((0..n).map(|i| (i + r) % n).collect());
     }
     out
 }
@@ -126,7 +110,7 @@ fn reassemble_fixture([path]: [&Path; 1]) {
             "{stem} (buffer {buffer}) produced no tiles"
         );
 
-        for order in orders(tiles.len()) {
+        for order in orders(tiles.len(), 6) {
             let mut mosaic =
                 PolygonMosaic::<Coord<i32>>::new(EXTENT, buffer).expect("valid config");
             for &i in &order {
@@ -162,7 +146,7 @@ fn ring(pts: &[(i32, i32)]) -> Vec<Coord<i32>> {
 }
 
 #[test]
-fn invalid_config_rejected() {
+fn invalid_config_is_rejected_and_an_empty_mosaic_is_empty() {
     assert_eq!(
         PolygonMosaic::<Coord<i32>>::new(0, 0).err(),
         Some(TileError::InvalidExtent)
@@ -171,10 +155,6 @@ fn invalid_config_rejected() {
         PolygonMosaic::<Coord<i32>>::new(10, 5).err(),
         Some(TileError::BufferTooLarge)
     );
-}
-
-#[test]
-fn empty_mosaic_yields_no_features() {
     let m = PolygonMosaic::<Coord<i32>>::new(EXTENT, 0).expect("valid config");
     assert!(m.is_empty());
     assert_eq!(m.iter_features().count(), 0);
@@ -186,9 +166,7 @@ fn interior_fill_tile_contributes_nothing() {
     // mosaic drops every synthetic vertex, so the tile records no original edge (a reassembled
     // polygon's interior is implied by its winding, not by fill tiles).
     let ext = ring(&[(-10, -10), (80, -10), (80, 80), (-10, 80), (-10, -10)]);
-    let mut s = PolygonSlicerOne::<Coord<i32>>::new(EXTENT, 0, TileId::new(1, 1)).expect("config");
-    s.add_feature(&ext, &[]).expect("clip");
-    let rings = tile_rings(&s);
+    let rings = tile_rings(&[shell(ext)], 0, TileId::new(1, 1));
     assert!(
         !rings.is_empty(),
         "the fill tile does carry (synthetic) geometry"
@@ -209,10 +187,8 @@ fn inconsistent_tiles_conflict() {
     // Tile (0,0) carries a ring reaching into tile (1,0)'s core (its right edge sits at x = 35 ∈
     // [25,49]); tile (1,0) is then given a disjoint ring that does not corroborate that edge — a
     // membership conflict, leaving the mosaic unchanged.
-    let mut s0 = PolygonSlicerOne::<Coord<i32>>::new(EXTENT, 0, TileId::new(0, 0)).expect("config");
-    s0.add_feature(&ring(&[(15, 5), (35, 5), (35, 15), (15, 15), (15, 5)]), &[])
-        .expect("clip");
-    let rings0 = tile_rings(&s0);
+    let square = shell(ring(&[(15, 5), (35, 5), (35, 15), (15, 15), (15, 5)]));
+    let rings0 = tile_rings(&[square], 0, TileId::new(0, 0));
 
     let mut m = PolygonMosaic::<Coord<i32>>::new(EXTENT, 0).expect("valid config");
     m.add(TileId::new(0, 0), &rings0).expect("add");

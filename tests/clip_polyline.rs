@@ -122,40 +122,6 @@ fn save_big_geometry() {
     std::fs::write("tests/polylines/fixtures/big-geometry.geojson", bytes).expect("writes");
 }
 
-/// The single-pass `slice_all` must still agree with per-tile `slice` on a large geometry that
-/// touches many tiles — the case the fixtures are too small to exercise (and where the old
-/// re-clip-per-tile algorithm did `O(vertices × tiles)` work). Not snapshotted (it would be huge);
-/// this only guards the batch/per-tile equivalence at scale, at both buffer sizes.
-#[test]
-fn big_geometry_batch_matches_per_tile() {
-    let geom = support::polylines_of(&support::big_polyline());
-
-    for (slicer, _) in &slicers() {
-        let all: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> =
-            support::slice_all_runs(slicer, &geom).into_iter().collect();
-        let (lo, hi) = padded_tile_span(&geom);
-        let mut one = BTreeMap::new();
-        for y in lo.y..=hi.y {
-            for x in lo.x..=hi.x {
-                let tile = TileId::new(x, y);
-                let piece = support::slice_tile_runs(slicer, &geom, tile);
-                if !piece.is_empty() {
-                    one.insert(tile, piece);
-                }
-            }
-        }
-        assert_eq!(
-            all, one,
-            "big-geometry batch and per-tile slicing disagree (buffer {})",
-            slicer.buffer
-        );
-        assert!(
-            all.len() > 100,
-            "expected the big geometry to touch many tiles"
-        );
-    }
-}
-
 /// The shared `BIG_CONFIGS` slicers must slice the big polyline into the documented number of
 /// tiles: `single` → one, `few` → a 2×2 grid of four, `multi` → many. Guards the extent choices
 /// the benchmarks and the `profile` example rely on.
@@ -175,7 +141,7 @@ fn big_config_tile_counts() {
 
 /// A z14-scale diagonal — one segment across 16384 × 16384 tiles of extent 4096 — slices (routing
 /// charges the tiles it touches, not its 2^28-tile bounding box), and every sampled output tile and
-/// each of its neighbours agrees with a per-tile [`SlicerOne`](map_tile_toolkit::SlicerOne) clip.
+/// each of its neighbours agrees with a per-tile [`Slicer::tile_line`](map_tile_toolkit::Slicer::tile_line) clip.
 #[test]
 fn long_diagonal_slices_at_z14() {
     const N: i32 = 1 << 14;

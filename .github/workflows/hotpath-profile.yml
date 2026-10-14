@@ -21,7 +21,7 @@ defaults:
 
 env:
   # The `examples/profile.rs` case to profile and how many iterations to run it for. `big-all-multi`
-  # is the primary SlicerAll path (many tiles); allocation counts are deterministic, timing is not.
+  # is the primary `Slicer::line` path (many tiles); allocation counts are deterministic, timing is not.
   CASE: big-all-multi
   ITERS: '5000'
 

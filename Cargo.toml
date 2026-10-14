@@ -33,6 +33,7 @@ geojson = { version = "1.0.0", features = ["geo-types"] }
 gungraun = "0.20"
 insta = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
+stats_alloc = "0.1"
 test_each_file = "0.3.7"
 wkt = "0.14"
 

@@ -1,20 +1,20 @@
 # Polygon slicer — design
 
-Status: **implemented** (all phases of §13). This captures the agreed algorithm for
-`PolygonSlicerOne` / `PolygonSlicerAll` and the polygon path through `Mosaic`, so the code can be
-reviewed against it; where the implementation refined the plan, the section says so.
+Status: **implemented**. This captures the algorithm behind `Slicer::polygon` / `Slicer::tile_polygon`
+and the polygon path through `Mosaic`, so the code can be reviewed against it.
+§4 describes the public API and §8 the row-by-row scan that implements §5–§6; the rest is the
+clipping algorithm itself. Below, `One` is `Slicer::tile_polygon` and `All` is `Slicer::polygon`.
 
 ## 1. Goal & constraints
 
 Clip integer **polygons** (an exterior ring + zero or more holes) into per-tile pieces on the same
-integer tile grid as the polyline slicers, and let `Mosaic` reassemble them. Same house rules as the
+integer tile grid as line slicing, and let `Mosaic` reassemble them. Same house rules as the
 rest of the crate: edition 2024, MSRV 1.88, `unsafe_code = "forbid"`, **never panics** (bad input →
 `TileError`), integer-only (no floats), and **keep original vertices** — the slicer never cuts a new
 vertex at the tile edge.
 
-Two axes carry through unchanged from the polyline slicers:
-- **per-vertex payload** `V: Vertex` (default `Coord<i32>`; `Measured<M>` for M-values / ids),
-- **per-feature attribute** `A` (default `()`, zero-cost; `add_feature_with`).
+The **per-vertex payload** `V: Vertex` (default `Coord<i32>`; `Measured<M>` for M-values / ids)
+carries through unchanged from the polyline slicer; per-feature attributes stay with the caller.
 
 ### The unavoidable tension
 
@@ -47,12 +47,12 @@ invariant that lets `Mosaic` re-derive synthetic-ness geometrically with no tag 
 ## 3. Keep-rule (reuse the polyline rule verbatim)
 
 A ring vertex is **kept** iff it is inside `B`, or an incident edge intersects `B` — i.e. exactly the
-condition in `clip_polyline::segment_intersects` already used by `Grid::slice_one`/`route`. Everything
+condition in `clip_polyline::segment_intersects` already used by line slicing (`Slicer::line`). Everything
 else (deep-outside vertices) is dropped. So the "keep the first vertex after crossing the border"
 rule is not new code: it *is* the polyline keep-rule, applied to each ring.
 
 Kept originals therefore form the same **arcs** (maximal keep-runs, each ≥ 2 vertices) that
-`slice_one` already returns. The only polygon-specific work is **closing** the arcs of one ring back
+line slicing already yields as runs. The only polygon-specific work is **closing** the arcs of one ring back
 into one ring by bridging the dropped gaps (§5) instead of emitting them as separate runs.
 
 Key structural fact: **one input ring → one output ring per tile.** Walking a closed ring yields
@@ -63,31 +63,31 @@ exterior, hole stays hole. A ring that is entirely dropped simply doesn't appear
 ## 4. Public shape
 
 ```
-PolygonSlicerOne<V = Coord<i32>, A = ()>   // clips polygons to one fixed tile
-PolygonSlicerAll<V = Coord<i32>, A = ()>   // slices multipolygon features into every tile
+Slicer<V = Coord<i32>>::polygon(&mut self, &[R])              // every tile the polygon reaches
+Slicer<V = Coord<i32>>::tile_polygon(&mut self, TileId, &[R]) // its piece in one tile, if any
 ```
 
-- `add_feature(..)` (only when `A = ()`), `add_feature_with(.., attr)` — mirrors the polyline
-  slicers; atomic on error.
-- Input: rings as `&[V]` slices (open or closed), so `Measured<M>` works (`geo-types` can't hold a
-  payload). `PolygonSlicerOne` takes one polygon, `(exterior, &[holes])`. `PolygonSlicerAll` takes one
-  **multipolygon** feature: an iterator of polygons, each an iterator of rings (exterior first), e.g.
-  `[[&exterior[..], &hole[..]]]`.
-- Read-back: both slicers hand out the same `PolygonView` per clipped polygon — `attr()` and
-  `iter_rings()` (`RingView`: `vertices()` closed, tile-local; `is_hole()`). `PolygonSlicerOne::
-  iter_features()` yields one per feature that reaches the tile. `PolygonSlicerAll::iter_features()`
-  → per feature `attr()`, `iter_tiles()` (edge tiles, row-major) → `iter_polygons()`, and
-  `iter_fill_runs()` → `FillRun { y, x: Range<i32>, polygon }` with `fill_ring(&run)` (§6). Views are `Copy`. Feature-major rather than the polyline
-  slicers' tile-major order: fill runs belong to one feature and span many tiles, and append-only
-  per-feature storage needs no tile index.
-- `signed_area_2x(ring) -> i128` (§9) is public: the slicers preserve input winding, so a caller
+- Input: one **polygon** as a slice of rings (exterior first, then holes) of `&[V]`-like rings, open
+  or closed, so `Measured<M>` works (`geo-types` can't hold a payload). The input is read in place.
+  A multipolygon is sliced one polygon at a time by the caller, who has to keep each feature's
+  attributes with its slices anyway; so a tile gets one piece per polygon, and where polygons of an
+  (invalid) multipolygon overlap, the caller sees one piece each.
+- Output comes from a **lending iterator** (`while let Some(slice) = slices.next()`): a
+  `PolygonPiece` (the exterior and the holes reaching one tile, rings closed, read tile-local via
+  `rings()`) borrows one reused buffer until the next call. `polygon` yields a
+  `FillRun { y, x: Range<i32> }` for each row span of tiles the polygon covers entirely, with
+  `fill_ring(&run)` (an owned `[V; 5]`) the one ring `tile_polygon` yields in each of them (§6);
+  `tile_polygon` returns the piece directly, a covered tile as a piece holding its fill ring.
+- `polygon` bounds the polygon when called and returns any `Overflow` (or `GeometryTooLarge` for
+  too many rings or edges) from the call; the iteration can only end with a `GeometryTooLarge` item,
+  for a piece of more than `u32::MAX` vertices.
+- `signed_area_2x(ring) -> i128` (§9) is public: the slicer preserves input winding, so a caller
   needing a fixed convention (MVT: exterior positive in y-down tile coordinates) normalizes once per
-  feature.
+  polygon.
 
-Storage: flat `u32`-offset arenas (vertices, ring ends, polygon ends, tile entries, fill runs,
-feature ends) — a polygon's first ring is its exterior, so the role needs no marker. No per-tile
-allocation; `clear()` keeps all capacity, and `PolygonSlicerAll::shrink_to_fit()` releases it after
-an outlier feature. **No new runtime dependency.**
+Memory: the iterator holds one row of the polygon (per edge, never per tile) and a small index of
+its edges by row, and the `Slicer` keeps that scratch between polygons;
+`Slicer::shrink_to_fit()` releases it after an outlier. **No new runtime dependency.**
 
 ## 5. Corner-detour routing (the one genuinely new algorithm)
 
@@ -154,9 +154,9 @@ whether any *edge* touches `B`:
   of one `B` corner, §9) → emit the `B⁺` box as an all-synthetic ring, oriented by `ring_orientation`
   (a solid fill for that tile). No edge touching and not enclosing → emit nothing. *This case is
   absent from the naive keep-rule and must be added, or a fully-covered tile renders empty.*
-- **`All` interior fill:** `route()` is edge-driven, so tiles that sit **fully inside** a large
-  polygon (no ring edge within their `B`) are visited by nothing and would render empty. After
-  routing, fill them:
+- **`All` interior fill:** the scan is edge-driven, so tiles that sit **fully inside** a large
+  polygon (no ring edge within their `B`) are visited by no edge and would render empty. Fill them
+  as the row is swept:
   - A tile not touched by any ring edge has no ring within its `B`, so its whole box is uniformly
     inside or outside the fill — **one point-in-polygon test per tile is decisive.**
   - Do it as a **scanline over tile-rows** (perf, §8), not a test per tile. Each row's
@@ -166,19 +166,18 @@ whether any *edge* touches `B`:
     detours. Sweeping the row's crossings left to right toggles each ring's parity; between two
     consecutive crossings the containment is constant.
   - **Rule:** a tile is covered when some polygon's exterior contains it and none of its holes do
-    (per-ring crossing parity, exactly `PolygonSlicerOne`'s containment test). For valid input with
+    (per-ring crossing parity, exactly `tile_polygon`'s containment test). For valid input with
     normalized winding this is the nonzero-winding rule; unlike a raw winding sum it does not depend
-    on the input's ring orientation, and it keeps `All` equal to `One` on every input.
+    on the input's ring orientation, and it keeps `polygon` equal to `tile_polygon` on every input.
   - **Output as runs, not boxes:** each covered span, minus the row's edge tiles, becomes one
-    maximal `FillRun { y, x, polygon }` per covering polygon — never a per-tile `B⁺` box — so memory
+    maximal `FillRun { y, x }` — never a per-tile `B⁺` box — so memory
     is `O(edge tiles + runs)` and a polygon covering 10⁸ tiles costs one run per row. The run keeps
     its polygon's exterior winding, and `fill_ring(&run)` returns the tile-local `B⁺` box `One` emits
-    for that polygon in each of the run's tiles, so expanding the runs (several per tile only for
-    overlapping polygons, in polygon order) reproduces `One` exactly; the snapshot tests assert it.
+    for the polygon in each of the run's tiles, so expanding the runs reproduces `One` exactly; the
+    snapshot tests assert it.
   - **Edge tiles** use the same parity for rings with no edge in the tile: an exterior that contains
-    the tile becomes a fill box beside clipped holes, a containing hole drops its polygon, and a
-    polygon wholly covering another part's edge tile (only possible for overlapping, invalid
-    multipolygons) contributes a fill box there — all exactly as `One` does.
+    the tile becomes a fill box beside clipped holes, and a containing hole drops the polygon — all
+    exactly as `One` does.
   - Robustness: half-open edge rule (`[y_min, y_max)`) so shared vertices / horizontal edges are
     counted once — this is where §10's "rings may share a vertex" matters. Each ring crosses a line an
     even number of times, so the sweep state returns to empty at every row end (no per-row reset).
@@ -231,30 +230,30 @@ purely tile-local, hence inherently order-independent.
 
 ## 8. Performance plan
 
-- **Reuse the streaming engine.** `PolygonSlicerAll` routes each ring's edges through
-  `Grid::route_within` + a polygon `RouteSink`, inheriting the inner-box fast path (`Located`), the
-  `tile_of` skip, and `Overflow` checks. The sink records `(tile, edge)` hits (sorted row-major
-  once); all of a feature's rings share **one** `MAX_TILE_VISITS` budget of touched tiles (plus any
-  row an edge crosses without touching a tile, possible only at `buffer == 0`), which
-  covers routing only — covered tiles are never charged. A segment leaving the inner box is walked row
-  by row through exactly the tiles it touches, so a long diagonal edge costs its touched tiles, not
-  its bounding rectangle. Beyond that, the only limits are `u32` indexing, `i32` coordinates and,
-  for polygons, the 2^28-vertex output cap per feature (`OutputTooLarge`).
+- **Row by row, one polygon at a time.** A polygon's rings are indexed once in runs of consecutive
+  edges with the tile rows each run's buffered `y`-range reaches. A row then looks only at the runs
+  reaching it: its edges' per-row column spans (`Seg::row_span`, the exact x-interval of the segment in
+  the row's buffered slab, so a long diagonal edge costs its touched tiles, not its bounding
+  rectangle) give the edge tiles, and the edges crossing the row's center line give the crossings.
+  Nothing outside the current row is kept, so memory follows the row's edges, there is no budget on
+  how many tiles a feature may reach, and time is paid only for slices pulled. The only limits are
+  `u32` indexing and `i32` coordinates.
 - **Excursion windings without walking excursions.** §5's `W_exc` counts an excursion's crossings of
   the tile's ray; walking the excursion per tile would cost `O(ring)` per tile (the ring around an
   ocean is "the excursion" for every coastal tile). Instead the row's crossing list, in edge order,
   feeds a Fenwick tree of signs; the sweep removes each crossing once it passes it, so the signed
   crossings right of the current tile among edges `i..j` is two prefix sums — `O(log n)` per gap.
 - **One closing core.** `close_ring` (arcs from the sorted touching edges, seam join, bridge/detour
-  via a winding callback) is shared: `One` supplies touching edges and windings by walking the ring,
-  `All` from its hits and Fenwick tree, so both produce identical rings by construction.
-- **`PolygonSlicerOne`** finds each ring's touching edges with the same `segment_intersects` test,
+  via a winding callback) is shared: `tile_polygon` supplies touching edges and windings by walking
+  the ring, `polygon` from its row's hits and Fenwick tree, so both produce identical rings by
+  construction.
+- **`tile_polygon`** finds each ring's touching edges with the same `segment_intersects` test,
   then closes them with the shared core (§5); a ring touching no edge is settled by `point_in_ring`
   (§6).
 - **Orientation once per input ring** (i128 shoelace), reused across every tile that ring touches —
   not recomputed per tile.
 - **Interior fill is the only super-linear risk**; the scanline (§6) makes it
-  `O(crossings · log)` — crossings of row center lines, bounded by the routing budget — instead of
+  `O(crossings · log)` — crossings of row center lines — instead of
   `O(tiles · ring)`, and only classifies tiles the edge pass didn't already cover. Measured
   (Callgrind, `just bench polygon`): a 4.5k-vertex polygon on a 25-unit grid costs 7.5M instructions
   all-tiles vs 100M through a per-tile `One`; the z14-like `huge_fill` (2^28 tiles) costs ~2.4k
@@ -314,8 +313,8 @@ Consequences:
 **Recommendation: no new runtime dependency; do not pull `geo` into the library.**
 
 - **Reuse `geo-types`** (already a runtime dep) for the `Coord<i32>` polygon input/output types.
-- **Reuse in-crate machinery**: `Grid`, `route`/`slice_one`, `RouteSink`, `Located`, `to_local`,
-  `segment_intersects`, `TileError`, the flat `TileBuf` storage, and the existing `Mosaic` stitch.
+- **Reuse in-crate machinery**: `Grid` (tile boxes, `Located`, the per-row column span),
+  `to_local`, `segment_intersects`, `TileError`, and the existing `Mosaic` stitch.
 - **Why not `geo`'s algorithms in the shipping crate:** `geo`'s relational/clipping ops target
   `GeoFloat` or use kernels that can overflow for raw `i32` cross products, and don't carry this
   crate's never-panic / `unsafe`-forbid / integer-exact guarantees. Its `BooleanOps` (via
@@ -335,7 +334,7 @@ Follow the existing data-driven pattern exactly (`test_each_path!` over a fixtur
 cases are authored as **GeoJSON** in a **new fixture directory** so they render in QGIS/geojson.io.
 
 - **`tests/polygons/fixtures/`** — good input polygons (each a GeoJSON `Polygon` or `MultiPolygon`,
-  some with holes; a `MultiPolygon` is one `PolygonSlicerAll` feature):
+  some with holes; a `MultiPolygon` is one `polygon` call each):
   - fully inside one tile; spanning 2 and 4 tiles; a hole fully inside a tile; a hole crossing a tile
     edge; a polygon large enough to have **fully-interior tiles** (exercises §6 fill); a ring that
     pokes out and back on one edge (zero-corner detour); excursions that wrap 1/2/3 corners
@@ -348,9 +347,9 @@ cases are authored as **GeoJSON** in a **new fixture directory** so they render 
   - A reassembly test: slice all fixtures → every tile-insertion permutation → `Mosaic` → assert
     order-independence + edge-set equality with the input rings + one shared
     `snapshots-poly-mosaic/reassembled.snap.geojson`. Optionally cross-check against `geo` (§11).
-- **`tests/polygon-bad-fixtures/`** — hand-built inconsistent tile sets (the `role: "tile x/y"`
-  pattern from `mosaic_bad.rs`) that must be rejected with `TileError::Conflict` for every insertion
-  order, atomically. Reuse `tests/support` loaders (`load_fixture`, `TileId::origin`, etc.); add a
+- **Bad tile sets** (not yet written; polylines have `tests/polylines/bad-fixtures/`) — hand-built
+  inconsistent tile sets (the `role: "tile x/y"` pattern from `mosaic_bad.rs`) that must be rejected
+  with `TileError::Conflict` for every insertion order, atomically. Reuse `tests/support` loaders (`load_fixture`, `TileId::origin`, etc.); add a
   ring-aware variant only if needed.
 - Reuse `tests/support/mod.rs` helpers throughout; keep the combined good-fixture footprint small
   enough that `permutations(n)` (asserts n ≤ 10) stays enumerable, as the polyline mosaic test does.
@@ -359,25 +358,16 @@ cases are authored as **GeoJSON** in a **new fixture directory** so they render 
 Fixtures are created **at implementation time** (binary snapshots need working code to bless against),
 following this spec.
 
-## 13. Phasing
+## 13. Tests
 
-All phases are done:
-
-1. Extract shared integer primitives (§9); rewrite `segment_intersects` on top (no behavior change).
-2. `synthetic_at` trait addition (§ below) + ring role in storage.
-3. `PolygonSlicerOne`: per-ring clip → seam-join → detour close (§5) → containment (§6).
-4. `PolygonSlicerAll`: polygon `RouteSink` over `route_within()` + row crossing index (detour
-   windings and parity) + scanline fill runs (§6/§8).
-5. `Mosaic` polygon path: geometric synthetic drop-filter → existing stitch (§7).
-6. Fixtures + snapshots + reassembly + bad-data tests (§12); examples/benches (§8); the
-   `polygon_equivalence` fuzz target (every `All` tile against `One`).
-
-`PolygonSlicerAll`'s tests (`tests/polygon_all.rs`) check every tile of the reachable span against
-`PolygonSlicerOne` on all fixtures at several grids and on random self-intersecting / overlapping /
-star-shaped multipolygons; fill coverage against `geo`'s point-in-polygon of each tile center;
-reassembly through `PolygonMosaic`; and a z14-like square with a hole (2^28 tiles) in bounded time
-and memory. The fixture snapshots (`tests/polygons/snapshots{,-5}/`) are shared: `clip_polygon.rs`
-asserts that `All`, with its fill runs expanded, yields exactly `One`'s per-tile output.
+The tests (`tests/polygon_all.rs`) check every tile of the reachable span of `Slicer::polygon`
+against `Slicer::tile_polygon` on all fixtures at several grids (a multipolygon one polygon at a time) and
+on random self-intersecting / star-shaped polygons; fill coverage against `geo`'s point-in-polygon of each tile
+center; reassembly through `PolygonMosaic`; and a z14-like square with a hole (2^28 tiles) in bounded
+time and memory (`tests/alloc.rs`). The fixture snapshots (`tests/polygons/snapshots{,-5}/`) are
+shared: `clip_polygon.rs` asserts that `polygon`, with its fill runs expanded, yields exactly
+`tile_polygon`'s per-tile output. The `polygon_equivalence` fuzz target checks the same on arbitrary
+input.
 
 ## Appendix — `synthetic_at` and `M: Default`
 

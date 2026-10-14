@@ -74,7 +74,7 @@ pub(crate) fn crossing_x_ceil(a: Coord<i32>, b: Coord<i32>, y: i32) -> i64 {
 ///
 /// The sign is the ring's winding: **positive** turns counter-clockwise with `y` up — which is
 /// *clockwise on screen* with `y` down, i.e. an MVT exterior ring in tile coordinates — and
-/// **negative** the other way. The slicers preserve each input ring's winding (synthetic corners
+/// **negative** the other way. The slicer preserves each input ring's winding (synthetic corners
 /// follow it), so a caller that needs a fixed convention (MVT: exterior positive, holes negative)
 /// normalizes once per feature before slicing, reversing any ring whose sign disagrees with its role.
 ///

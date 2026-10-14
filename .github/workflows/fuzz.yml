@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [slice_equivalence, polygon_equivalence]
+        target: [slice_equivalence, polygon_equivalence, point_equivalence]
     timeout-minutes: 30
     # Fuzzing should fail only on a crash/assertion, not on nightly-only lint drift (the justfile
     # otherwise treats warnings as errors under CI).

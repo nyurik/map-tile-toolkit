@@ -1,46 +1,34 @@
 //! The public API never panics: invalid input yields a typed [`TileError`] instead.
 
+use std::collections::BTreeSet;
+
 use geo_types::Coord;
-use map_tile_toolkit::{
-    PolygonSlicerAll, PolygonSlicerOne, SlicerAll, SlicerOne, TileError, TileId,
-};
+use map_tile_toolkit::{FillRun, PolygonSlice, Slicer, TileError, TileId};
 
 /// A polyline as a `Vec<Coord<i32>>`.
 fn line(coords: Vec<(i32, i32)>) -> Vec<Coord<i32>> {
     coords.into_iter().map(|(x, y)| Coord { x, y }).collect()
 }
 
-/// A fresh all-tiles slicer over `Coord` (the config validation is what these tests probe).
-fn all(extent: u32, buffer: u16) -> Result<SlicerAll<Coord<i32>>, TileError> {
-    SlicerAll::new(extent, buffer)
+/// A slicer over `Coord` (the config validation is what these tests probe).
+fn all(extent: u32, buffer: u16) -> Result<Slicer<Coord<i32>>, TileError> {
+    Slicer::new(extent, buffer)
 }
 
-/// A fresh single-tile slicer over `Coord`, bound to `tile`.
-fn one(extent: u32, buffer: u16, tile: TileId) -> SlicerOne<Coord<i32>> {
-    SlicerOne::new(extent, buffer, tile).expect("valid config")
+/// Every slice of a line, as `(tile, run)` pairs in yield order.
+type Slices = Vec<(TileId, Vec<Coord<i32>>)>;
+
+/// Every slice of a line, in yield order, or the error the call returns.
+fn slices(s: &Slicer<Coord<i32>>, l: &[Coord<i32>]) -> Result<Slices, TileError> {
+    Ok(s.line(l)?.map(|s| (s.tile(), s.run().to_vec())).collect())
 }
 
-/// The observable state of an all-tiles slicer: every tile's runs, ordered by tile then feature.
-fn snapshot(s: &SlicerAll<Coord<i32>>) -> Vec<(TileId, Vec<Vec<Coord<i32>>>)> {
-    s.iter_tiles()
-        .map(|t| {
-            let runs = t
-                .iter_features()
-                .flat_map(|f| f.iter_polylines().map(<[_]>::to_vec))
-                .collect();
-            (t.tile_id(), runs)
-        })
-        .collect()
-}
-
-/// A polyline that starts cleanly in a tile near `i32::MIN` (which the slicer emits into) and then
-/// runs to a vertex whose tile's buffered box underflows `i32` — so `add_feature` errors *mid-walk*,
-/// after it has already written pieces. `extent = 4096`, `buffer = 8`: the low vertex is `i32::MIN+8`
-/// (itself within buffer of the edge, so the up-front bounds check passes) but its tile's base minus
-/// the buffer underflows.
-fn errors_after_emitting() -> Vec<Coord<i32>> {
+/// A polyline that starts cleanly in a tile near `i32::MIN` and then runs to a vertex whose tile's
+/// buffered box underflows `i32`. `extent = 4096`, `buffer = 8`: the low vertex is `i32::MIN+8`
+/// (itself within buffer of the edge) but its tile's base minus the buffer underflows.
+fn overflows_midway() -> Vec<Coord<i32>> {
     line(vec![
-        (i32::MIN + 8200, 0), // tile −524286 (base i32::MIN+8192): clean, gets emitted
+        (i32::MIN + 8200, 0), // tile −524286 (base i32::MIN+8192): clean, gets yielded
         (i32::MIN + 8250, 0),
         (i32::MIN + 8, 0), // tile −524288 (base i32::MIN): base − buffer underflows → Overflow
     ])
@@ -51,12 +39,13 @@ fn invalid_extent() {
     assert_eq!(all(0, 0).err(), Some(TileError::InvalidExtent));
     assert_eq!(all(u32::MAX, 0).err(), Some(TileError::InvalidExtent));
     assert!(all(1, 0).is_ok());
-    assert!(all(i32::MAX as u32, u16::MAX).is_ok());
-    // Both slicers validate the extent the same way.
+    // `extent + buffer` must fit `i32`, or no tile's box could.
+    assert!(all(i32::MAX as u32, 0).is_ok());
     assert_eq!(
-        SlicerOne::<Coord<i32>>::new(0, 0, TileId::new(0, 0)).err(),
+        all(i32::MAX as u32, u16::MAX).err(),
         Some(TileError::InvalidExtent)
     );
+    assert!(all(i32::MAX as u32 - u32::from(u16::MAX), u16::MAX).is_ok());
 }
 
 #[test]
@@ -68,361 +57,294 @@ fn buffer_too_large() {
     // With extent 1 only a zero buffer is allowed.
     assert!(all(1, 0).is_ok());
     assert_eq!(all(2, 1).err(), Some(TileError::BufferTooLarge));
-    // Both slicers validate the buffer the same way.
+}
+
+#[test]
+fn points_at_the_i32_limits_error_instead_of_panicking() {
+    // Within the buffer of i32::MAX, the neighbor tile's box leaves i32: the call fails, before any
+    // point is yielded.
+    let s = all(4096, 8).expect("valid config");
+    let at = |x: i32, y: i32| Coord { x, y };
+    assert_eq!(s.point(at(i32::MAX, 0)).err(), Some(TileError::Overflow));
+    // (0, 0) is within the buffer of three neighbors, so it lands in four tiles.
+    assert_eq!(s.point(at(0, 0)).expect("clean point").count(), 4);
+    // A tile whose own box overflows is rejected up front.
     assert_eq!(
-        SlicerOne::<Coord<i32>>::new(10, 5, TileId::new(0, 0)).err(),
-        Some(TileError::BufferTooLarge)
+        s.tile_point(TileId::new(i32::MAX, 0), at(0, 0)).err(),
+        Some(TileError::Overflow)
     );
+}
+
+#[test]
+fn a_far_vertex_overflows_the_local_frame_of_a_tile_it_reaches() {
+    // Tile 2^18 of extent 4096 has origin 2^30. The line touches it, but its far end, `i32::MIN`, lies
+    // more than an `i32` span before that origin: the call fails rather than yielding a run that
+    // cannot be expressed in the tile's local frame.
+    let s = all(4096, 0).expect("valid config");
+    let l = line(vec![(1 << 30, 0), (i32::MIN, 0)]);
+    assert_eq!(
+        s.tile_line(TileId::new(1 << 18, 0), &l).err(),
+        Some(TileError::Overflow)
+    );
+    // Seen from the tile at the origin, every vertex fits.
+    assert!(s.tile_line(TileId::new(0, 0), &l).is_ok());
 }
 
 #[test]
 fn extreme_tile_errors_instead_of_panicking() {
     let l = line(vec![(0, 0), (10, 10)]);
+    let s = all(4096, 0).expect("valid config");
     // A tile whose (buffered) box coordinates overflow i32 → Overflow, not a panic.
     assert_eq!(
-        one(4096, 0, TileId::new(i32::MAX, i32::MAX))
-            .add_feature(&l)
-            .err(),
+        s.tile_line(TileId::new(i32::MAX, i32::MAX), &l).err(),
         Some(TileError::Overflow)
     );
     assert_eq!(
-        one(4096, 0, TileId::new(i32::MIN, 0)).add_feature(&l).err(),
+        s.tile_line(TileId::new(i32::MIN, 0), &l).err(),
         Some(TileError::Overflow)
     );
-    // A far-but-representable tile touches nothing → no features accumulated.
-    let mut far = one(4096, 0, TileId::new(1000, 1000));
-    far.add_feature(&l).expect("no error for a far tile");
-    assert!(far.is_empty());
+    // A far-but-representable tile touches nothing → no slices.
+    let far = s
+        .tile_line(TileId::new(1000, 1000), &l)
+        .expect("no error for a far tile");
+    assert_eq!(far.count(), 0);
 }
 
 #[test]
-fn spanning_too_many_tiles_errors() {
-    let mut s = all(1, 0).expect("valid config"); // 1 unit per tile
-    // Touches 40 000 001 tiles, past the 2^25 (33 554 432) visit budget.
-    assert_eq!(
-        s.add_feature(line(vec![(0, 0), (40_000_000, 0)])).err(),
-        Some(TileError::TooManyTiles)
+fn spanning_many_tiles_is_lazy() {
+    let s = all(1, 0).expect("valid config"); // 1 unit per tile
+    // A line through 40 000 001 tiles: slices come one at a time, so taking a few costs a few.
+    let long = line(vec![(0, 0), (40_000_000, 0)]);
+    let first: Vec<_> = s.line(&long).expect("lazy").take(3).collect();
+    assert_eq!(first.len(), 3);
+    // Only the touched tiles are visited, not how far the line reaches: a diagonal across 100 000
+    // tiles (a 7·10⁹-tile bounding box) touches under 200 000.
+    let s = all(10, 1).expect("valid config");
+    let tiles: BTreeSet<TileId> = slices(&s, &line(vec![(0, 0), (1_000_000, 700_010)]))
+        .expect("a long diagonal")
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    assert!(
+        tiles.len() > 100_000 && tiles.len() < 200_000,
+        "{}",
+        tiles.len()
     );
-    assert!(s.is_empty());
-    // Only the touched tiles count, not how far the line reaches: a diagonal across 100 000 tiles
-    // (a 7·10⁹-tile bounding box, once also past the old `i16` span limit) touches under 200 000.
-    let mut s = all(10, 1).expect("valid config");
-    s.add_feature(line(vec![(0, 0), (1_000_000, 700_010)]))
-        .expect("a long diagonal is within budget");
-    assert!(s.len() > 100_000 && s.len() < 200_000, "{}", s.len());
 }
 
 #[test]
-fn unbuffered_gap_rows_are_charged() {
+fn unbuffered_gap_rows_are_skipped() {
     // With `buffer == 0`, a segment from x = 0 to x = 1 (extent 1) runs between the closed columns
-    // 0 and 1 in every interior row, touching only its two endpoint tiles. Each row it crosses
-    // still costs one visit, so 2^26 rows exceed the budget instead of looping for free.
-    let mut s = all(1, 0).expect("valid config");
-    assert_eq!(
-        s.add_feature(line(vec![(0, 0), (1, 1 << 26)])).err(),
-        Some(TileError::TooManyTiles)
-    );
-    assert!(s.is_empty());
-    s.add_feature(line(vec![(0, 0), (1, 1000)]))
-        .expect("a short gap run is within budget");
-    assert_eq!(s.len(), 2, "only the endpoint tiles are touched");
+    // 0 and 1 in every interior row, touching only its two endpoint tiles. The walk jumps over the
+    // 2^26 rows in between instead of visiting them one by one.
+    let s = all(1, 0).expect("valid config");
+    let got = slices(&s, &line(vec![(0, 0), (1, 1 << 26)])).expect("slice");
+    let tiles: Vec<TileId> = got.iter().map(|(t, _)| *t).collect();
+    assert_eq!(tiles, [TileId::new(0, 0), TileId::new(1, 1 << 26)]);
+    let got = slices(&s, &line(vec![(0, 0), (1, 1000)])).expect("slice");
+    assert_eq!(got.len(), 2, "only the endpoint tiles are touched");
 }
 
 #[test]
 fn coordinate_overflow_errors() {
-    let mut s = all(4096, 8).expect("valid config");
+    let s = all(4096, 8).expect("valid config");
     // A vertex within `buffer` of i32::MAX: the buffered bound overflows i32 → Overflow.
     assert_eq!(
-        s.add_feature(line(vec![(i32::MAX, 0), (i32::MAX, 10)]))
-            .err(),
+        slices(&s, &line(vec![(i32::MAX, 0), (i32::MAX, 10)])).err(),
         Some(TileError::Overflow)
     );
 }
 
 #[test]
 fn long_polylines_are_accepted() {
-    // A polyline is limited only by the `u32` indexing of the storage (more than `u32::MAX` vertices
-    // yields `GeometryTooLarge`), so well past the old `u16` cap is fine.
-    let mut s = all(1_000_000, 0).expect("valid config");
+    // A polyline has no vertex limit.
+    let s = all(1_000_000, 0).expect("valid config");
     let coords: Vec<Coord<i32>> = (0..200_000).map(|i| Coord { x: i % 8, y: 0 }).collect();
-    s.add_feature(&coords).expect("200 000 vertices");
-    let runs: Vec<usize> = s
-        .iter_tiles()
-        .flat_map(|t| {
-            t.iter_features()
-                .flat_map(|f| f.iter_polylines().map(<[_]>::len))
-                .collect::<Vec<_>>()
-        })
+    let runs: Vec<usize> = slices(&s, &coords)
+        .expect("200 000 vertices")
+        .iter()
+        .map(|(_, run)| run.len())
         .collect();
     assert_eq!(runs, [200_000]);
 }
 
 #[test]
-fn add_feature_is_atomic_on_error() {
-    // The crafted polyline really does fail after emitting (otherwise this proves nothing).
-    let mut probe = all(4096, 8).expect("valid config");
-    probe
-        .add_feature(errors_after_emitting())
-        .expect_err("must error mid-walk");
-    assert!(
-        probe.is_empty(),
-        "a feature that errors before any other data must leave the slicer empty"
-    );
-
-    // A clean feature that shares a tile with the failing one, so rollback must *truncate* an existing
-    // tile (not just drop freshly-created ones).
-    let mut s = all(4096, 8).expect("valid config");
-    s.add_feature(line(vec![(i32::MIN + 8200, 0), (i32::MIN + 8300, 0)]))
-        .expect("clean feature");
-    let before = snapshot(&s);
-
-    // The failing feature must leave no trace — the accumulator is byte-for-byte what it was.
-    assert_eq!(
-        s.add_feature(errors_after_emitting()).err(),
-        Some(TileError::Overflow)
-    );
-    assert_eq!(snapshot(&s), before, "errored feature must roll back fully");
-
-    // And the slicer stays usable: skipping the bad input and adding more works, and matches a run
-    // that never saw the bad input at all.
-    s.add_feature(line(vec![(i32::MIN + 8210, 0), (i32::MIN + 8260, 0)]))
-        .expect("still usable after a rolled-back error");
-    let mut clean = all(4096, 8).expect("valid config");
-    clean
-        .add_feature(line(vec![(i32::MIN + 8200, 0), (i32::MIN + 8300, 0)]))
-        .expect("clean feature");
-    clean
-        .add_feature(line(vec![(i32::MIN + 8210, 0), (i32::MIN + 8260, 0)]))
-        .expect("clean feature");
-    assert_eq!(
-        snapshot(&s),
-        snapshot(&clean),
-        "skipping a failed feature matches never adding it"
-    );
-}
-
-#[test]
-fn rollback_leaves_untouched_tiles_alone() {
-    // A clean feature near the origin, then a failing one near i32::MIN — their tiles are disjoint.
-    // The failing feature never touches the clean tile, so its rollback must scan past that tile on
-    // the "not touched by this feature" branch (leaving it intact) while still dropping the far tiles
-    // it did create before erroring. The atomicity test above only exercises the *touched* branch.
-    let mut s = all(4096, 8).expect("valid config");
-    s.add_feature(line(vec![(0, 0), (100, 0)]))
-        .expect("clean feature near the origin");
-    let before = snapshot(&s);
-
-    assert_eq!(
-        s.add_feature(errors_after_emitting()).err(),
-        Some(TileError::Overflow),
-        "the far feature errors mid-walk"
-    );
-    assert_eq!(
-        snapshot(&s),
-        before,
-        "rolling back a feature that touches none of the pre-existing tiles leaves them intact"
-    );
-}
-
-#[test]
-fn clear_resets_for_reuse() {
-    let mut s = all(25, 0).expect("valid config");
-    s.add_feature(line(vec![(5, 5), (60, 40)])).expect("slice");
-    assert!(!s.is_empty());
-    s.clear();
-    assert!(s.is_empty());
-    assert_eq!(s.len(), 0);
-    // After clear the slicer behaves exactly like a fresh one.
-    let mut fresh = all(25, 0).expect("valid config");
-    s.add_feature(line(vec![(1, 1), (30, 30)])).expect("slice");
-    fresh
-        .add_feature(line(vec![(1, 1), (30, 30)]))
-        .expect("slice");
-    assert_eq!(snapshot(&s), snapshot(&fresh));
-
-    // SlicerOne clears too.
-    let mut o = one(25, 0, TileId::new(0, 0));
-    o.add_feature(line(vec![(5, 5), (20, 20)])).expect("slice");
-    assert!(!o.is_empty());
-    o.clear();
-    assert!(o.is_empty());
-    assert_eq!(o.tile(), TileId::new(0, 0), "clear keeps the bound tile");
+fn an_overflow_is_reported_before_any_slice() {
+    let s = all(4096, 8).expect("valid config");
+    // The line's bounds reach a tile whose box leaves `i32`: the call fails, with nothing yielded
+    // for the clean part of it.
+    let bad = overflows_midway();
+    assert_eq!(s.line(&bad).err(), Some(TileError::Overflow));
+    // A tile far from it is unaffected: the clean first two vertices on their own are fine.
+    let clean = line(bad.iter().take(2).map(|c| (c.x, c.y)).collect());
+    assert!(s.line(&clean).is_ok());
+    // The slicer holds no state, so a later line is unaffected. (`y = 0` is within the buffer of
+    // rows −1 and 0, so the clean line lands in two tiles.)
+    let good = line(vec![(i32::MIN + 8210, 0), (i32::MIN + 8260, 0)]);
+    assert_eq!(slices(&s, &good).expect("clean").len(), 2);
 }
 
 #[test]
 fn empty_and_degenerate_inputs_are_ok() {
-    let mut s = all(25, 0).expect("valid config");
-    // Empty polyline → no tiles, no error.
-    s.add_feature(Vec::<Coord<i32>>::new())
-        .expect("empty polyline is ok");
-    assert!(s.is_empty());
+    let s = all(25, 0).expect("valid config");
+    // Empty polyline → no slices, no error.
+    assert_eq!(slices(&s, &[]).expect("empty polyline is ok"), []);
     // A single-point polyline touches its own tile but yields no ≥2-vertex run.
     let dot = line(vec![(5, 5)]);
-    s.add_feature(&dot).expect("single-point polyline is ok");
-    assert!(s.is_empty());
-
-    let mut one = one(25, 0, TileId::new(0, 0));
-    one.add_feature(&dot).expect("single-point polyline is ok");
-    assert!(one.is_empty());
+    assert_eq!(slices(&s, &dot).expect("single-point polyline is ok"), []);
+    let one = s
+        .tile_line(TileId::new(0, 0), &dot)
+        .expect("single-point polyline is ok");
+    assert_eq!(one.count(), 0);
 }
 
-// ---- PolygonSlicerAll ----
+// ---- Polygons ----
 
 /// One polygon (exterior only) from integer corner pairs.
 fn poly(coords: Vec<(i32, i32)>) -> Vec<Vec<Coord<i32>>> {
     vec![line(coords)]
 }
 
-/// Every edge tile's pieces and every fill run, per feature — the slicer's whole observable state.
-type PolyState = Vec<(
-    Vec<(TileId, Vec<Vec<Vec<Coord<i32>>>>)>,
-    Vec<map_tile_toolkit::FillRun>,
-)>;
+/// One slice of a polygon, owned: a piece (tile, rings) or a fill run.
+#[derive(Debug, PartialEq, Eq)]
+enum Item {
+    Piece(TileId, Vec<Vec<Coord<i32>>>),
+    Run(FillRun),
+}
 
-fn poly_state(s: &PolygonSlicerAll<Coord<i32>>) -> PolyState {
-    s.iter_features()
-        .map(|f| {
-            let tiles = f
-                .iter_tiles()
-                .map(|t| {
-                    let polys = t
-                        .iter_polygons()
-                        .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-                        .collect();
-                    (t.tile_id(), polys)
-                })
-                .collect();
-            (tiles, f.iter_fill_runs().collect())
-        })
-        .collect()
+/// Every slice of a polygon, in yield order, until the first error (returned last).
+fn poly_items(
+    s: &mut Slicer<Coord<i32>>,
+    rings: &[Vec<Coord<i32>>],
+) -> (Vec<Item>, Option<TileError>) {
+    let mut slices = s.polygon(rings).expect("starts");
+    let mut items = Vec::new();
+    while let Some(slice) = slices.next() {
+        match slice {
+            Ok(PolygonSlice::Piece(p)) => items.push(Item::Piece(
+                p.tile(),
+                p.rings().map(map_tile_toolkit::Local::to_vec).collect(),
+            )),
+            Ok(PolygonSlice::Run(run)) => items.push(Item::Run(run)),
+            Err(e) => return (items, Some(e)),
+        }
+    }
+    (items, None)
 }
 
 #[test]
-fn polygon_all_validates_config() {
-    assert_eq!(
-        PolygonSlicerAll::<Coord<i32>>::new(0, 0).err(),
-        Some(TileError::InvalidExtent)
-    );
-    assert_eq!(
-        PolygonSlicerAll::<Coord<i32>>::new(10, 5).err(),
-        Some(TileError::BufferTooLarge)
-    );
-}
+fn polygons_spanning_many_tiles_are_lazy() {
+    let mut s = all(1, 0).expect("valid config");
+    // A ring whose first edge touches 40 000 001 tiles: slices come one at a time.
+    let wide = poly(vec![(0, 0), (40_000_000, 0), (40_000_000, 5)]);
+    let mut slices = s.polygon(&wide).expect("lazy");
+    for _ in 0..3 {
+        assert!(matches!(slices.next(), Some(Ok(_))));
+    }
 
-#[test]
-fn polygon_all_too_many_tiles() {
-    let mut s = PolygonSlicerAll::<Coord<i32>>::new(1, 0).expect("valid config");
-    // A ring whose first edge touches 40 000 001 tiles, past the 2^25 visit budget.
-    assert_eq!(
-        s.add_feature([poly(vec![(0, 0), (40_000_000, 0), (40_000_000, 5)])])
-            .err(),
-        Some(TileError::TooManyTiles)
-    );
-    assert!(s.is_empty());
-    // How far a ring reaches does not matter, only the tiles it touches: 40 000 tiles wide is fine.
-    s.add_feature([poly(vec![(0, 0), (40_000, 0), (40_000, 5)])])
-        .expect("a wide ring is within budget");
-    s.clear();
-
-    // Routing charges only the tiles an edge actually touches, never its bounding box: the large
-    // triangle's diagonal spans a 5781² = 33 419 961-tile box (with the small one's 601² box, once
-    // over the 2^25 budget) but touches only ~17 000 tiles. Covered tiles are never charged either:
-    // the small triangle alone fills ~180 000 tiles.
+    // Only the tiles an edge touches cost anything, never its bounding box: the large triangle's
+    // diagonal spans a 5781² = 33 419 961-tile box but touches only ~17 000 tiles, and covered tiles
+    // come as runs: the small triangle alone fills ~180 000 tiles.
     let small = poly(vec![(0, 0), (600, 600), (0, 600)]);
     let large = poly(vec![(0, 0), (5780, 5780), (0, 5780)]);
-    s.add_feature([small.clone()])
-        .expect("one ring is within budget");
-    assert_eq!(s.len(), 1);
-    let filled: usize = s
-        .iter_features()
-        .flat_map(|f| f.iter_fill_runs())
-        .map(|r| r.x.len())
+    let (items, err) = poly_items(&mut s, &small);
+    assert_eq!(err, None);
+    let filled: usize = items
+        .iter()
+        .map(|i| match i {
+            Item::Run(run) => run.x.len(),
+            Item::Piece(..) => 0,
+        })
         .sum();
     assert!(filled > 170_000, "{filled}");
-    s.add_feature([small, large])
-        .expect("long diagonals are charged per touched tile");
-    assert_eq!(s.len(), 2);
+    let (items, err) = poly_items(&mut s, &large);
+    assert_eq!(err, None);
+    let pieces = items
+        .iter()
+        .filter(|i| matches!(i, Item::Piece(..)))
+        .count();
+    assert!(pieces < 40_000, "{pieces}");
 }
 
 #[test]
-fn polygon_all_charges_unbuffered_gap_rows() {
+fn polygon_slivers_between_unbuffered_tiles_yield_little() {
     // A sliver whose two long edges run between the closed columns 0 and 1 (extent 1, buffer 0):
-    // they touch tiles only near their ends, but span 2^24 rows each, and the crossing index holds
-    // one entry per row an edge spans. Charging each gap row keeps that memory within the budget:
-    // the 2^25 rows are rejected during routing, before anything is indexed.
-    let mut s = PolygonSlicerAll::<Coord<i32>>::new(1, 0).expect("valid config");
-    assert_eq!(
-        s.add_feature([poly(vec![(0, 0), (1, 1 << 24), (0, 1)])])
-            .err(),
-        Some(TileError::TooManyTiles)
-    );
-    assert!(s.is_empty());
-    s.add_feature([poly(vec![(0, 0), (1, 1000), (0, 1)])])
-        .expect("a short sliver is within budget");
-    assert_eq!(s.len(), 1);
+    // they touch tiles only near their ends, and no tile lies inside it.
+    let mut s = all(1, 0).expect("valid config");
+    let (items, err) = poly_items(&mut s, &poly(vec![(0, 0), (1, 1 << 16), (0, 1)]));
+    assert_eq!(err, None);
+    assert!(items.iter().all(|i| matches!(i, Item::Piece(..))));
+    assert!(items.len() <= 4, "{items:?}");
 }
 
 #[test]
-fn polygon_all_is_atomic_on_error() {
+fn a_polygon_overflow_is_reported_by_the_call() {
     // A square whose left edge runs through the column of tiles based at x = i32::MIN (extent 4096,
-    // buffer 0). Routing succeeds, but closing that edge's ring in tile row 1 needs a `B⁺` corner one
-    // unit left of i32::MIN → Overflow, after row 0's tiles were already written.
+    // buffer 0): closing its ring there needs a `B⁺` corner one unit left of i32::MIN → Overflow.
     let (x0, x1) = (i32::MIN + 10, i32::MIN + 6000);
     let bad = poly(vec![(x0, 0), (x1, 0), (x1, 10_000), (x0, 10_000)]);
-    let mut one =
-        PolygonSlicerOne::<Coord<i32>>::new(4096, 0, TileId::new(-524_288, 1)).expect("config");
+    let mut s = all(4096, 0).expect("valid config");
+    let piece = s.tile_polygon(TileId::new(-524_288, 1), &bad);
     assert_eq!(
-        one.add_feature(&bad[0], &[]).err(),
+        piece.err(),
         Some(TileError::Overflow),
         "the single-tile clip agrees"
     );
-
-    let good = poly(vec![(5, 5), (9000, 5), (9000, 9000), (5, 9000)]);
-    let mut s = PolygonSlicerAll::<Coord<i32>>::new(4096, 0).expect("valid config");
-    s.add_feature([good.clone()]).expect("clean feature");
-    let before = poly_state(&s);
-    assert_eq!(s.add_feature([bad]).err(), Some(TileError::Overflow));
     assert_eq!(
-        poly_state(&s),
-        before,
-        "errored feature must roll back fully"
+        s.polygon(&bad).err(),
+        Some(TileError::Overflow),
+        "from the call, before any slice"
     );
 
-    // Still usable, and identical to a slicer that never saw the bad input.
-    s.add_feature([good.clone()]).expect("still usable");
-    let mut clean = PolygonSlicerAll::<Coord<i32>>::new(4096, 0).expect("valid config");
-    clean.add_feature([good.clone()]).expect("clean");
-    clean.add_feature([good]).expect("clean");
-    assert_eq!(poly_state(&s), poly_state(&clean));
+    // The slicer keeps no state across polygons: a fresh one gives the same for a clean one.
+    let clean = poly_items(&mut s, &clean_square());
+    assert_eq!(clean.1, None);
+    assert_eq!(
+        clean,
+        poly_items(&mut all(4096, 0).expect("valid config"), &clean_square())
+    );
+}
+
+fn clean_square() -> Vec<Vec<Coord<i32>>> {
+    poly(vec![(5, 5), (9000, 5), (9000, 9000), (5, 9000)])
 }
 
 #[test]
-fn polygon_all_degenerate_inputs_and_clear() {
-    let mut s = PolygonSlicerAll::<Coord<i32>>::new(25, 0).expect("valid config");
-    // No polygons, a polygon with no rings, and a degenerate exterior (whose holes are then ignored):
-    // nothing is recorded.
-    s.add_feature(Vec::<Vec<Vec<Coord<i32>>>>::new())
-        .expect("empty");
-    s.add_feature([Vec::<Vec<Coord<i32>>>::new()])
-        .expect("no rings");
-    s.add_feature([vec![
+fn polygon_degenerate_inputs() {
+    let mut s = all(25, 0).expect("valid config");
+    // No rings, and a degenerate exterior (whose holes are then ignored): nothing is yielded.
+    assert_eq!(poly_items(&mut s, &[]), (vec![], None));
+    let no_rings: Vec<Vec<Coord<i32>>> = vec![];
+    let degenerate = vec![
         line(vec![(1, 1), (9, 9), (1, 1)]),
         line(vec![(2, 2), (8, 2), (8, 8)]),
-    ]])
-    .expect("degenerate exterior");
-    assert!(s.is_empty());
+    ];
+    assert_eq!(poly_items(&mut s, &degenerate), (vec![], None));
+    assert!(
+        s.tile_polygon(TileId::new(0, 0), &degenerate)
+            .expect("ok")
+            .is_none()
+    );
+    // Neither an empty polygon nor a ring that is degenerate once its repeated vertices are dropped
+    // leaves anything in a tile.
+    assert!(
+        s.tile_polygon(TileId::new(0, 0), &no_rings)
+            .expect("ok")
+            .is_none()
+    );
+    let repeated = vec![
+        line(vec![(2, 2), (60, 2), (60, 60), (2, 60)]),
+        line(vec![(30, 30), (30, 30), (31, 31), (31, 31)]),
+    ];
+    let plain_square = vec![line(vec![(2, 2), (60, 2), (60, 60), (2, 60)])];
+    assert_eq!(
+        poly_items(&mut s, &repeated),
+        poly_items(&mut s, &plain_square)
+    );
     // A degenerate hole is ignored.
     let square = line(vec![(2, 2), (60, 2), (60, 60), (2, 60)]);
-    s.add_feature([vec![square.clone(), line(vec![(30, 30), (31, 31)])]])
-        .expect("degenerate hole");
-    let mut plain = PolygonSlicerAll::<Coord<i32>>::new(25, 0).expect("valid config");
-    plain.add_feature([vec![square.clone()]]).expect("plain");
-    assert_eq!(poly_state(&s), poly_state(&plain));
-
-    // After clear the slicer behaves exactly like a fresh one.
-    s.clear();
-    assert!(s.is_empty());
-    assert_eq!(s.len(), 0);
-    s.add_feature([vec![square]]).expect("reuse");
-    assert_eq!(poly_state(&s), poly_state(&plain));
+    let with_hole = poly_items(&mut s, &[square.clone(), line(vec![(30, 30), (31, 31)])]);
+    let plain = poly_items(&mut s, &[square]);
+    assert_eq!(with_hole, plain);
+    assert_ne!(plain.0, []);
 }

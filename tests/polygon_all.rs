@@ -1,11 +1,11 @@
-//! [`PolygonSlicerAll`] against its oracle, [`PolygonSlicerOne`]: for every tile of the reachable
-//! span, an edge tile's pieces must equal what a single-tile slicer produces there for each of the
-//! feature's polygons, a fill-run tile's fill rings must equal it too, and every other tile must be
-//! one it leaves empty. (The fixtures' snapshots, shared by both slicers, are in `clip_polygon.rs`.)
+//! [`Slicer::polygon`] against its oracle, [`Slicer::tile_polygon`]: for every tile of the
+//! reachable span, the pieces and fill rings it yields there (in polygon order) must equal what the
+//! single-tile slicer produces, and every other tile must be one it leaves empty. (The fixtures'
+//! snapshots, shared by both, are in `clip_polygon.rs`.)
 //!
 //! Also here: fill coverage against an independent `geo` point-in-polygon of each tile center;
 //! reassembly of the edge tiles with [`PolygonMosaic`]; all of it again under every rotation and
-//! mirror image of the fixtures; planetiler's tricky hole cases; and the large-input bounds.
+//! mirror image of the fixtures (planetiler's tricky hole cases among them); and the large-input bounds.
 
 #![allow(clippy::pedantic, reason = "test tool")]
 
@@ -14,9 +14,7 @@ use std::path::Path;
 
 use geo::Contains;
 use geo_types::{Coord, LineString, Point, Polygon};
-use map_tile_toolkit::{
-    FillRun, Measured, PolygonMosaic, PolygonSlicerAll, PolygonSlicerOne, TileId,
-};
+use map_tile_toolkit::{FillRun, PolygonMosaic, PolygonSlice, Slicer, TileId};
 
 mod support;
 
@@ -28,95 +26,98 @@ type Rings = Vec<Vec<Coord<i32>>>;
 /// A tile's pieces: per polygon, its rings.
 type Pieces = Vec<Rings>;
 
-/// What [`PolygonSlicerOne`] yields for `tile`, adding each polygon as its own feature.
+/// What [`Slicer::tile_polygon`] yields for `tile`.
 fn one_tile(polygons: &[FixturePolygon], extent: u32, buffer: u16, tile: TileId) -> Pieces {
-    let mut one = PolygonSlicerOne::<Coord<i32>>::new(extent, buffer, tile).expect("config");
-    for p in polygons {
-        let holes: Vec<&[Coord<i32>]> = p.holes.iter().map(Vec::as_slice).collect();
-        one.add_feature(&p.exterior, &holes).expect("clip");
-    }
-    one.iter_features()
-        .map(|f| f.iter_rings().map(|r| r.vertices().to_vec()).collect())
-        .collect()
+    let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
+    support::tile_polygons(&mut slicer, polygons, tile).expect("clip")
 }
 
-/// One feature's output: edge tiles' pieces, and each filled tile's fill rings (in polygon order).
+/// One feature's output per tile, each with the polygon it comes from: edge-tile pieces, and the fill
+/// rings of the runs covering the tile. Polygons are sliced independently, so where polygons overlap
+/// one tile can hold both.
 #[derive(Debug, PartialEq, Eq)]
 struct Sliced {
-    tiles: BTreeMap<TileId, Pieces>,
-    fills: BTreeMap<TileId, Pieces>,
+    tiles: BTreeMap<TileId, Vec<(u32, Rings)>>,
+    fills: BTreeMap<TileId, Vec<(u32, Rings)>>,
 }
 
-/// `polygons` sliced as one multipolygon feature.
+impl Sliced {
+    /// Everything the feature puts in `tile`, in polygon order: what the single-tile slicer yields.
+    fn content(&self, tile: TileId) -> Pieces {
+        let mut all: Vec<&(u32, Rings)> = self
+            .tiles
+            .get(&tile)
+            .into_iter()
+            .chain(self.fills.get(&tile))
+            .flatten()
+            .collect();
+        all.sort_by_key(|(polygon, _)| *polygon);
+        all.into_iter().map(|(_, rings)| rings.clone()).collect()
+    }
+}
+
+/// A multipolygon feature sliced polygon by polygon with `polygon`, checking the structural promises
+/// along the way: for each polygon, edge tiles in row-major order and each once, runs non-empty,
+/// row-major, disjoint and maximal, and no tile both an edge tile and filled.
 fn all_tiles(polygons: &[FixturePolygon], extent: u32, buffer: u16) -> Sliced {
-    let mut all = PolygonSlicerAll::<Coord<i32>>::new(extent, buffer).expect("config");
-    all.add_feature(rings_of(polygons)).expect("slice");
-    assert!(all.len() <= 1);
-    collect(&all)
-}
-
-fn rings_of(polygons: &[FixturePolygon]) -> Vec<Vec<&[Coord<i32>]>> {
-    polygons.iter().map(support::rings).collect()
-}
-
-/// Gather every feature's output, checking the structural promises along the way: edge tiles in
-/// row-major order, runs in row-major then polygon order, non-empty and maximal per polygon, and no
-/// tile both an edge tile and filled.
-fn collect(all: &PolygonSlicerAll<Coord<i32>>) -> Sliced {
-    let mut tiles = BTreeMap::new();
-    let mut fills: BTreeMap<TileId, Vec<(u32, Rings)>> = BTreeMap::new();
-    for f in all.iter_features() {
-        let ids: Vec<TileId> = f.iter_tiles().map(|t| t.tile_id()).collect();
+    let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
+    let mut sliced = Sliced {
+        tiles: BTreeMap::new(),
+        fills: BTreeMap::new(),
+    };
+    for (polygon, fixture) in (0_u32..).zip(polygons) {
+        let input = support::rings(fixture);
+        let mut slices = slicer.polygon(&input).expect("slice");
+        // This polygon's edge tiles and runs, in yield order.
+        let mut edges: Vec<TileId> = Vec::new();
+        let mut runs: Vec<FillRun> = Vec::new();
+        while let Some(slice) = slices.next() {
+            match slice.expect("slice") {
+                PolygonSlice::Piece(piece) => {
+                    let rings: Rings = piece.rings().map(|r| r.to_vec()).collect();
+                    assert!(!rings.is_empty(), "a piece always carries geometry");
+                    edges.push(piece.tile());
+                    sliced
+                        .tiles
+                        .entry(piece.tile())
+                        .or_default()
+                        .push((polygon, rings));
+                }
+                PolygonSlice::Run(run) => runs.push(run),
+            }
+        }
         assert!(
-            ids.is_sorted_by_key(|t| (t.y, t.x)),
-            "edge tiles in row-major order"
+            edges.is_sorted_by_key(|t| (t.y, t.x)),
+            "polygon {polygon}: edge tiles in row-major order"
         );
-        for t in f.iter_tiles() {
-            let pieces: Pieces = t
-                .iter_polygons()
-                .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-                .collect();
-            assert!(!pieces.is_empty(), "an edge tile always carries geometry");
-            assert!(
-                tiles.insert(t.tile_id(), pieces).is_none(),
-                "tile listed twice"
-            );
-        }
-        let runs: Vec<FillRun> = f.iter_fill_runs().collect();
-        for w in runs.windows(2) {
-            assert!(
-                (w[0].y, w[0].x.start, w[0].polygon) < (w[1].y, w[1].x.start, w[1].polygon),
-                "runs are row-major, then by polygon: {w:?}"
-            );
-        }
+        assert!(
+            edges.windows(2).all(|w| w[0] != w[1]),
+            "polygon {polygon}: an edge tile listed twice"
+        );
         for (i, run) in runs.iter().enumerate() {
             assert!(!run.x.is_empty(), "empty run {run:?}");
             assert!(
                 runs[i + 1..]
                     .iter()
-                    .filter(|r| r.y == run.y && r.polygon == run.polygon)
-                    .all(|r| r.x.start > run.x.end),
-                "a polygon's runs in a row are disjoint and maximal: {run:?}"
+                    .all(|r| (r.y, r.x.start) > (run.y, run.x.end)),
+                "a polygon's runs are row-major, disjoint and maximal: {run:?}"
             );
-            let ring = f.fill_ring(run).to_vec();
+            let ring = slices.fill_ring(run).to_vec();
             for x in run.x.clone() {
                 let tile = TileId::new(x, run.y);
-                assert!(!tiles.contains_key(&tile), "{tile:?} is both edge and fill");
-                fills
+                assert!(
+                    !edges.contains(&tile),
+                    "{tile:?} is both edge and fill of polygon {polygon}"
+                );
+                sliced
+                    .fills
                     .entry(tile)
                     .or_default()
-                    .push((run.polygon, vec![ring.clone()]));
+                    .push((polygon, vec![ring.clone()]));
             }
         }
     }
-    let fills = fills
-        .into_iter()
-        .map(|(tile, mut polys)| {
-            polys.sort_by_key(|(polygon, _)| *polygon);
-            (tile, polys.into_iter().map(|(_, rings)| rings).collect())
-        })
-        .collect();
-    Sliced { tiles, fills }
+    sliced
 }
 
 /// Inclusive tile span every piece can reach (one tile of padding covers any buffer < extent / 2).
@@ -165,13 +166,7 @@ fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
             let tile = TileId::new(x, y);
             let one = one_tile(polygons, extent, buffer, tile);
             let at = format!("{label}: extent {extent} buffer {buffer} tile {tile:?}");
-            if let Some(pieces) = all.tiles.get(&tile) {
-                assert_eq!(pieces, &one, "{at}");
-            } else if let Some(pieces) = all.fills.get(&tile) {
-                assert_eq!(pieces, &one, "{at}: fill");
-            } else {
-                assert!(one.is_empty(), "{at}: missing {one:?}");
-            }
+            assert_eq!(all.content(tile), one, "{at}");
         }
     }
 }
@@ -270,22 +265,24 @@ fn fixture_reassembles(path: &Path) {
 /// drops that hole, so only the shell's edges are sure to come back.
 const HOLE_OUTSIDE_SHELL: &[&str] = &["only_hole_touches_other_tile"];
 
-/// Slice `features` with [`PolygonSlicerAll`], feed every edge tile to a [`PolygonMosaic`], and
+/// Slice `features` polygon by polygon with [`Slicer::polygon`], feed every edge tile to a [`PolygonMosaic`], and
 /// assert the result has exactly the input rings' edges (for a fixture in [`HOLE_OUTSIDE_SHELL`]:
 /// every shell edge, and nothing that is not an input edge).
 fn reassembles(features: &[Vec<FixturePolygon>], extent: u32, buffer: u16, label: &str) {
     let input: Vec<&[Coord<i32>]> = features.iter().flatten().flat_map(support::rings).collect();
-    let mut all = PolygonSlicerAll::<Coord<i32>>::new(extent, buffer).expect("config");
-    for f in features {
-        all.add_feature(rings_of(f)).expect("slice");
-    }
+    let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
     let mut per_tile: BTreeMap<TileId, Vec<Vec<Coord<i32>>>> = BTreeMap::new();
-    for f in all.iter_features() {
-        for t in f.iter_tiles() {
-            let rings = t
-                .iter_polygons()
-                .flat_map(|p| p.iter_rings().map(|r| r.vertices().to_vec()));
-            per_tile.entry(t.tile_id()).or_default().extend(rings);
+    for polygon in features.iter().flatten() {
+        let input = support::rings(polygon);
+        let mut slices = slicer.polygon(&input).expect("slice");
+        // Edge-tile pieces only: fill runs carry no original edge, so the mosaic needs none of them.
+        while let Some(slice) = slices.next() {
+            if let PolygonSlice::Piece(piece) = slice.expect("slice") {
+                per_tile
+                    .entry(piece.tile())
+                    .or_default()
+                    .extend(piece.rings().map(|r| r.to_vec()));
+            }
         }
     }
     let mut mosaic = PolygonMosaic::<Coord<i32>>::new(extent, buffer).expect("config");
@@ -366,22 +363,6 @@ fn twice_area(ring: &[Coord<i32>]) -> i64 {
         .sum()
 }
 
-/// The tile that `tile` becomes under [`dihedral`] symmetry `k` (the one its center maps into).
-fn dihedral_tile(tile: TileId, extent: u32, k: u8) -> TileId {
-    // Doubled coordinates keep the center on the integer grid.
-    let e = extent as i32;
-    let center = |t: i32| (2 * t + 1) * e;
-    let poly = FixturePolygon {
-        exterior: vec![Coord {
-            x: center(tile.x),
-            y: center(tile.y),
-        }],
-        holes: Vec::new(),
-    };
-    let c = dihedral(&[poly], k)[0].exterior[0];
-    TileId::new(c.x.div_euclid(2 * e), c.y.div_euclid(2 * e))
-}
-
 /// Every rotation and mirror image of a fixture still matches the single-tile oracle (fill rings
 /// included) and still reassembles, at both snapshot buffers and on two finer grids — tiles of 10
 /// put boundaries through many fixture vertices, tiles of 7 through few. Each symmetry walks rows
@@ -400,403 +381,35 @@ fn fixture_symmetries(path: &Path) {
     }
 }
 
-/// What one tile of a [`Sliced`] feature holds.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum Holds {
-    Nothing,
-    Edge,
-    Fill,
-}
-
-fn holds(sliced: &Sliced, tile: TileId) -> Holds {
-    if sliced.tiles.contains_key(&tile) {
-        Holds::Edge
-    } else if sliced.fills.contains_key(&tile) {
-        Holds::Fill
-    } else {
-        Holds::Nothing
-    }
-}
-
-/// A named polygon, and what some of its tiles (x, y) must hold.
-type Case<'a> = (&'a str, FixturePolygon, &'a [(i32, i32, Holds)]);
-
-/// planetiler's `TiledGeometryTest` hole cases in their own frame: its coordinates are in tiles, so
-/// at 10 units per tile they land on integers with the tile boundaries where planetiler has them.
-/// Each case runs under all eight [`dihedral`] symmetries (planetiler checks seven of them) against
-/// the oracle and the mosaic, and makes planetiler's own assertions about particular tiles (plus the
-/// tiles they imply for each hole alone).
-#[test]
-fn planetiler_hole_cases() {
-    // Closed, as the fixtures' rings are.
-    let ring = |pts: &[(i32, i32)]| {
-        pts.iter()
-            .chain(&pts[..1])
-            .map(|&(x, y)| Coord { x, y })
-            .collect::<Vec<_>>()
-    };
-    let polygon = |rings: &[&[(i32, i32)]]| FixturePolygon {
-        exterior: ring(rings[0]),
-        holes: rings[1..].iter().map(|r| ring(r)).collect(),
-    };
-    let outer: &[(i32, i32)] = &[(10, 10), (100, 10), (100, 100), (10, 100)];
-    // testOverlappingHoles: a chevron hole, and a triangle hole in its notch.
-    let chevron: &[(i32, i32)] = &[(20, 20), (20, 90), (90, 90), (30, 50), (90, 20)];
-    let in_notch: &[(i32, i32)] = &[(90, 30), (90, 80), (40, 50)];
-    let overlapping = [
-        (3, 3, Holds::Nothing),
-        (7, 4, Holds::Nothing),
-        (1, 1, Holds::Edge),
-        (9, 9, Holds::Edge),
-    ];
-    // testInsideComplexHole: a hole wrapped round an island of polygon, with a speck hole on it.
-    let complex: &[(i32, i32)] = &[
-        (65, 15),
-        (20, 20),
-        (20, 90),
-        (90, 90),
-        (90, 20),
-        (46, 20),
-        (80, 80),
-        (30, 80),
-        (40, 20),
-    ];
-    let speck: &[(i32, i32)] = &[(55, 65), (55, 66), (56, 66)];
-    let island = [
-        (5, 5, Holds::Fill),
-        (4, 6, Holds::Fill),
-        (5, 6, Holds::Edge),
-    ];
-    // testSideOfHoleIntercepted: the chevron's arm sends a finger back into tile (7, 4).
-    let finger: &[(i32, i32)] = &[
-        (20, 20),
-        (20, 90),
-        (90, 90),
-        (30, 50),
-        (90, 20),
-        (90, 42),
-        (75, 42),
-        (75, 48),
-        (95, 48),
-        (95, 18),
-    ];
-    // testOnlyHoleTouchesOtherCellBottom: a hole outside its speck of a shell touches tile (1, 2).
-    let speck_shell: &[(i32, i32)] = &[(15, 15), (16, 15), (15, 16)];
-    let touching: &[(i32, i32)] = &[(14, 18), (16, 18), (15, 20)];
-
-    let cases: [Case<'_>; 7] = [
-        (
-            "overlapping 1",
-            polygon(&[outer, chevron]),
-            &[(3, 3, Holds::Nothing), (7, 4, Holds::Fill)],
-        ),
-        (
-            "overlapping 2",
-            polygon(&[outer, in_notch]),
-            &[(3, 3, Holds::Fill), (7, 4, Holds::Nothing)],
-        ),
-        (
-            "overlapping 1 2",
-            polygon(&[outer, chevron, in_notch]),
-            &overlapping,
-        ),
-        (
-            "overlapping 2 1",
-            polygon(&[outer, in_notch, chevron]),
-            &overlapping,
-        ),
-        ("complex", polygon(&[outer, complex, speck]), &island),
-        ("finger", polygon(&[outer, finger]), &[(7, 4, Holds::Edge)]),
-        (
-            // Named so `reassembles` expects only the shell back.
-            HOLE_OUTSIDE_SHELL[0],
-            polygon(&[speck_shell, touching]),
-            &[(1, 1, Holds::Edge), (1, 2, Holds::Nothing)],
-        ),
-    ];
-    for (name, polygon, expect) in &cases {
-        for k in 0..8 {
-            let polygons = dihedral(std::slice::from_ref(polygon), k);
-            let label = format!("{name} (symmetry {k})");
-            for buffer in [0, 1, 3] {
-                check(&polygons, 10, buffer, &label);
-                reassembles(std::slice::from_ref(&polygons), 10, buffer, &label);
+/// One polygon sliced into every tile: its edge tiles' pieces, its fill runs, and its fill ring.
+fn slice_one_polygon(
+    polygon: &FixturePolygon,
+    extent: u32,
+    buffer: u16,
+) -> (BTreeMap<TileId, Pieces>, Vec<FillRun>, Vec<Coord<i32>>) {
+    let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
+    let input = support::rings(polygon);
+    let mut slices = slicer.polygon(&input).expect("slice");
+    let (mut tiles, mut runs) = (BTreeMap::new(), Vec::new());
+    while let Some(slice) = slices.next() {
+        match slice.expect("slice") {
+            PolygonSlice::Piece(piece) => {
+                let rings: Rings = piece.rings().map(|r| r.to_vec()).collect();
+                assert!(tiles.insert(piece.tile(), vec![rings]).is_none());
             }
-            // planetiler's assertions, made without a buffer.
-            let sliced = all_tiles(&polygons, 10, 0);
-            for &(x, y, want) in *expect {
-                let tile = dihedral_tile(TileId::new(x, y), 10, k);
-                assert_eq!(
-                    holds(&sliced, tile),
-                    want,
-                    "{label}: tile ({x}, {y}) -> {tile:?}"
-                );
-            }
+            PolygonSlice::Run(run) => runs.push(run),
         }
     }
-}
-
-/// A ring's edge tiles past the row's last center-line crossing: from the crossing at x = 32.5,
-/// the ring runs on above the center line out to x = 100 and back, touching row 0's tiles 4..=9
-/// without crossing again. They must still be emitted (a PR review's counterexample).
-#[test]
-fn edge_tiles_past_last_crossing_match_one() {
-    let ring: Vec<Coord<i32>> = [(0, 0), (10, 0), (10, 4), (100, 8), (100, 9), (0, 9), (0, 0)]
-        .map(|(x, y)| Coord { x, y })
-        .to_vec();
-    let polygon = FixturePolygon {
-        exterior: ring,
-        holes: Vec::new(),
-    };
-    for k in 0..8 {
-        let polygons = dihedral(std::slice::from_ref(&polygon), k);
-        for buffer in [0, 1, 4] {
-            check(
-                &polygons,
-                10,
-                buffer,
-                &format!("past last crossing (symmetry {k})"),
-            );
-        }
-    }
-    let all = all_tiles(std::slice::from_ref(&polygon), 10, 0);
-    assert!((1..10).all(|x| all.tiles.contains_key(&TileId::new(x, 0))));
-}
-
-/// Overlapping polygons (an invalid multipolygon) fill the shared tiles once each, in polygon order,
-/// exactly as the single-tile slicer does — even where the later polygon's run starts first, and one
-/// is wound the other way.
-#[test]
-fn overlapping_polygons_match_one() {
-    let square = |x0: i32, y0: i32, side: i32, ccw: bool| {
-        let mut ring = vec![
-            Coord { x: x0, y: y0 },
-            Coord {
-                x: x0 + side,
-                y: y0,
-            },
-            Coord {
-                x: x0 + side,
-                y: y0 + side,
-            },
-            Coord {
-                x: x0,
-                y: y0 + side,
-            },
-        ];
-        if !ccw {
-            ring.reverse();
-        }
-        FixturePolygon {
-            exterior: ring,
-            holes: Vec::new(),
-        }
-    };
-    let polygons = [
-        square(50, 3, 100, true),
-        square(2, 0, 100, false),
-        square(20, 20, 50, true),
-    ];
-    for (extent, buffer) in [(7, 0), (7, 3), (10, 1), (4, 0)] {
-        check(&polygons, extent, buffer, "overlapping");
-    }
-    let all = all_tiles(&polygons, 7, 0);
-    assert!(
-        all.fills.values().any(|polys| polys.len() == 3),
-        "some tile is filled by all three polygons"
-    );
-}
-
-/// Many holes, from specks inside one tile to holes containing whole tiles, some overlapping: every
-/// tile still matches the oracle, now that untouched holes are settled by count rather than visited.
-#[test]
-fn many_holes_match_one() {
-    let mut state = 0x2545_F491_4F6C_DD1D_u64;
-    let mut below = |n: i32| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        i32::try_from(state % u64::from(n.unsigned_abs())).expect("fits")
-    };
-    let square = |x: i32, y: i32, side: i32| {
-        [(x, y), (x + side, y), (x + side, y + side), (x, y + side)]
-            .map(|(x, y)| Coord { x, y })
-            .to_vec()
-    };
-    let holes = (0..60)
-        .map(|i| {
-            let side = if i % 6 == 0 {
-                30 + below(60)
-            } else {
-                1 + below(8)
-            };
-            square(10 + below(380 - side), 10 + below(380 - side), side)
-        })
-        .collect();
-    let polygon = FixturePolygon {
-        exterior: square(0, 0, 400),
-        holes,
-    };
-    for buffer in [0, 1, 3] {
-        check(std::slice::from_ref(&polygon), 16, buffer, "many holes");
-    }
-}
-
-#[test]
-fn payload_and_attribute_ride_through() {
-    // Each vertex carries its index as an M value; synthetic corners carry the default (0).
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/polygons/fixtures/big_fill.geojson");
-    let polygons = support::load_polygon_fixture(&path);
-    let mut m = 0;
-    let mut measured = |ring: &[Coord<i32>]| -> Vec<Measured<u32>> {
-        ring.iter()
-            .map(|c| {
-                m += 1;
-                Measured::new(c.x, c.y, m)
-            })
-            .collect()
-    };
-    let rings: Vec<Vec<Vec<Measured<u32>>>> = polygons
-        .iter()
-        .map(|p| {
-            std::iter::once(measured(&p.exterior))
-                .chain(p.holes.iter().map(|h| measured(h)))
-                .collect()
-        })
-        .collect();
-
-    let mut all = PolygonSlicerAll::<Measured<u32>, &str>::new(EXTENT, 3).expect("config");
-    all.add_feature_with(&rings, "lake").expect("slice");
-    assert_eq!(all.len(), 1);
-    let feature = all.iter_features().next().expect("feature");
-    assert_eq!(*feature.attr(), "lake");
-    assert!(feature.iter_fill_runs().count() > 0);
-    for t in feature.iter_tiles() {
-        let mut one =
-            PolygonSlicerOne::<Measured<u32>>::new(EXTENT, 3, t.tile_id()).expect("config");
-        for p in &rings {
-            let holes: Vec<&[Measured<u32>]> = p[1..].iter().map(Vec::as_slice).collect();
-            one.add_feature(&p[0], &holes).expect("clip");
-        }
-        let expected: Vec<Vec<Vec<Measured<u32>>>> = one
-            .iter_features()
-            .map(|f| f.iter_rings().map(|r| r.vertices().to_vec()).collect())
-            .collect();
-        let got: Vec<Vec<Vec<Measured<u32>>>> = t
-            .iter_polygons()
-            .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-            .collect();
-        assert_eq!(got, expected, "{:?}", t.tile_id());
-        // Every polygon carries its feature's attribute, and the views are plain copies.
-        let tile = t;
-        assert!(tile.iter_polygons().all(|p| *p.attr() == "lake"));
-        assert_eq!(t.tile_id(), tile.tile_id());
-    }
-}
-
-/// A tiny deterministic PRNG (xorshift64*), so the random cases need no extra dependency.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
-    }
-
-    fn range(&mut self, lo: i32, hi: i32) -> i32 {
-        lo + (self.next() % (hi - lo) as u64) as i32
-    }
-}
-
-fn random_ring(rng: &mut Rng, lo: i32, hi: i32) -> Vec<Coord<i32>> {
-    let n = rng.range(3, 12);
-    (0..n)
-        .map(|_| Coord {
-            x: rng.range(lo, hi),
-            y: rng.range(lo, hi),
-        })
-        .collect()
-}
-
-#[test]
-fn random_multipolygons_match_one() {
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    for case in 0..400 {
-        let polygons: Vec<FixturePolygon> = (0..rng.range(1, 4))
-            .map(|_| FixturePolygon {
-                exterior: random_ring(&mut rng, -40, 40),
-                holes: (0..rng.range(0, 3))
-                    .map(|_| random_ring(&mut rng, -40, 40))
-                    .collect(),
-            })
-            .collect();
-        let extent = [5, 9, 16, 25][case % 4];
-        let buffer = [0, 1, 2, 4][(case / 4) % 4] % (extent as u16).div_ceil(2);
-        check(&polygons, extent, buffer, &format!("random case {case}"));
-    }
-}
-/// A star-shaped (hence simple) ring around `center`: angles increasing, radii in `r/2..r`. Wide
-/// interiors, so many tiles are fully covered; `reverse` flips the winding.
-fn star_ring(rng: &mut Rng, center: (i32, i32), r: i32, reverse: bool) -> Vec<Coord<i32>> {
-    let n = rng.range(5, 40);
-    let mut ring: Vec<Coord<i32>> = (0..n)
-        .map(|i| {
-            let angle = std::f64::consts::TAU * f64::from(i) / f64::from(n);
-            let radius = f64::from(rng.range(r / 2, r));
-            Coord {
-                x: center.0 + (radius * angle.cos()).round() as i32,
-                y: center.1 + (radius * angle.sin()).round() as i32,
-            }
-        })
-        .collect();
-    if reverse {
-        ring.reverse();
-    }
-    ring
-}
-
-#[test]
-fn random_star_multipolygons_match_one() {
-    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
-    let mut fills = 0;
-    for case in 0..300 {
-        let polygons: Vec<FixturePolygon> = (0..rng.range(1, 4))
-            .map(|_| {
-                let center = (rng.range(-60, 60), rng.range(-60, 60));
-                let r = rng.range(20, 80);
-                FixturePolygon {
-                    exterior: star_ring(&mut rng, center, r, case % 3 == 0),
-                    // Holes inside the exterior's inner radius, so the polygon stays valid-ish.
-                    holes: (0..rng.range(0, 3))
-                        .map(|_| {
-                            let c = (
-                                center.0 + rng.range(-r / 4, r / 4 + 1),
-                                center.1 + rng.range(-r / 4, r / 4 + 1),
-                            );
-                            star_ring(&mut rng, c, (r / 5).max(4), case % 2 == 0)
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-        let extent = [4, 7, 10, 25][case % 4];
-        let buffer = [0, 1, 3][(case / 4) % 3] % (extent as u16).div_ceil(2);
-        check(&polygons, extent, buffer, &format!("star case {case}"));
-        fills += all_tiles(&polygons, extent, buffer).fills.len();
-    }
-    assert!(
-        fills > 10_000,
-        "the star cases exercise interior fill ({fills} tiles)"
-    );
+    let ring = runs
+        .first()
+        .map(|run| slices.fill_ring(run).to_vec())
+        .unwrap_or_default();
+    (tiles, runs, ring)
 }
 
 /// A z14-like ocean: a square spanning 16384 × 16384 tiles of extent 4096 (2^28 tiles) with a
 /// 21 × 21-tile hole. Interior tiles must come back as one or two runs per row — bounded memory and
-/// time proportional to the perimeter and the rows — and the routing budget (2^25 tile visits)
-/// must not apply to them.
+/// time proportional to the perimeter and the rows, none per covered tile.
 #[test]
 fn huge_polygon_fills_by_runs() {
     const N: i32 = 1 << 14;
@@ -804,14 +417,8 @@ fn huge_polygon_fills_by_runs() {
     // The exterior sits 100 units inside the outer tiles; the hole's edges sit mid-tile in
     // columns/rows N/2 ± 10, so it has 19 × 19 tiles strictly inside.
     let polygon = support::huge_square();
-    let mut all = PolygonSlicerAll::<Coord<i32>>::new(E as u32, 64).expect("config");
-    all.add_feature([support::rings(&polygon)])
-        .expect("huge polygon slices");
-    let feature = all.iter_features().next().expect("one feature");
-
-    let edge_tiles = feature.iter_tiles().count();
-    assert_eq!(edge_tiles, 4 * N as usize - 4 + (21 * 21 - 19 * 19));
-    let runs: Vec<FillRun> = feature.iter_fill_runs().collect();
+    let (tiles, runs, fill_ring) = slice_one_polygon(&polygon, E as u32, 64);
+    assert_eq!(tiles.len(), 4 * N as usize - 4 + (21 * 21 - 19 * 19));
     assert_eq!(
         runs.len(),
         (N - 2) as usize + 21,
@@ -828,51 +435,30 @@ fn huge_polygon_fills_by_runs() {
         TileId::new(N - 1, 77),
         TileId::new(N / 2 - 10, N / 2),
     ] {
-        let t = feature
-            .iter_tiles()
-            .find(|t| t.tile_id() == tile)
-            .expect("edge tile");
-        let pieces: Pieces = t
-            .iter_polygons()
-            .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-            .collect();
-        assert_eq!(pieces, one(tile), "{tile:?}");
+        assert_eq!(tiles[&tile], one(tile), "{tile:?}");
     }
     let fill = TileId::new(5, 9);
-    let run = runs
-        .iter()
-        .find(|r| r.y == fill.y && r.x.contains(&fill.x))
-        .expect("a run covers the tile");
-    assert_eq!(one(fill), vec![vec![feature.fill_ring(run).to_vec()]]);
+    assert!(
+        runs.iter().any(|r| r.y == fill.y && r.x.contains(&fill.x)),
+        "a run covers the tile"
+    );
+    assert_eq!(one(fill), vec![vec![fill_ring.clone()]]);
     assert!(one(TileId::new(N / 2, N / 2)).is_empty(), "inside the hole");
 }
 
 /// A z14-scale polygon with a long diagonal edge — the [`support::diagonal_triangle`] over 16384 ×
 /// 16384 tiles of extent 4096 — slices, its edge tiles proportional to the perimeter, and around a
-/// sample of edge tiles every tile agrees with [`PolygonSlicerOne`]: an edge tile's pieces match,
-/// a filled tile is one it fills with whole-tile boxes, and any other tile is one it leaves empty.
+/// sample of edge tiles every tile agrees with [`Slicer::tile_polygon`]: an edge tile's pieces
+/// match, a filled tile is one it fills with the fill ring, and any other tile is one it leaves empty.
 #[test]
 fn long_diagonal_edge_slices_at_z14() {
     const N: i32 = 1 << 14;
     let extent = support::DIAGONAL_EXTENT as u32;
     let polygon = support::diagonal_triangle(N);
-    let mut all = PolygonSlicerAll::<Coord<i32>>::new(extent, 64).expect("config");
-    all.add_feature([support::rings(&polygon)])
-        .expect("a z14 diagonal edge slices");
-    let feature = all.iter_features().next().expect("one feature");
-    let tiles: BTreeMap<TileId, Pieces> = feature
-        .iter_tiles()
-        .map(|t| {
-            let pieces = t
-                .iter_polygons()
-                .map(|p| p.iter_rings().map(|r| r.vertices().to_vec()).collect())
-                .collect();
-            (t.tile_id(), pieces)
-        })
-        .collect();
+    let (tiles, runs, fill_ring) = slice_one_polygon(&polygon, extent, 64);
     assert!(tiles.len() < 8 * N as usize, "{}", tiles.len());
     let mut rows: BTreeMap<i32, Vec<FillRun>> = BTreeMap::new();
-    for r in feature.iter_fill_runs() {
+    for r in runs {
         rows.entry(r.y).or_default().push(r);
     }
     let filled_tiles: u64 = rows.values().flatten().map(|r| r.x.len() as u64).sum();
@@ -890,11 +476,7 @@ fn long_diagonal_edge_slices_at_z14() {
             let expected = one(tile);
             match (tiles.get(&tile), fill_of(tile)) {
                 (Some(pieces), _) => assert_eq!(pieces, &expected, "{tile:?}"),
-                (None, Some(run)) => assert_eq!(
-                    expected,
-                    vec![vec![feature.fill_ring(run).to_vec()]],
-                    "{tile:?}"
-                ),
+                (None, Some(_)) => assert_eq!(expected, vec![vec![fill_ring.clone()]], "{tile:?}"),
                 (None, None) => assert!(expected.is_empty(), "{tile:?}"),
             }
         }
