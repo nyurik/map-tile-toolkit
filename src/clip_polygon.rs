@@ -477,15 +477,13 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     Ok(RingClip::Clipped)
 }
 
-/// How `ring` (distinct vertices, see [`push_distinct`]) meets the box `[min, max]` — what
-/// [`clip_ring`] returns, without clipping it: [`RingClip::Clipped`] at the first edge touching the
-/// box, else the parity of the box center's ray crossings, as there.
+/// How a kept `ring` (at least 3 distinct vertices, see [`push_distinct`]) meets the box
+/// `[min, max]` — what [`clip_ring`] returns, without clipping it: [`RingClip::Clipped`] at the
+/// first edge touching the box, else the parity of the box center's ray crossings, as there.
 pub(crate) fn ring_meets_box<V: Vertex>(ring: &[V], min: Coord<i32>, max: Coord<i32>) -> RingClip {
-    let Some(last) = ring.last() else {
-        return RingClip::Outside;
-    };
     let cy = center_y(min, max);
-    let (mut a, mut inside) = (last.position(), false);
+    // Starting from the closing edge's first vertex (a kept ring is never empty).
+    let (mut a, mut inside) = (ring[ring.len() - 1].position(), false);
     for v in ring {
         let b = v.position();
         if segment_intersects(a, b, min, max) {
