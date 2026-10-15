@@ -15,8 +15,8 @@
 //!
 //! What a tile holds is then the input, so the snapshot shows which tiles hold it: the input (yellow)
 //! and every reached tile's buffered box, tagged with the tile and how many geometries it holds.
-//! `snapshots-unclipped/` is buffer 0, `snapshots-unclipped-5/` buffer 5. Regenerate with `just
-//! bless`.
+//! `snapshots-unclipped/` is buffer 0; buffer 5 runs every check above but is not snapshotted (the
+//! buffered boxes would only grow the same picture). Regenerate with `just bless`.
 //!
 //! [`Local::origin`]: map_tile_toolkit::Local::origin
 //! [`Local::global`]: map_tile_toolkit::Local::global
@@ -230,7 +230,7 @@ fn polygons([path]: [&Path; 1]) {
 }
 
 /// Snapshot `inputs` and the buffered box of every reached tile, with how many geometries it holds,
-/// into `{kind}/snapshots-unclipped[-{buffer}]/`.
+/// into `{kind}/snapshots-unclipped/` (buffer 0 only).
 fn snapshot(
     kind: &str,
     stem: &str,
@@ -238,6 +238,9 @@ fn snapshot(
     mut features: Vec<geojson::Feature>,
     tiles: &BTreeMap<TileId, u32>,
 ) {
+    if buffer > 0 {
+        return;
+    }
     let (e, b) = (EXTENT as i32, i32::from(buffer));
     for (&tile, &count) in tiles {
         let (x0, y0) = (tile.x * e - b, tile.y * e - b);
@@ -247,17 +250,10 @@ fn snapshot(
         f.set_property("geometries", json!(count));
         features.push(f);
     }
-    let (dir, name) = if buffer > 0 {
-        (
-            format!("{kind}/snapshots-unclipped-{buffer}"),
-            format!("{stem}-{buffer}.geojson"),
-        )
-    } else {
-        (
-            format!("{kind}/snapshots-unclipped"),
-            format!("{stem}.geojson"),
-        )
-    };
+    let (dir, name) = (
+        format!("{kind}/snapshots-unclipped"),
+        format!("{stem}.geojson"),
+    );
     insta::with_settings!({
         snapshot_path => dir,
         prepend_module_to_snapshot => false,

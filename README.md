@@ -247,7 +247,9 @@ and items are the same, so one consumer loop serves both modes: a line comes as 
 tile whose run is all of the line, and a polygon as one `PolygonPiece` per tile with all of its rings
 — in the tiles it covers entirely too, so no `FillRun` is yielded. Nothing is copied or built: the
 slices borrow the input, so the cost is finding the tiles (plus, for a line, a set of the tiles found
-so far, to give each just once). Points are never clipped, so the mode does not change them.
+so far, to give each just once: memory proportional to their number, and on a long line crossing
+mostly new tiles, several times a clipped walk's instructions). The consumer's cost is the whole
+geometry per tile, so a polygon covering many tiles costs it that many times its vertices. Points are never clipped, so the mode does not change them.
 
 ```rust
 use geo_types::coord;
