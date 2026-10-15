@@ -182,13 +182,15 @@ just outside the buffered box, so each ring stays closed and correctly wound but
 the box — fine for renderers that clip to the tile (MVT), not for consumers that need OGC-valid
 output. `PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
 
-A ring keeps every vertex with an edge touching the box. Each dropped excursion is closed past the
-box, by the corners it winds around (a straight chord when it leaves and returns on the same side),
-unless it has no more vertices than that detour has corners, and is kept as it is. A tile the polygon covers gets the box's four corners,
-and a tile inside a hole gets nothing. Each ring is clipped on its own, so a hole that crosses the
+A ring keeps every vertex with an edge touching the box. Where it leaves the box and comes back, the
+vertices outside are compared with the synthetic corners just past the box that a detour winding
+around the tile the same way would need: with more vertices they are replaced by that detour (a
+straight chord when it needs no corner), else kept as they are. A tile the polygon covers gets the
+four corners alone. Synthetic corners sit one unit outside the buffered box: tile-local `-buffer - 1`
+or `extent + buffer` on each axis, so they never land in it. A tile inside a hole gets nothing. Each ring is clipped on its own, so a hole that crosses the
 tile keeps its own outside vertices even where the exterior's far part was dropped: past the box, the
-hole can reach outside the exterior's chord or detour. That is why a piece is valid only inside the
-tile's box:
+hole can reach outside the exterior's chord or detour. Such a piece is technically invalid geometry,
+but only outside the buffered box: the part a renderer draws, clipped to the tile, is valid:
 
 ![Which polygon vertices a tile keeps](https://raw.githubusercontent.com/nyurik/map-tile-toolkit/main/docs/images/clip-polygons.svg)
 
