@@ -678,7 +678,8 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
 
 /// Load the polygon `rings` into `s`: how it starts, or `None` if there is nothing to slice (a
 /// degenerate exterior). Every overflow the slicing could meet is settled here, from the polygon's
-/// bounds. (Out of line, once per polygon: inlined, it costs the small-polygon benchmarks 4%.)
+/// bounds.
+// Once per polygon: inlined into `PolygonSlices::new`, it costs small polygons ~4%.
 #[inline(never)]
 fn prepare<V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
@@ -775,8 +776,9 @@ impl Sweep {
         }
     }
 
-    /// [`Self::step`] unclipped. Out of line, and the mode a constant: the clipped sweep compiles
-    /// (and inlines) as if the unclipped one did not exist.
+    /// [`Self::step`] unclipped.
+    // Keeps this second copy of the sweep out of `PolygonSlices::next`, so the clipped one inlines as
+    // before (any extra code there costs the clipped sweep 2-5%).
     #[inline(never)]
     fn step_whole<V: PolyVertex, R: AsRef<[V]>>(
         &mut self,
