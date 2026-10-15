@@ -11,6 +11,12 @@
 Clip integer **polylines** and **polygons** into per-tile pieces on an integer tile
 grid, keeping the geometry's original vertices. No new vertexes are ever created on a line. The result has every vertex inside a tile, plus the first vertex just outside wherever the line crosses an edge. The tile may optionally include a buffer of `[0..extent/2)` size, which increases the number of vertices shared between neighboring tiles. Polygon rings are closed with synthetic corners strictly outside the buffered tile (see [Polygons](#polygons)).
 
+A line vertex is kept when one of its two segments touches the tile's buffered box, and a run breaks
+only where a vertex is dropped. So a single segment outside the tile is kept, and only a longer
+excursion splits the line into several runs:
+
+![Which line vertices a tile keeps](https://raw.githubusercontent.com/nyurik/map-tile-toolkit/main/docs/images/clip-lines.svg)
+
 ## Usage
 
 * `Slicer` takes **one geometry** at a time — a line, a point or a polygon — and returns a lazy
@@ -175,6 +181,16 @@ Original vertices are kept; where a ring leaves the tile, the gap is bridged by 
 just outside the buffered box, so each ring stays closed and correctly wound but is valid only inside
 the box — fine for renderers that clip to the tile (MVT), not for consumers that need OGC-valid
 output. `PolygonMosaic` reassembles the tiles, dropping the synthetic parts.
+
+A ring keeps every vertex with an edge touching the box. Each dropped excursion is closed past the
+box, by the corners it winds around (a straight chord when it leaves and returns on the same side),
+unless it has no more vertices than that detour has corners, and is kept as it is. A tile the polygon covers gets the box's four corners,
+and a tile inside a hole gets nothing. Each ring is clipped on its own, so a hole that crosses the
+tile keeps its own outside vertices even where the exterior's far part was dropped: past the box, the
+hole can reach outside the exterior's chord or detour. That is why a piece is valid only inside the
+tile's box:
+
+![Which polygon vertices a tile keeps](https://raw.githubusercontent.com/nyurik/map-tile-toolkit/main/docs/images/clip-polygons.svg)
 
 The polygon is sliced row by row, and nothing outside the current tile row is kept: the call reads
 the rings once, to bound and index them, and the iterator holds one row plus a small index of the

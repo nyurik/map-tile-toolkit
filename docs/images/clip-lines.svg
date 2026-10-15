@@ -1,0 +1,82 @@
+<svg class="d" viewBox="0 0 683.2 387.6" role="img" aria-label="Line clipping keeps original vertices: a vertex stays when one of its segments touches the tile's buffered box, so a run reaches the first vertex past the edge, a segment crossing the tile keeps both outside ends, one segment outside is bridged, and only a longer excursion drops vertices and splits the run" xmlns="http://www.w3.org/2000/svg">
+<title>Line clipping keeps original vertices: a vertex stays when one of its segments touches the tile's buffered box, so a run reaches the first vertex past the edge, a segment crossing the tile keeps both outside ends, one segment outside is bridged, and only a longer excursion drops vertices and splits the run</title>
+<style>.d{--fg:var(--md-default-fg-color,#6e7781);--light:var(--md-default-fg-color--light,#848d97);
+--lighter:var(--md-default-fg-color--lighter,#848d9799);--f0:#3f7ad6;--f1:#e07a2e;
+font-family:var(--md-code-font-family,ui-monospace,monospace);font-size:13px}
+.d text{fill:var(--fg);dominant-baseline:central}
+.d .muted{fill:var(--light)}.d .small{font-size:11px}.d .bold{font-weight:700}.d .mid{text-anchor:middle}
+.d .tile{fill:none;stroke:var(--light);stroke-width:1}
+.d .buf{fill:none;stroke:var(--light);stroke-dasharray:3 3}
+.d .input{fill:none;stroke:var(--lighter);stroke-width:1.5;stroke-linejoin:round}
+.d .line{fill:none;stroke:var(--f1);stroke-width:2;stroke-linejoin:round}
+.d .f1{fill:var(--f1);fill-opacity:.2;stroke:var(--f1);stroke-width:1.5;stroke-linejoin:round}
+.d .synth{fill:none;stroke:var(--f0);stroke-width:1.5;stroke-dasharray:4 2}
+.d .kept{fill:var(--f1)}
+.d .dropped{fill:none;stroke:var(--light);stroke-width:1.25}
+.d .corner{fill:var(--f0)}
+.d .t0{fill:var(--f0)}.d .t1{fill:var(--f1)}</style>
+<text class="bold small" x="20" y="22">inside</text>
+<text class="muted small" x="20" y="166.8">every vertex kept</text>
+<rect class="tile" x="77.6" y="62.8" width="72" height="72"/>
+<path class="input" d="M92,84.4L113.6,116.8L135.2,91.6"/>
+<path class="line" d="M92,84.4L113.6,116.8L135.2,91.6"/>
+<circle class="kept" cx="92" cy="84.4" r="3.5"/>
+<circle class="kept" cx="113.6" cy="116.8" r="3.5"/>
+<circle class="kept" cx="135.2" cy="91.6" r="3.5"/>
+<text class="bold small" x="244.4" y="22">leaving</text>
+<text class="muted small" x="244.4" y="166.8">first vertex outside kept</text>
+<rect class="tile" x="302" y="62.8" width="72" height="72"/>
+<path class="input" d="M316.4,98.8L352.4,84.4L399.2,70L424.4,98.8"/>
+<path class="line" d="M316.4,98.8L352.4,84.4L399.2,70"/>
+<circle class="kept" cx="399.2" cy="70" r="3.5"/>
+<circle class="kept" cx="352.4" cy="84.4" r="3.5"/>
+<circle class="kept" cx="316.4" cy="98.8" r="3.5"/>
+<circle class="dropped" cx="424.4" cy="98.8" r="3"/>
+<text class="bold small" x="468.8" y="22">crossing</text>
+<text class="muted small" x="468.8" y="166.8">no vertex inside: both kept</text>
+<rect class="tile" x="526.4" y="62.8" width="72" height="72"/>
+<path class="input" d="M483.2,48.4L504.8,73.6L623.6,120.4L645.2,145.6"/>
+<path class="line" d="M504.8,73.6L623.6,120.4"/>
+<circle class="kept" cx="504.8" cy="73.6" r="3.5"/>
+<circle class="kept" cx="623.6" cy="120.4" r="3.5"/>
+<circle class="dropped" cx="645.2" cy="145.6" r="3"/>
+<circle class="dropped" cx="483.2" cy="48.4" r="3"/>
+<text class="bold small" x="20" y="196.8">one segment out</text>
+<text class="muted small" x="20" y="341.6">both its ends kept: one run</text>
+<rect class="tile" x="77.6" y="237.6" width="72" height="72"/>
+<path class="input" d="M99.2,291.6L167.6,288L167.6,219.6L113.6,255.6"/>
+<path class="line" d="M99.2,291.6L167.6,288L167.6,219.6L113.6,255.6"/>
+<circle class="kept" cx="167.6" cy="288" r="3.5"/>
+<circle class="kept" cx="113.6" cy="255.6" r="3.5"/>
+<circle class="kept" cx="167.6" cy="219.6" r="3.5"/>
+<circle class="kept" cx="99.2" cy="291.6" r="3.5"/>
+<text class="bold small" x="244.4" y="196.8">longer excursion</text>
+<text class="muted small" x="244.4" y="341.6">vertex dropped: two runs</text>
+<rect class="tile" x="302" y="237.6" width="72" height="72"/>
+<path class="input" d="M323.6,291.6L392,288L417.2,252L392,216L338,255.6"/>
+<path class="line" d="M323.6,291.6L392,288"/>
+<path class="line" d="M392,216L338,255.6"/>
+<circle class="kept" cx="392" cy="288" r="3.5"/>
+<circle class="kept" cx="392" cy="216" r="3.5"/>
+<circle class="kept" cx="338" cy="255.6" r="3.5"/>
+<circle class="kept" cx="323.6" cy="291.6" r="3.5"/>
+<circle class="dropped" cx="417.2" cy="252" r="3"/>
+<text class="bold small" x="468.8" y="196.8">buffer</text>
+<text class="muted small" x="468.8" y="341.6">dashed box counts as inside</text>
+<rect class="tile" x="526.4" y="237.6" width="72" height="72"/>
+<rect class="buf" x="519.2" y="230.4" width="86.4" height="86.4"/>
+<path class="input" d="M548,280.8L602,259.2L630.8,244.8L652.4,270"/>
+<path class="line" d="M548,280.8L602,259.2L630.8,244.8"/>
+<circle class="kept" cx="548" cy="280.8" r="3.5"/>
+<circle class="kept" cx="630.8" cy="244.8" r="3.5"/>
+<circle class="kept" cx="602" cy="259.2" r="3.5"/>
+<circle class="dropped" cx="652.4" cy="270" r="3"/>
+<path class="input" d="M14,373.6H34"/>
+<text class="muted small" x="44" y="373.6">input</text>
+<path class="line" d="M93.5,373.6H113.5"/>
+<text class="muted small" x="123.5" y="373.6">tile's runs</text>
+<circle class="kept" cx="223.2" cy="373.6" r="3.5"/>
+<text class="muted small" x="233.2" y="373.6">kept</text>
+<circle class="dropped" cx="286.0" cy="373.6" r="3"/>
+<text class="muted small" x="296.0" y="373.6">dropped</text>
+</svg>
