@@ -2,7 +2,7 @@
 //! yields every piece of a polygon in every tile it reaches, and
 //! [`Slicer::tile_polygon`](crate::Slicer::tile_polygon) its piece in one tile.
 //!
-//! A polygon is sliced lazily by a row-by-row scanline (see `docs/polygon-slicer.md` §6/§8):
+//! A polygon is sliced lazily by a row-by-row scanline:
 //!
 //! 1. **Prepare** — one pass over the polygon's rings, borrowing them in place: drop degenerate rings,
 //!    take the bounding box, and record the `y`-range of every run of [`CHUNK`] consecutive edges. A

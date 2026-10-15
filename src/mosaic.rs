@@ -28,7 +28,7 @@
 //!
 //! - [`Mosaic`] uses every consecutive vertex pair of each **run**. It needs only the `extent`.
 //! - [`PolygonMosaic`] takes each tile's **rings** and keeps only the edges that **touch** the tile's
-//!   buffered box `B` (design doc §7). This drops all the slicer's synthetic geometry — the
+//!   buffered box `B`. This drops all the slicer's synthetic geometry — the
 //!   clip-boundary corners, fill boxes, and gap-bridging chords, which are routed strictly *outside*
 //!   `B` — while every real ring edge survives in the tile that owns its start vertex (whose cell lies
 //!   in `B`, so the edge touches `B` there). The *same* edge machinery then reassembles the rings, with
@@ -425,13 +425,13 @@ fn rebase<V: Vertex>(run: &[V], off_x: i64, off_y: i64) -> Result<Vec<V>, TileEr
 /// **touches** the tile's buffered box `[min, max]`.
 ///
 /// This one test drops all the slicer's synthetic geometry and reassembles the original rings, because
-/// of a clean split (design doc §7):
+/// of a clean split:
 ///
 /// - Every **real** ring edge `p → q` is emitted by the tile that owns `p`'s cell: `p` lies in that
 ///   tile's core (⊆ its box), so the edge starts inside the box and touches it. Thus no real edge is
 ///   ever lost — it survives in at least the one tile that owns its start.
 /// - Every **synthetic** edge — the clip-boundary corners, fill boxes, and gap-bridging chords the
-///   slicer injects — is routed strictly *outside* the box (design doc §5), so it never touches the box
+///   slicer injects — is routed strictly *outside* the box, so it never touches the box
 ///   and is dropped. This catches even a direct bridge chord between two *original* crossing vertices,
 ///   which a per-vertex "is this corner synthetic" test cannot (its endpoints are genuine vertices).
 ///

@@ -1,6 +1,6 @@
 //! Clipping one polygon **ring** to a single tile's buffered box, keeping the **original** vertices
 //! and closing the result with synthetic clip-boundary corners so the ring stays a closed, correctly
-//! wound loop (see `docs/polygon-slicer.md`). The engine behind polygon slicing.
+//! wound loop. The engine behind polygon slicing.
 //!
 //! A vertex is kept by the same rule as the polyline clip (an incident edge touches the box); the
 //! dropped outside excursions between kept arcs are replaced by detours that hug the box exterior
