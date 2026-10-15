@@ -81,6 +81,11 @@ Slicer<V = Coord<i32>>::tile_polygon(&mut self, TileId, &[R]) // its piece in on
 - `polygon` bounds the polygon when called and returns any `Overflow` (or `GeometryTooLarge` for
   too many rings or edges) from the call; the iteration can only end with a `GeometryTooLarge` item,
   for a piece of more than `u32::MAX` vertices.
+- A slicer built `with_clip_mode(ClipMode::Unclipped)` runs the same row sweep but builds nothing:
+  every edge tile that would get a piece, and every tile of every fill run (one at a time, so no
+  `FillRun` is yielded), gets a `PolygonPiece` of the whole polygon lent from the input, in that
+  tile's frame. `tile_polygon` decides the same tiles from each ring's edge and ray-crossing test
+  (the one `clip_ring` makes), without clipping.
 - `signed_area_2x(ring) -> i128` (§9) is public: the slicer preserves input winding, so a caller
   needing a fixed convention (MVT: exterior positive in y-down tile coordinates) normalizes once per
   polygon.

@@ -20,7 +20,7 @@ use core::iter;
 use geo_types::Coord;
 
 use crate::TileError;
-use crate::clip_polyline::line_meets_box;
+use crate::clip_polyline::{line_meets_box, segment_intersects};
 use crate::geom::{point_in_ring, ring_orientation};
 use crate::vertex::{PolyVertex, Vertex};
 
@@ -475,6 +475,30 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     };
     close_ring(pts, arcs, min, max, winding, out)?;
     Ok(RingClip::Clipped)
+}
+
+/// How `ring` (distinct vertices, see [`push_distinct`]) meets the box `[min, max]` — what
+/// [`clip_ring`] returns, without clipping it: [`RingClip::Clipped`] at the first edge touching the
+/// box, else the parity of the box center's ray crossings, as there.
+pub(crate) fn ring_meets_box<V: Vertex>(ring: &[V], min: Coord<i32>, max: Coord<i32>) -> RingClip {
+    let Some(last) = ring.last() else {
+        return RingClip::Outside;
+    };
+    let cy = center_y(min, max);
+    let (mut a, mut inside) = (last.position(), false);
+    for v in ring {
+        let b = v.position();
+        if segment_intersects(a, b, min, max) {
+            return RingClip::Clipped;
+        }
+        inside ^= ray_crossing(a, b, cy, max.x) != 0;
+        a = b;
+    }
+    if inside {
+        RingClip::Covers
+    } else {
+        RingClip::Outside
+    }
 }
 
 /// The length of `ring` without its repeated closing vertices, if that prefix has no consecutive

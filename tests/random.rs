@@ -7,6 +7,9 @@
 //! one element at a time, as a caller would. Also: nothing near the `i32` limits may panic, and the
 //! point iterator agrees with a direct test of each candidate tile there, errors included.
 //!
+//! Each check also runs unclipped ([`ClipMode::Unclipped`]): both calls must then agree too, and give
+//! each geometry exactly the tiles the clipped calls give it.
+//!
 //! The streams are fixed, so a failure reproduces; the tests are cheap enough to run in debug builds,
 //! where overflow checks are on. The fuzz targets cover the same properties open-endedly.
 
@@ -15,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use geo_types::Coord;
-use map_tile_toolkit::{PolygonSlice, Slicer, TileId};
+use map_tile_toolkit::{ClipMode, PolygonSlice, Slicer, TileId};
 
 struct Rng(u64);
 impl Rng {
@@ -97,6 +100,18 @@ fn one_tile(slicer: &mut Slicer, tile: TileId, input: &[Rings]) -> Vec<(u32, Rin
     one
 }
 
+/// Which geometries (by index) a tile's slices come from.
+fn ids<T>(slices: &[(u32, T)]) -> Vec<u32> {
+    slices.iter().map(|(i, _)| *i).collect()
+}
+
+/// An unclipped slicer.
+fn unclipped(extent: u32, buffer: u16) -> Slicer {
+    Slicer::new(extent, buffer)
+        .expect("valid config")
+        .with_clip_mode(ClipMode::Unclipped)
+}
+
 #[test]
 fn random_polygons_match_single_tile() {
     let mut rng = Rng(0x1234_5678_9ABC_DEF1);
@@ -143,6 +158,8 @@ fn random_polygons_match_single_tile() {
             Ok(g) => g,
             Err(e) => panic!("case {case}: {e}"),
         };
+        let mut whole = unclipped(extent, buffer);
+        let got_whole = all_tiles(&mut whole, &input).unwrap();
         // Reachable tile span, padded.
         let (mut lo, mut hi) = (i64::MAX, i64::MIN);
         for p in &input {
@@ -165,6 +182,13 @@ fn random_polygons_match_single_tile() {
                     g, &one,
                     "case {case} extent {extent} buffer {buffer} tile {tile:?}\ninput {input:?}"
                 );
+                let w = got_whole.get(&tile).unwrap_or(&empty);
+                assert_eq!(
+                    w,
+                    &one_tile(&mut whole, tile, &input),
+                    "unclipped case {case}"
+                );
+                assert_eq!(ids(w), ids(g), "unclipped case {case} tile {tile:?}");
                 checked_tiles += 1;
             }
         }
@@ -224,6 +248,19 @@ fn random_lines_and_points_match_single_tile() {
         for v in got.values_mut() {
             v.sort_by_key(|(p, r)| (*p, r.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>()));
         }
+        let whole = unclipped(extent, buffer);
+        let mut got_whole: BTreeMap<TileId, Runs> = BTreeMap::new();
+        for (part, line) in (0_u32..).zip(&parts) {
+            for s in whole.line(line).unwrap() {
+                got_whole
+                    .entry(s.tile())
+                    .or_default()
+                    .push((part, s.run().to_vec()));
+            }
+        }
+        for v in got_whole.values_mut() {
+            v.sort_by_key(|(p, _)| *p);
+        }
         let e = i64::from(extent);
         let (t0, t1) = ((-span / e) - 3, (span * 3 / e) + 3);
         for ty in t0..=t1 {
@@ -245,6 +282,21 @@ fn random_lines_and_points_match_single_tile() {
                     &one,
                     "case {case} e{extent} b{buffer} tile {tile:?} parts {parts:?}"
                 );
+                // Unclipped: each part that has runs here, once, whole.
+                let w = got_whole.get(&tile).unwrap_or(&empty);
+                let mut expected = ids(&one);
+                expected.dedup();
+                assert_eq!(ids(w), expected, "unclipped case {case} tile {tile:?}");
+                let one_whole: Runs = (0_u32..)
+                    .zip(&parts)
+                    .flat_map(|(part, line)| {
+                        whole
+                            .tile_line(tile, line)
+                            .unwrap()
+                            .map(move |s| (part, s.run().to_vec()))
+                    })
+                    .collect();
+                assert_eq!(w, &one_whole, "unclipped case {case} tile {tile:?}");
             }
         }
         // Points: against a brute-force box test.
@@ -296,6 +348,8 @@ fn random_self_intersecting_polygons_match_single_tile() {
         }
         let mut slicer = Slicer::new(extent, buffer).unwrap();
         let got = all_tiles(&mut slicer, &input).unwrap();
+        let mut whole = unclipped(extent, buffer);
+        let got_whole = all_tiles(&mut whole, &input).unwrap();
         let e = i64::from(extent);
         let (t0, t1) = ((-span / e) - 3, (span / e) + 3);
         for ty in t0..=t1 {
@@ -308,6 +362,13 @@ fn random_self_intersecting_polygons_match_single_tile() {
                     g, &one,
                     "case {case} e{extent} b{buffer} {tile:?}\ninput {input:?}"
                 );
+                let w = got_whole.get(&tile).unwrap_or(&empty);
+                assert_eq!(
+                    w,
+                    &one_tile(&mut whole, tile, &input),
+                    "unclipped case {case}"
+                );
+                assert_eq!(ids(w), ids(g), "unclipped case {case} tile {tile:?}");
                 tiles_checked += 1;
             }
         }
@@ -420,6 +481,41 @@ fn extreme_coordinates_never_panic() {
             ring[0].y.div_euclid(extent as i32),
         );
         let _ = sl.tile_polygon(t0, &poly);
+
+        // Unclipped, nothing panics either (the walks capped: a fill run expands tile by tile), and
+        // every tile `line` and `polygon` give the whole geometry is one `tile_*` accepts.
+        let mut whole = sl.with_clip_mode(ClipMode::Unclipped);
+        if let Ok(slices) = whole.line(&ring) {
+            for s in slices.take(500) {
+                let one = whole.tile_line(s.tile(), &ring).expect("accepted by line");
+                assert_eq!(one.count(), 1, "e{extent} b{buffer} {:?}", s.tile());
+            }
+        }
+        let mut tiles = Vec::new();
+        if let Ok(mut it) = whole.polygon(&poly) {
+            while tiles.len() < 500
+                && let Some(s) = it.next()
+            {
+                match s {
+                    Ok(PolygonSlice::Piece(p)) => {
+                        p.rings().for_each(|r| r.iter().for_each(drop));
+                        tiles.push(p.tile());
+                    }
+                    Ok(PolygonSlice::Run(_)) => panic!("unclipped yielded a fill run"),
+                    Err(_) => errs += 1,
+                }
+            }
+        }
+        for tile in tiles {
+            let piece = whole
+                .tile_polygon(tile, &poly)
+                .expect("accepted by polygon");
+            assert!(piece.is_some(), "e{extent} b{buffer} {tile:?}");
+        }
+        for tile in [tile, t0] {
+            let _ = whole.tile_line(tile, &ring).map(Iterator::count);
+            let _ = whole.tile_polygon(tile, &poly);
+        }
     }
     eprintln!("oks {oks} errs {errs}");
 }

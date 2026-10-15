@@ -28,7 +28,7 @@ pub use polygon::{FillRun, PolygonPiece, PolygonSlice, PolygonSlices};
 
 mod slicer;
 pub use slicer::{
-    LineSlice, LineSlices, Local, LocalIter, PointSlice, PointSlices, Slicer, TileLines,
+    ClipMode, LineSlice, LineSlices, Local, LocalIter, PointSlice, PointSlices, Slicer, TileLines,
 };
 
 mod mosaic;

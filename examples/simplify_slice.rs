@@ -18,13 +18,12 @@
 
 #![allow(clippy::pedantic, reason = "profiling helper")]
 
+use std::collections::BTreeSet;
 use std::hint::black_box;
 use std::time::Instant;
 
 use geo::Simplify;
 use geo_types::{Coord, LineString};
-use std::collections::BTreeSet;
-
 use map_tile_toolkit::Slicer;
 use wkt::TryFromWkt;
 

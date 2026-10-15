@@ -333,6 +333,15 @@ impl Grid {
         ))
     }
 
+    /// The origin (`tile · extent`) of `tile`, with plain arithmetic: the caller has proved its box
+    /// fits `i32`, as for [`Self::tile_box`].
+    pub(crate) fn tile_origin(self, tile: TileId) -> Coord<i32> {
+        Coord {
+            x: tile.x * self.extent,
+            y: tile.y * self.extent,
+        }
+    }
+
     /// The buffered box `(min, max)` of `tile`, with plain arithmetic: the caller has proved it fits
     /// `i32` (see [`Self::check_tiles`]), so unlike [`Self::tile_buffered_bounds`] it cannot fail.
     pub(crate) fn tile_box(self, tile: TileId) -> (Coord<i32>, Coord<i32>) {

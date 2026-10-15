@@ -21,6 +21,12 @@
 //! [`support::long_diagonal`] segment across 4000 × 4000 / 16384 × 16384 (a z14 world) tiles of
 //! extent 4096, whose routing must cost the tiles it touches, not its bounding box.
 //!
+//! The `*_unclipped` benchmarks run `all`, `one`, `polygon_all` and `polygon_one` through an
+//! unclipped slicer ([`ClipMode::Unclipped`]), which gives every tile the whole geometry: they read
+//! each slice's tile and view but not its vertices, which are the same input in every tile, so they
+//! count the slicer's work, not a consumer's. `huge_fill` and the polygon diagonals are left out:
+//! unclipped, their 10⁷–10⁸ covered tiles each come as a piece.
+//!
 //! The point benchmarks (`points_all`, `points_one`) slice a 20 000-point feature, point by point, on a 4 × 4 grid of
 //! extent 4096, scattered or packed into the buffer bands (every point in two to four tiles).
 //!
@@ -64,7 +70,7 @@ use std::hint::black_box;
 use geo::BooleanOps;
 use geo_types::{Coord, LineString, MultiLineString, MultiPolygon, Polygon};
 use gungraun::{library_benchmark, library_benchmark_group, main};
-use map_tile_toolkit::TileId;
+use map_tile_toolkit::{ClipMode, Slicer, TileId};
 
 mod baseline;
 #[path = "../tests/support/mod.rs"]
@@ -142,6 +148,33 @@ fn all((cfg, polylines): (Cfg, support::Polylines)) -> support::Polylines {
     polylines
 }
 
+/// An unclipped slicer for `cfg`.
+fn unclipped(cfg: Cfg) -> Slicer {
+    cfg.slicer().with_clip_mode(ClipMode::Unclipped)
+}
+
+/// Take each unclipped slice's tile and view (its vertices are the whole input, in every tile).
+fn consume_whole<'a>(slices: impl Iterator<Item = map_tile_toolkit::LineSlice<'a, Coord<i32>>>) {
+    for s in slices {
+        black_box((s.tile(), s.run()));
+    }
+}
+
+#[library_benchmark(setup = setup_all)]
+#[bench::small(support::grid(), Input::Small)]
+#[bench::big_multi(support::slicer(25, 0), Input::Big)]
+#[bench::big_few(support::slicer(300, 0), Input::Big)]
+#[bench::big_single(support::slicer(1024, 0), Input::Big)]
+#[bench::diagonal_4k(support::slicer(4096, 64), Input::Diagonal(4000))]
+#[bench::diagonal_z14(support::slicer(4096, 64), Input::Diagonal(1 << 14))]
+fn all_unclipped((cfg, polylines): (Cfg, support::Polylines)) -> support::Polylines {
+    let slicer = unclipped(cfg);
+    for poly in &polylines {
+        consume_whole(slicer.line(black_box(poly)).expect("polyline"));
+    }
+    polylines
+}
+
 // ---- `one`: slice each polyline into each touched tile. ----
 
 /// Prepare the `one` inputs: the config and, per polyline, its precomputed touched tiles (the
@@ -167,6 +200,21 @@ fn one((cfg, cases): (Cfg, OneCases)) -> OneCases {
         let poly = black_box(poly);
         for &tile in tiles {
             consume(cfg.slicer().tile_line(tile, poly).expect("polyline"));
+        }
+    }
+    cases
+}
+
+#[library_benchmark(setup = setup_one)]
+#[bench::small(support::grid(), Input::Small)]
+#[bench::big_multi(support::slicer(25, 0), Input::Big)]
+#[bench::big_few(support::slicer(300, 0), Input::Big)]
+#[bench::big_single(support::slicer(1024, 0), Input::Big)]
+fn one_unclipped((cfg, cases): (Cfg, OneCases)) -> OneCases {
+    for (poly, tiles) in &cases {
+        let poly = black_box(poly);
+        for &tile in tiles {
+            consume_whole(unclipped(cfg).tile_line(tile, poly).expect("polyline"));
         }
     }
     cases
@@ -400,6 +448,30 @@ fn polygon_all((cfg, features): (Cfg, Vec<PolyFeature>)) -> Vec<PolyFeature> {
     features
 }
 
+/// Take each unclipped piece's tile and view (its rings are the whole input, in every tile).
+fn consume_whole_polygons(slices: &mut PolySlices<'_>) {
+    while let Some(slice) = slices.next() {
+        black_box(slice.expect("polygon"));
+    }
+}
+
+#[library_benchmark(setup = setup_polygon_all)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::buildings(support::slicer(4096, 64), PolyInput::Buildings)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+#[bench::many_holes(support::slicer(256, 8), PolyInput::Holes)]
+fn polygon_all_unclipped((cfg, features): (Cfg, Vec<PolyFeature>)) -> Vec<PolyFeature> {
+    let mut slicer = unclipped(cfg);
+    for feature in &features {
+        for polygon in feature {
+            consume_whole_polygons(&mut slicer.polygon(black_box(polygon)).expect("polygon"));
+        }
+    }
+    features
+}
+
 /// Per feature: its polygons and the edge tiles the all-tiles slicer finds (precomputed in setup).
 type PolyOneCases = Vec<(PolyFeature, Vec<TileId>)>;
 
@@ -455,6 +527,27 @@ fn polygon_one((cfg, cases): (Cfg, PolyOneCases)) -> PolyOneCases {
                         black_box(v);
                     }
                 }
+            }
+        }
+    }
+    cases
+}
+
+#[library_benchmark(setup = setup_polygon_one)]
+#[bench::small(support::grid(), PolyInput::Small)]
+#[bench::buildings(support::slicer(4096, 64), PolyInput::Buildings)]
+#[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
+#[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
+#[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
+fn polygon_one_unclipped((cfg, cases): (Cfg, PolyOneCases)) -> PolyOneCases {
+    let mut slicer = unclipped(cfg);
+    for (feature, tiles) in &cases {
+        for &tile in tiles {
+            for polygon in feature {
+                let piece = slicer
+                    .tile_polygon(tile, black_box(polygon))
+                    .expect("polygon");
+                black_box(piece);
             }
         }
     }
@@ -628,15 +721,19 @@ library_benchmark_group!(
     benchmarks = [
         all,
         all_stripe,
+        all_unclipped,
         one,
         one_stripe,
         one_geo,
+        one_unclipped,
         polygon_all,
         polygon_all_stripe,
         polygon_all_geo,
+        polygon_all_unclipped,
         polygon_one,
         polygon_one_stripe,
         polygon_one_geo,
+        polygon_one_unclipped,
         points_all,
         points_one
     ]
