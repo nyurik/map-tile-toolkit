@@ -9,7 +9,12 @@ license = "MIT OR Apache-2.0"
 keywords = ["mvt", "tile", "geo", "polyline", "clip"]
 categories = ["science::geo"]
 rust-version = "1.88"
-exclude = ["tests/*/fixtures", "tests/*/bad-fixtures", "tests/*/snapshots*", "tests/grid.geojson"]
+exclude = [
+    "tests/*/fixtures",
+    "tests/*/bad-fixtures",
+    "tests/*/snapshots*",
+    "tests/grid.geojson",
+]
 
 [[example]]
 name = "simplify_slice"
