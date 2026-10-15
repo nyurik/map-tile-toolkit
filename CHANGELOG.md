@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/nyurik/map-tile-toolkit/compare/v0.3.0...v0.3.1) - 2026-10-15
+
+### Added
+
+- unclipped slicing mode ([#37](https://github.com/nyurik/map-tile-toolkit/pull/37))
+
+### Other
+
+- *(deps)* bump taiki-e/install-action from 2.87.23 to 2.87.26 in the all-actions-version-updates group ([#36](https://github.com/nyurik/map-tile-toolkit/pull/36))
+
 ## [0.3.0](https://github.com/nyurik/map-tile-toolkit/compare/v0.2.0...v0.3.0) - 2026-10-14
 
 ### Added
