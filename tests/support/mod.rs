@@ -7,13 +7,12 @@
     reason = "shared across the test and bench crates; not every helper is used in each"
 )]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, MultiLineString, MultiPoint, Point, Polygon};
 use geojson::{Feature, FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
-use std::collections::BTreeMap;
-
 use map_tile_toolkit::{PolygonSlice, Slicer, TileError, TileId};
 use serde_json::json;
 

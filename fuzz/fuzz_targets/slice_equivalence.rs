@@ -12,6 +12,10 @@
 //!    - **All-tiles == exhaustive per-tile scan** over the reachable span (skipped when a tiny
 //!      extent makes the span too large to scan cheaply).
 //!    - **Duplicate-vertex invariance:** repeating every vertex changes nothing.
+//!    - **Unclipped** (`ClipMode::Unclipped`): `line` accepts the same polylines, and gives each
+//!      tile the clipped pass reached the whole line (consecutive duplicates dropped), once, in that
+//!      tile's frame; `tile_line` gives exactly that too, there and on every tile of the scanned
+//!      span, and nothing elsewhere.
 //! 3. Slicing all polylines as one multi-part feature never panics, and a `Mosaic` fed those same
 //!    tiles reassembles them:
 //!    every tile is accepted (a slicer's own tiles are self-consistent), the reassembled directed-edge
@@ -30,7 +34,7 @@ use std::collections::{BTreeMap, HashSet};
 use arbitrary::Arbitrary;
 use geo_types::Coord;
 use libfuzzer_sys::fuzz_target;
-use map_tile_toolkit::{Mosaic, Slicer, TileId};
+use map_tile_toolkit::{ClipMode, Mosaic, Slicer, TileId};
 
 /// Cap on tiles scanned by the exhaustive oracle per run (each scanned tile re-walks the polyline),
 /// so a tiny extent can't blow up time.
@@ -109,6 +113,11 @@ fuzz_target!(|input: Input| {
 
         // The all-tiles pass must never panic; Err is a valid outcome for overflowing input.
         let Some(all) = slice_all_map(extent, buffer, &[poly]) else {
+            let whole = slicer.clone().with_clip_mode(ClipMode::Unclipped);
+            assert!(
+                whole.line(poly).is_err(),
+                "unclipped accepted a polyline clipped rejects"
+            );
             continue;
         };
 
@@ -148,6 +157,9 @@ fuzz_target!(|input: Input| {
             all, all_duped,
             "duplicating every vertex changed the result"
         );
+
+        // (5) Unclipped, every reached tile gets the whole line, once, from both calls.
+        check_unclipped(&slicer, poly, &all);
     }
 
     // (5) Slicing all polylines as one multi-part feature never panics.
@@ -230,4 +242,54 @@ fn reachable_span(poly: &[Coord<i32>], extent: u32, buffer: u16) -> Option<(Tile
         TileId::new(tile(min_x - b) - 1, tile(min_y - b) - 1),
         TileId::new(tile(max_x + b) + 1, tile(max_y + b) + 1),
     ))
+}
+
+/// Unclipped: `line` gives each tile of `all` (the clipped result) the whole line, once, in the
+/// tile's frame, and `tile_line` gives exactly that on those tiles and on the scanned span, and
+/// nothing (or an error, for a tile out of range) elsewhere.
+fn check_unclipped(slicer: &Slicer<Coord<i32>>, poly: &[Coord<i32>], all: &BTreeMap<TileId, Runs>) {
+    let whole = slicer.clone().with_clip_mode(ClipMode::Unclipped);
+    let (extent, buffer) = (slicer.extent(), slicer.buffer());
+    let mut line = poly.to_vec();
+    line.dedup();
+    let local = |tile: TileId| -> Vec<Coord<i32>> {
+        let origin = tile.origin(extent).expect("a reached tile's origin fits");
+        line.iter().map(|&c| c - origin).collect()
+    };
+
+    let mut tiles = Vec::new();
+    for s in whole.line(poly).expect("clipped accepted it") {
+        assert_eq!(s.run().to_vec(), local(s.tile()), "not the whole line");
+        assert_eq!(s.run().global(), poly, "not lent from the input");
+        tiles.push(s.tile());
+    }
+    let yielded = tiles.len();
+    tiles.sort_unstable();
+    tiles.dedup();
+    assert_eq!(yielded, tiles.len(), "unclipped yielded a tile twice");
+    assert!(
+        tiles.iter().eq(all.keys()),
+        "unclipped reaches other tiles than clipped"
+    );
+
+    let probe = |tile: TileId| match whole.tile_line(tile, poly) {
+        Ok(slices) => {
+            let runs: Runs = slices.map(|s| s.run().to_vec()).collect();
+            let expected = if all.contains_key(&tile) {
+                vec![local(tile)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(runs, expected, "unclipped tile_line disagrees at {tile:?}");
+        }
+        Err(_) => assert!(!all.contains_key(&tile), "{tile:?} reached, yet rejected"),
+    };
+    all.keys().copied().for_each(probe);
+    if let Some((lo, hi)) = reachable_span(poly, extent, buffer) {
+        if i64::from(hi.x - lo.x + 1) * i64::from(hi.y - lo.y + 1) <= SCAN_CAP {
+            (lo.y..=hi.y)
+                .flat_map(|y| (lo.x..=hi.x).map(move |x| TileId::new(x, y)))
+                .for_each(probe);
+        }
+    }
 }

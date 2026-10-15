@@ -18,6 +18,8 @@ grid, keeping the geometry's original vertices. No new vertexes are ever created
   tiles holding none of its vertices), `tile_line` / `tile_point` / `tile_polygon` for one given tile.
 * Vertices may carry a payload (generic `Vertex`); feature-level data stays with the caller, who
   pairs it with each slice of the feature being sliced.
+* `ClipMode::Unclipped` (`Slicer::new(..)?.with_clip_mode(..)`) gives every tile a line or polygon
+  reaches the whole geometry instead, moved into that tile's local frame (see [Unclipped](#unclipped)).
 * `Mosaic` assembles tiles back into features, joining features that match on both sides of the edge, and rejecting inconsistent tiles. Mosaic does not require all original tiles to be added.
 
 Slicing is lazy: each slice is computed only when the iterator reaches it, so stopping early stops
@@ -236,6 +238,42 @@ fn main() -> Result<(), TileError> {
 One slicer per worker can be reused across polygons: it keeps its working memory's capacity, so it
 stops allocating once warmed up, and `shrink_to_fit()` releases what an outlier polygon left behind.
 
+### Unclipped
+
+A slicer built `with_clip_mode(ClipMode::Unclipped)` does not clip: each tile a line or polygon
+reaches — exactly the tiles the default `ClipMode::Clipped` gives anything — gets the **whole**
+geometry, once, in that tile's local frame, for renderers that clip to the tile themselves. The calls
+and items are the same, so one consumer loop serves both modes: a line comes as one `LineSlice` per
+tile whose run is all of the line, and a polygon as one `PolygonPiece` per tile with all of its rings
+— in the tiles it covers entirely too, so no `FillRun` is yielded. Nothing is copied or built: the
+slices borrow the input, so the cost is finding the tiles (plus, for a line, a set of the tiles found
+so far, to give each just once: memory proportional to their number, and on a long line crossing
+mostly new tiles, several times a clipped walk's instructions). The consumer's cost is the whole
+geometry per tile, so a polygon covering many tiles costs it that many times its vertices. Points are never clipped, so the mode does not change them.
+
+```rust
+use geo_types::coord;
+use map_tile_toolkit::{ClipMode, Slicer, TileError, TileId};
+
+fn main() -> Result<(), TileError> {
+    let slicer = Slicer::new(25, 0)?.with_clip_mode(ClipMode::Unclipped);
+    let line = [coord! { x: 5, y: 5 }, coord! { x: 60, y: 10 }];
+
+    // Tiles (0, 0), (1, 0) and (2, 0), each holding the whole line in its own frame.
+    let mut tiles: Vec<_> = slicer
+        .line(&line)?
+        .map(|slice| (slice.tile(), slice.run().to_vec()))
+        .collect();
+    tiles.sort_unstable_by_key(|(tile, _)| *tile);
+    assert_eq!(tiles.len(), 3);
+    assert_eq!(
+        tiles[1],
+        (TileId::new(1, 0), vec![coord! { x: -20, y: 5 }, coord! { x: 35, y: 10 }])
+    );
+    Ok(())
+}
+```
+
 ### Payloads
 
 Data rides along on two independent axes: a **per-vertex** payload (the `Vertex` type), and
@@ -308,7 +346,10 @@ in `tests/polygons/fixtures/` are snapshotted per tile (`snapshots*/`); `tile_po
 `polygon` (its fill runs expanded into fill rings) must produce identical output, also checked on
 finer grids and under every rotation and mirror image. Point fixtures in `tests/points/fixtures/` are
 snapshotted the same way; `point`, `tile_point`, and the closed buffered box rule must agree. The
-fixtures' multi-geometries are sliced one element at a time, as a caller would. Run `just bless`
+fixtures' multi-geometries are sliced one element at a time, as a caller would. Every line and polygon
+fixture is also sliced unclipped (`tests/unclipped.rs`): both paths must give each tile the clipped
+slicer reaches the whole geometry, and nothing elsewhere; its snapshots (`snapshots-unclipped*/`)
+show the input and the boxes of the tiles it reaches. Run `just bless`
 to regenerate snapshots. To inspect them, run `just visualize-tests` and open `tests/visualize.qgz` in QGIS (every
 fixture and snapshot as a layer, over `tests/grid.geojson`, the tile grid offset 0.5px to sit between integer
 coordinates), or load the `.geojson` files in any `GeoJSON` viewer.

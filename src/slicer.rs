@@ -35,8 +35,12 @@
 //!
 //! [`LineSlices`] finds each `k` while walking the segments in order, [`TileLines`] by scanning the
 //! line for one tile, and both extend with the same [`extend_run`], so they agree by construction.
+//!
+//! In [`ClipMode::Unclipped`] the same walk and scan decide which tiles a geometry reaches, but each
+//! such tile gets the whole geometry, once: no run is extended and no polygon piece is built.
 
 use core::iter::FusedIterator;
+use std::collections::BTreeSet;
 
 use geo_types::Coord;
 
@@ -45,9 +49,30 @@ use crate::clip_polyline::segment_intersects;
 use crate::grid::{Grid, Located, SegmentTiles};
 use crate::polygon::{
     FillRun, PolygonPiece, PolygonSlices, Scratch, clip_polygon_to_tile, fill_ring,
+    whole_polygon_in_tile,
 };
 use crate::tile::TileId;
 use crate::vertex::{PolyVertex, Vertex};
+
+/// How a [`Slicer`] cuts lines and polygons into the tiles they reach (points are never cut, so they
+/// ignore it).
+///
+/// Both modes slice the same inputs to the same tiles, with one difference in failures: a clipped
+/// slicer can still fail building a piece too large to index (`GeometryTooLarge`) where an
+/// unclipped one, which builds nothing, succeeds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ClipMode {
+    /// Each tile gets only the part of the geometry that touches its buffered box: a line's runs, a
+    /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely.
+    #[default]
+    Clipped,
+    /// Each tile the geometry reaches — exactly the tiles [`Clipped`](Self::Clipped) gives anything —
+    /// gets the **whole** geometry, once, in that tile's local frame: a line as a single
+    /// [`LineSlice`] of all its vertices, a polygon as a [`PolygonPiece`] of all its rings (also in
+    /// every tile it covers entirely: no [`FillRun`] is yielded). For renderers that clip themselves.
+    Unclipped,
+}
 
 /// Slices one geometry at a time into per-tile pieces on an integer grid, lazily.
 ///
@@ -65,11 +90,16 @@ use crate::vertex::{PolyVertex, Vertex};
 /// The slicer never panics: bad input yields a [`TileError`] from the call itself (and, for a polygon
 /// piece too large to index, as an `Err` item that ends the iteration).
 ///
+/// Lines and polygons are clipped to each tile unless the slicer is built
+/// [`with_clip_mode`](Self::with_clip_mode)`(`[`ClipMode::Unclipped`]`)`, which gives each tile the
+/// whole geometry instead.
+///
 /// Lines and points take `&self`, so one slicer can serve many threads. Polygons take `&mut self`:
 /// they are sliced in the slicer's reusable working memory, so use one slicer per worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slicer<V: Vertex = Coord<i32>> {
     grid: Grid,
+    mode: ClipMode,
     /// Working memory for polygon slicing, allocated by the first polygon and kept for its capacity
     /// (never part of the slicer's value).
     poly: Scratch<V>,
@@ -85,8 +115,22 @@ impl<V: Vertex> Slicer<V> {
     pub fn new(extent: u32, buffer: u16) -> Result<Self, TileError> {
         Ok(Self {
             grid: Grid::new(extent, buffer)?,
+            mode: ClipMode::Clipped,
             poly: Scratch::new(),
         })
+    }
+
+    /// This slicer, cutting lines and polygons by `mode` ([`ClipMode::Clipped`] by default).
+    #[must_use]
+    pub fn with_clip_mode(mut self, mode: ClipMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// How this slicer cuts lines and polygons.
+    #[must_use]
+    pub fn clip_mode(&self) -> ClipMode {
+        self.mode
     }
 
     /// The tile side / per-tile output resolution: a tile's own area is `0..extent` in its local
@@ -115,6 +159,11 @@ impl<V: Vertex> Slicer<V> {
     /// back gives that tile several items. Consecutive duplicate vertices are skipped. For a
     /// multi-line, call this for each of its lines.
     ///
+    /// [`ClipMode::Unclipped`] yields one item per tile instead, its run the whole line; telling a
+    /// tile's later runs apart costs a set of the tiles yielded so far (memory proportional to
+    /// their number, and several times the instructions of a clipped walk over a long diagonal
+    /// line, where nearly every run starts a new tile).
+    ///
     /// The call reads every vertex once to bound the line, so that nothing can fail once the
     /// iteration starts; the slices themselves are still computed one at a time as it advances.
     ///
@@ -132,11 +181,13 @@ impl<V: Vertex> Slicer<V> {
             grid: self.grid,
             pts: line,
             cursor: None,
+            seen: (self.mode == ClipMode::Unclipped).then(BTreeSet::new),
         })
     }
 
     /// Clip a line to one `tile`: yields its runs there, each in walk order — exactly the runs
-    /// [`line`](Self::line) yields for that tile.
+    /// [`line`](Self::line) yields for that tile. [`ClipMode::Unclipped`] yields the whole line
+    /// once if it reaches the tile, stopping the scan there.
     ///
     /// Like [`line`](Self::line), the call reads every vertex once; a line whose bounds miss the
     /// tile's buffered box yields nothing without being scanned.
@@ -174,12 +225,13 @@ impl<V: Vertex> Slicer<V> {
             tile,
             pts: line,
             next,
+            whole: self.mode == ClipMode::Unclipped,
         })
     }
 
     /// Slice a point into every tile whose buffered box holds it: its own tile, plus up to three
     /// neighbors when it lies within `buffer` of an edge. Yields one [`PointSlice`] per tile. For a
-    /// multi-point, call this for each of its points.
+    /// multi-point, call this for each of its points. The [`ClipMode`] does not apply.
     ///
     /// # Errors
     ///
@@ -228,6 +280,9 @@ impl<V: PolyVertex> Slicer<V> {
     /// rings keep the winding of the input rings (see [`signed_area_2x`](crate::signed_area_2x) to
     /// normalize it first).
     ///
+    /// [`ClipMode::Unclipped`] yields the same tiles, but each — those of the fill runs too, one by
+    /// one — as a piece of the whole polygon: every kept ring, lent from the input. No piece is built.
+    ///
     /// Lazy and lending: see [`PolygonSlices`]. The call reads the rings once, to bound and index
     /// them (only a ring with consecutive duplicate vertices is copied, to drop them); after that the
     /// iterator holds one tile row of the polygon at a time, and builds each piece as it is reached.
@@ -246,13 +301,14 @@ impl<V: PolyVertex> Slicer<V> {
         &'s mut self,
         rings: &'s [R],
     ) -> Result<PolygonSlices<'s, V, R>, TileError> {
-        PolygonSlices::new(self.grid, rings, self.poly.get())
+        PolygonSlices::new(self.grid, self.mode, rings, self.poly.get())
     }
 
     /// Clip a polygon to one `tile`: its piece there, or `None` if it leaves nothing — what
     /// [`polygon`](Self::polygon) yields for that tile, with a covered tile's
     /// [`FillRun`] as its fill ring. The piece borrows the slicer's working memory
-    /// until the next call.
+    /// until the next call. [`ClipMode::Unclipped`] gives the whole polygon instead, if it leaves
+    /// anything in the tile, as [`polygon`](Self::polygon) does.
     ///
     /// # Errors
     ///
@@ -266,7 +322,11 @@ impl<V: PolyVertex> Slicer<V> {
         rings: &'s [R],
     ) -> Result<Option<PolygonPiece<'s, V, R>>, TileError> {
         u32::try_from(rings.len()).map_err(|_| TileError::GeometryTooLarge)?;
-        clip_polygon_to_tile(self.grid, tile, rings, &mut self.poly.get().scratch)
+        let s = &mut self.poly.get().scratch;
+        match self.mode {
+            ClipMode::Clipped => clip_polygon_to_tile(self.grid, tile, rings, s),
+            ClipMode::Unclipped => whole_polygon_in_tile(self.grid, tile, rings, s),
+        }
     }
 
     /// The ring [`tile_polygon`](Self::tile_polygon) yields for `run`'s polygon in each tile of the
@@ -285,8 +345,9 @@ impl<V: PolyVertex> Slicer<V> {
 /// A line run is lent from the caller's input, and skips consecutive duplicate positions (the first
 /// of each is kept). A polygon ring has no consecutive duplicates, and is closed: its first vertex
 /// repeated at the end, which a ring lent open has [`iter`](Self::iter) append (drop it for an MVT
-/// `ClosePath`). It is lent from the input when the polygon lies inside one tile, else built in the
-/// slicer's working memory, clipped and with synthetic corners.
+/// `ClosePath`). It is lent from the input when the polygon lies inside one tile or the slicer is
+/// [`ClipMode::Unclipped`], else built in the slicer's working memory, clipped and with synthetic
+/// corners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Local<'a, V> {
     verts: &'a [V],
@@ -457,7 +518,8 @@ impl<'a, V: Vertex> LineSlice<'a, V> {
         self.tile
     }
 
-    /// The run's vertices, in the tile's local frame (at least two distinct positions).
+    /// The run's vertices, in the tile's local frame (at least two distinct positions): the whole line
+    /// when [`ClipMode::Unclipped`].
     #[must_use]
     pub fn run(&self) -> Local<'a, V> {
         self.run
@@ -572,12 +634,13 @@ struct LineCursor {
     loc_c: Located,
 }
 
-/// Where the next run lies: its tile, first and last vertex indices, and the tile origin.
+/// Where the next run starts: its tile and buffered box, and its first segment's two vertex indices.
 struct RunAt {
     tile: TileId,
+    min: Coord<i32>,
+    max: Coord<i32>,
     first: usize,
-    last: usize,
-    origin: Coord<i32>,
+    second: usize,
 }
 
 /// A segment inside one tile's inner box touches only that tile; when the previous segment touches it
@@ -611,6 +674,8 @@ pub struct LineSlices<'a, V> {
     grid: Grid,
     pts: &'a [V],
     cursor: Option<LineCursor>,
+    /// [`ClipMode::Unclipped`]: the tiles already given the whole line.
+    seen: Option<BTreeSet<TileId>>,
 }
 
 impl<V: Vertex> LineSlices<'_, V> {
@@ -695,9 +760,10 @@ impl<V: Vertex> LineSlices<'_, V> {
             }
             return Some(RunAt {
                 tile,
+                min,
+                max,
                 first: cur.a,
-                last: extend_run(self.pts, cur.c, min, max),
-                origin: self.grid.origin_of(min),
+                second: cur.c,
             });
         }
     }
@@ -707,11 +773,22 @@ impl<'a, V: Vertex> Iterator for LineSlices<'a, V> {
     type Item = LineSlice<'a, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let at = self.next_run()?;
-        Some(LineSlice {
-            tile: at.tile,
-            run: Local::run(&self.pts[at.first..=at.last], at.origin),
-        })
+        loop {
+            let at = self.next_run()?;
+            let run = match &mut self.seen {
+                None => &self.pts[at.first..=extend_run(self.pts, at.second, at.min, at.max)],
+                Some(seen) => {
+                    if !seen.insert(at.tile) {
+                        continue; // a later run of a tile that already has the whole line
+                    }
+                    self.pts
+                }
+            };
+            return Some(LineSlice {
+                tile: at.tile,
+                run: Local::run(run, self.grid.origin_of(at.min)),
+            });
+        }
     }
 }
 
@@ -727,6 +804,8 @@ pub struct TileLines<'a, V> {
     pts: &'a [V],
     /// The vertex the scan resumes from.
     next: usize,
+    /// [`ClipMode::Unclipped`]: the first run found is the whole line, and the last.
+    whole: bool,
 }
 
 impl<'a, V: Vertex> Iterator for TileLines<'a, V> {
@@ -742,11 +821,17 @@ impl<'a, V: Vertex> Iterator for TileLines<'a, V> {
                 break;
             };
             if segment_intersects(pts[a].position(), pts[c].position(), min, max) {
-                let end = extend_run(pts, c, min, max);
-                self.next = end;
+                let run = if self.whole {
+                    self.next = pts.len();
+                    pts
+                } else {
+                    let end = extend_run(pts, c, min, max);
+                    self.next = end;
+                    &pts[a..=end]
+                };
                 return Some(LineSlice {
                     tile: self.tile,
-                    run: Local::run(&pts[a..=end], self.origin),
+                    run: Local::run(run, self.origin),
                 });
             }
             a = c;

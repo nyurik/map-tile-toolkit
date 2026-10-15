@@ -19,6 +19,9 @@
 //!
 //! Nothing outside the current row is kept, and a piece is built in one reused buffer, in the global
 //! frame: [`Local`] moves it into the tile's frame as it is read.
+//!
+//! Unclipped ([`ClipMode::Unclipped`]), the sweep is the same but builds nothing: each edge tile that
+//! would get a piece, and each tile of a fill run, gets the whole polygon, lent from the input.
 
 use core::cmp::Ordering;
 use core::ops::Range;
@@ -27,12 +30,13 @@ use geo_types::Coord;
 
 use crate::TileError;
 use crate::clip_polygon::{
-    ClipScratch, RingClip, clip_ring, close_ring, fill_box, keep_edge, push_distinct, push_fill_box,
+    ClipScratch, RingClip, clip_ring, close_ring, fill_box, keep_edge, push_distinct,
+    push_fill_box, ring_meets_box,
 };
 use crate::clip_polyline::to_local;
 use crate::geom::{crossing_x_ceil, ring_orientation};
 use crate::grid::{Grid, Seg};
-use crate::slicer::Local;
+use crate::slicer::{ClipMode, Local};
 use crate::tile::TileId;
 use crate::vertex::{PolyVertex, Vertex};
 
@@ -70,7 +74,8 @@ pub enum PolygonSlice<'a, V, R> {
     Run(FillRun),
 }
 
-/// One polygon's rings in one tile: exterior first, then its holes that reach the tile.
+/// One polygon's rings in one tile: exterior first, then its holes that reach the tile (all of them,
+/// and each whole, when unclipped).
 #[derive(Debug)]
 pub struct PolygonPiece<'a, V, R> {
     tile: TileId,
@@ -86,8 +91,8 @@ enum PieceRings<'a, V, R> {
         ends: &'a [u32],
         origin: Coord<i32>,
     },
-    /// A polygon lying wholly in the tile: its kept rings, lent from the input (or the copy of a ring
-    /// that had duplicate vertices).
+    /// The whole polygon — lying in the tile, or unclipped: its kept rings, lent from the input (or
+    /// the copy of a ring that had duplicate vertices).
     Whole {
         rings: &'a [RingInfo],
         input: &'a [R],
@@ -496,7 +501,7 @@ pub(crate) fn fill_ring<V: PolyVertex>(grid: Grid, run: &FillRun) -> [V; 5] {
 
 /// What the next slice is; the borrowed view is built from it.
 enum Event {
-    /// The current polygon lies wholly in `tile`'s inner box.
+    /// The whole current polygon, for `tile`: it lies in the tile's inner box, or is unclipped.
     Whole {
         tile: TileId,
         origin: Coord<i32>,
@@ -548,6 +553,8 @@ struct Sweep {
 /// until the next call to [`next`](Self::next). Loop with `while let Some(slice) = slices.next()`.
 pub struct PolygonSlices<'s, V, R> {
     grid: Grid,
+    /// [`ClipMode::Unclipped`]: every tile gets the whole polygon.
+    whole: bool,
     rings: &'s [R],
     s: &'s mut PolyScratch<V>,
     /// How the polygon starts, until the first step; then its sweep, if it has one.
@@ -571,6 +578,7 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
     #[inline]
     pub(crate) fn new(
         grid: Grid,
+        mode: ClipMode,
         rings: &'s [R],
         state: &'s mut PolyState<V>,
     ) -> Result<Self, TileError> {
@@ -579,6 +587,7 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         let start = prepare(grid, rings, s)?;
         Ok(Self {
             grid,
+            whole: mode == ClipMode::Unclipped,
             rings,
             s,
             start,
@@ -659,13 +668,19 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
             s: &mut *self.s,
             rings: self.rings,
         };
-        sw.step(&mut cx)
+        if self.whole {
+            sw.step_whole(&mut cx)
+        } else {
+            sw.step::<false, V, R>(&mut cx)
+        }
     }
 }
 
 /// Load the polygon `rings` into `s`: how it starts, or `None` if there is nothing to slice (a
 /// degenerate exterior). Every overflow the slicing could meet is settled here, from the polygon's
 /// bounds.
+// Once per polygon: inlined into `PolygonSlices::new`, it costs small polygons ~4%.
+#[inline(never)]
 fn prepare<V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
     rings: &[R],
@@ -761,18 +776,38 @@ impl Sweep {
         }
     }
 
-    /// Advance the sweep to its next slice; `None` when the polygon is done.
-    fn step<V: PolyVertex, R: AsRef<[V]>>(
+    /// [`Self::step`] unclipped.
+    // Keeps this second copy of the sweep out of `PolygonSlices::next`, so the clipped one inlines as
+    // before (any extra code there costs the clipped sweep 2-5%).
+    #[inline(never)]
+    fn step_whole<V: PolyVertex, R: AsRef<[V]>>(
+        &mut self,
+        cx: &mut Cx<'_, V, R>,
+    ) -> Result<Option<Event>, TileError> {
+        self.step::<true, V, R>(cx)
+    }
+
+    /// Advance the sweep to its next slice; `None` when the polygon is done. `WHOLE`
+    /// ([`ClipMode::Unclipped`]): give every tile the whole polygon, fill runs tile by tile.
+    fn step<const WHOLE: bool, V: PolyVertex, R: AsRef<[V]>>(
         &mut self,
         cx: &mut Cx<'_, V, R>,
     ) -> Result<Option<Event>, TileError> {
         loop {
             if let Some(run) = self.ready.take() {
-                return Ok(Some(Event::Run(run)));
+                return Ok(Some(if WHOLE {
+                    self.whole_run_tile(cx.grid, run)
+                } else {
+                    Event::Run(run)
+                }));
             }
             if let Some(tx) = self.tile_ready.take() {
                 let tile = TileId::new(tx, self.ty);
-                if let Some(origin) = self.build_tile(cx, tile)? {
+                if WHOLE {
+                    if let Some(event) = self.whole_tile(cx.grid, cx.s, tile) {
+                        return Ok(Some(event));
+                    }
+                } else if let Some(origin) = self.build_tile(cx, tile)? {
                     return Ok(Some(Event::Built { tile, origin }));
                 }
                 continue;
@@ -860,6 +895,20 @@ impl Sweep {
             if !(s.inside[0] && self.holes_in == 0) {
                 self.ready = self.take_pending();
             }
+        }
+    }
+
+    /// Unclipped, each covered tile gets the whole polygon: the first tile of `run`, keeping the rest
+    /// of it for the next steps.
+    fn whole_run_tile(&mut self, grid: Grid, mut run: FillRun) -> Event {
+        let tile = TileId::new(run.x.start, run.y);
+        run.x.start += 1;
+        if !run.x.is_empty() {
+            self.ready = Some(run);
+        }
+        Event::Whole {
+            tile,
+            origin: grid.tile_origin(tile),
         }
     }
 
@@ -1043,9 +1092,53 @@ impl Sweep {
         Ok(())
     }
 
-    /// Build the polygon's piece in edge tile `tile` from the spans covering it into the piece buffer,
-    /// returning the tile origin; `None` if it leaves nothing there. Only the touching rings are
-    /// visited: the untouched holes are settled at once by how many of them contain the tile. Every
+    /// The spans covering the current edge tile, if the polygon leaves anything there. Only the
+    /// touching rings are visited: the untouched holes are settled at once by how many of them
+    /// contain the tile. Takes the scratch's row fields, `hits`, `covering` and `inside`, rather than
+    /// the scratch, so the caller can still write the piece buffer.
+    #[expect(
+        clippy::inline_always,
+        reason = "run per edge tile; out of line it costs the polygon benchmarks 2%"
+    )]
+    #[inline(always)]
+    fn tile_hits<'x>(
+        &self,
+        hits: &'x [Hit],
+        covering: &'x [Hit],
+        inside: &[bool],
+    ) -> Option<&'x [Hit]> {
+        let hits = match &self.cover {
+            Some(range) => &hits[range.clone()],
+            None => covering,
+        };
+        // Hits come in edge order, so the exterior's (if any) come first, then each hole's.
+        let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
+        if !exterior_touched && !inside[0] {
+            return None; // the exterior misses the tile
+        }
+        // `holes_in` counts every hole whose ray parity is odd, but a touched hole's parity says
+        // nothing about the tile: what remains are untouched holes containing it.
+        let holes_in = self.holes_in as usize;
+        if holes_in > 0
+            && holes_in
+                > ring_groups(hits)
+                    .filter(|g| g[0].ring != 0 && inside[g[0].ring as usize])
+                    .count()
+        {
+            return None;
+        }
+        Some(hits)
+    }
+
+    /// Unclipped, edge tile `tile` gets the whole polygon if it would get a piece.
+    fn whole_tile<V>(&self, grid: Grid, s: &PolyScratch<V>, tile: TileId) -> Option<Event> {
+        self.tile_hits(&s.hits, &s.covering, &s.inside)?;
+        let origin = grid.tile_origin(tile);
+        Some(Event::Whole { tile, origin })
+    }
+
+    /// Build the polygon's piece in edge tile `tile` from [the spans covering it](Self::tile_hits)
+    /// into the piece buffer, returning the tile origin; `None` if it leaves nothing there. Every
     /// vertex fits the tile's local frame: the polygon's bounds were checked when it was loaded.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn build_tile<V: PolyVertex, R: AsRef<[V]>>(
@@ -1057,28 +1150,12 @@ impl Sweep {
         let origin = cx.grid.origin_of(min);
         let s = &mut *cx.s;
         let rings = cx.rings;
-        let hits = match &self.cover {
-            Some(range) => &s.hits[range.clone()],
-            None => &s.covering[..],
-        };
         s.verts.clear();
         s.ring_ends.clear();
-        // Hits come in edge order, so the exterior's (if any) come first, then each hole's.
-        let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
-        if !exterior_touched && !s.inside[0] {
-            return Ok(None); // the exterior misses the tile
-        }
-        // `holes_in` counts every hole whose ray parity is odd, but a touched hole's parity says
-        // nothing about the tile: what remains are untouched holes containing it.
-        let holes_in = self.holes_in as usize;
-        if holes_in > 0
-            && holes_in
-                > ring_groups(hits)
-                    .filter(|g| g[0].ring != 0 && s.inside[g[0].ring as usize])
-                    .count()
-        {
+        let Some(hits) = self.tile_hits(&s.hits, &s.covering, &s.inside) else {
             return Ok(None);
-        }
+        };
+        let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
         if !exterior_touched {
             let orient = *self
                 .orient
@@ -1116,6 +1193,11 @@ type LoadedRing = (RingInfo, Coord<i32>, Coord<i32>);
 /// borrowed when it is distinct as given — no consecutive duplicates once its repeated closing
 /// vertices are dropped — else its distinct vertices copied, with its bounding box. `None` for a
 /// degenerate ring (fewer than 3 distinct vertices).
+#[expect(
+    clippy::inline_always,
+    reason = "run per ring of every polygon; out of line it costs the small-polygon benchmarks 3-5%"
+)]
+#[inline(always)]
 fn load_ring<V: Vertex>(
     s: &mut PolyScratch<V>,
     index: u32,
@@ -1239,6 +1321,50 @@ pub(crate) fn clip_polygon_to_tile<'s, V: PolyVertex, R: AsRef<[V]>>(
         rings: PieceRings::Built {
             verts: &s.verts,
             ends: &s.ring_ends,
+            origin,
+        },
+    }))
+}
+
+/// A polygon's `rings` whole, lent in one `tile`'s local frame; `None` if the polygon leaves nothing
+/// in the tile — the test [`clip_polygon_to_tile`] makes, without building the piece. See
+/// [`Slicer::tile_polygon`](crate::Slicer::tile_polygon) in [`ClipMode::Unclipped`].
+pub(crate) fn whole_polygon_in_tile<'s, V: PolyVertex, R: AsRef<[V]>>(
+    grid: Grid,
+    tile: TileId,
+    rings: &'s [R],
+    s: &'s mut PolyScratch<V>,
+) -> Result<Option<PolygonPiece<'s, V, R>>, TileError> {
+    let (min, max) = grid.tile_buffered_bounds(tile)?;
+    let origin = grid.origin_of(min);
+    s.rings.clear();
+    s.copies.clear();
+    for (index, ring) in (0_u32..).zip(rings) {
+        // (Edge ids only index the sweep's rows.)
+        let Some((info, lo, hi)) = load_ring(s, index, ring.as_ref(), 0)? else {
+            if index == 0 {
+                return Ok(None); // a degenerate exterior drops the polygon
+            }
+            continue;
+        };
+        match ring_meets_box(info.pts(rings, &s.copies), min, max) {
+            // An exterior missing the tile, or a hole covering it, leaves nothing to draw here.
+            RingClip::Outside if index == 0 => return Ok(None),
+            RingClip::Covers if index > 0 => return Ok(None),
+            _ => {}
+        }
+        check_local(&[lo, hi], origin)?;
+        s.rings.push(info);
+    }
+    if s.rings.is_empty() {
+        return Ok(None); // no rings at all
+    }
+    Ok(Some(PolygonPiece {
+        tile,
+        rings: PieceRings::Whole {
+            rings: &s.rings,
+            input: rings,
+            copies: &s.copies,
             origin,
         },
     }))
