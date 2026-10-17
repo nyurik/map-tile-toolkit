@@ -35,7 +35,9 @@
 //! [`Slicer::polygon`](map_tile_toolkit::Slicer::polygon) per polygon, `polygon_one`
 //! [`Slicer::tile_polygon`](map_tile_toolkit::Slicer::tile_polygon) per edge tile. Scenarios: `small` (every
 //! `tests/polygons/fixtures` feature), `buildings` ([`support::buildings`], 2000 four-corner footprints
-//! on a z14-like grid: the bulk of real polygon data), [`support::big_polygon`] at the three `big_*` scales, and —
+//! on a z14-like grid), `footprints` ([`support::footprints`], 2000 closed rings of 4 to 8 vertices in
+//! OSM's proportions: the bulk of real polygon data) on the same grid and, as `footprints_edge`, on
+//! tiles of extent 256 that many of them cross, [`support::big_polygon`] at the three `big_*` scales, and —
 //! for `polygon_all` only — `huge_fill`, the z14-like [`support::huge_square`] whose 2^28 covered
 //! tiles must cost nothing per tile, `many_holes`, [`support::many_holes`] whose 2000 inner rings
 //! must cost their hits, not their count per edge tile, and `diagonal_4k` / `diagonal_z14`, the
@@ -351,6 +353,8 @@ enum PolyInput {
     Holes,
     /// [`support::buildings`], each building its own feature.
     Buildings,
+    /// [`support::footprints`], each footprint its own feature.
+    Footprints,
     /// The single [`support::diagonal_triangle`] across this many tiles per axis.
     Diagonal(i32),
 }
@@ -376,6 +380,7 @@ fn load_polygons(input: PolyInput) -> Vec<Vec<FixturePolygon>> {
         PolyInput::Huge => vec![vec![support::huge_square()]],
         PolyInput::Holes => vec![vec![support::many_holes()]],
         PolyInput::Buildings => support::buildings().into_iter().map(|b| vec![b]).collect(),
+        PolyInput::Footprints => support::footprints().into_iter().map(|b| vec![b]).collect(),
         PolyInput::Diagonal(tiles) => vec![vec![support::diagonal_triangle(tiles)]],
     }
 }
@@ -431,6 +436,8 @@ fn setup_polygon_all(cfg: Cfg, input: PolyInput) -> (Cfg, Vec<PolyFeature>) {
 #[library_benchmark(setup = setup_polygon_all)]
 #[bench::small(support::grid(), PolyInput::Small)]
 #[bench::buildings(support::slicer(4096, 64), PolyInput::Buildings)]
+#[bench::footprints(support::slicer(4096, 64), PolyInput::Footprints)]
+#[bench::footprints_edge(support::slicer(256, 8), PolyInput::Footprints)]
 #[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
 #[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
 #[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]
@@ -511,6 +518,8 @@ fn setup_polygon_one(cfg: Cfg, input: PolyInput) -> (Cfg, PolyOneCases) {
 #[library_benchmark(setup = setup_polygon_one)]
 #[bench::small(support::grid(), PolyInput::Small)]
 #[bench::buildings(support::slicer(4096, 64), PolyInput::Buildings)]
+#[bench::footprints(support::slicer(4096, 64), PolyInput::Footprints)]
+#[bench::footprints_edge(support::slicer(256, 8), PolyInput::Footprints)]
 #[bench::big_multi(support::slicer(25, 0), PolyInput::Big)]
 #[bench::big_few(support::slicer(300, 0), PolyInput::Big)]
 #[bench::big_single(support::slicer(1024, 0), PolyInput::Big)]

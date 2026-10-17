@@ -91,6 +91,16 @@ pub(crate) struct RingPlan<'a> {
 }
 
 impl RingPlan<'_> {
+    /// The plain clip: nothing kept past the tips, every detour hugging `B⁺`.
+    pub(crate) const PLAIN: RingPlan<'static> = RingPlan {
+        deepen: 0,
+        lane_base: 0,
+        lane_step: 0,
+        frame: None,
+        depths: None,
+        bridge_base: 0,
+    };
+
     /// How many vertices of a gap of `gap` to keep after the tip before it, and before the tip after
     /// it, for the piece's bridge number `bridge`.
     fn depth(&self, bridge: usize, gap: usize) -> (usize, usize) {
@@ -122,6 +132,23 @@ pub(crate) fn lane_bounds(
             y: g(max.y, lane)?,
         },
     ))
+}
+
+/// Whether every vertex of `pts` is in the box `[min, max]`. An offset from `min` is inside iff, as
+/// `u32` (so below zero wraps far past it), it is at most the box's span: one comparison per axis,
+/// and one branch per vertex.
+#[inline(always)]
+#[expect(
+    clippy::inline_always,
+    reason = "the plain clip's first pass; out of line it costs more than it does"
+)]
+fn all_inside<V: Vertex>(pts: &[V], min: Coord<i32>, max: Coord<i32>) -> bool {
+    let span = |lo: i32, hi: i32| hi.wrapping_sub(lo).cast_unsigned();
+    let (sx, sy) = (span(min.x, max.x), span(min.y, max.y));
+    pts.iter().all(|p| {
+        let p = p.position();
+        (span(min.x, p.x) <= sx) & (span(min.y, p.y) <= sy)
+    })
 }
 
 /// The `B⁺` corner at an even `slot`, one unit outside the box. [`TileError::Overflow`] if the tile
@@ -223,6 +250,39 @@ enum Bridge {
 /// *saves* vertices — a longer excursion that would otherwise drag its far geometry into this tile.
 /// Either way `Mosaic` recovers the real geometry from the tiles that own it.
 fn plan_bridge(
+    u: Coord<i32>,
+    v: Coord<i32>,
+    w_exc: i64,
+    gap_len: usize,
+    min: Coord<i32>,
+    max: Coord<i32>,
+    cy: i32,
+) -> Result<Bridge, TileError> {
+    plan_bridge_in(u, v, w_exc, gap_len, (min, max), (min, max), cy)
+}
+
+/// [`plan_bridge`] for a repair, whose detour corners go around `(cmin, cmax)`, its lane, rather than
+/// the box `(min, max)`.
+fn plan_bridge_lane(
+    u: Coord<i32>,
+    v: Coord<i32>,
+    w_exc: i64,
+    gap_len: usize,
+    bounds: (Coord<i32>, Coord<i32>),
+    lane: (Coord<i32>, Coord<i32>),
+    cy: i32,
+) -> Result<Bridge, TileError> {
+    plan_bridge_in(u, v, w_exc, gap_len, bounds, lane, cy)
+}
+
+/// [`plan_bridge`] and [`plan_bridge_lane`] in one body, so the plain clip's, the hot one, takes no
+/// more arguments than it needs.
+#[inline(always)]
+#[expect(
+    clippy::inline_always,
+    reason = "each caller is one instance; the lane's arguments cost the plain clip ~1%"
+)]
+fn plan_bridge_in(
     u: Coord<i32>,
     v: Coord<i32>,
     w_exc: i64,
@@ -422,6 +482,12 @@ pub(crate) struct FrameTmp {
     pub(crate) synthetic: Vec<u32>,
     /// The lane `expanded` was grown by, for the current attempt's hull.
     pub(crate) grown_by: Option<i32>,
+    /// Set when a frame can't close an excursion (a tip is not on the hull, or neither way round
+    /// winds like it): the attempt's piece is then incomplete, and the attempt fails.
+    pub(crate) failed: bool,
+    /// Whether [`Self::mark`] records anything: only pieces that will be checked need it
+    /// ([`ClipMode::ClippedValid`](crate::ClipMode::ClippedValid)), so it is set per polygon.
+    pub(crate) track: bool,
 }
 
 impl FrameTmp {
@@ -431,13 +497,17 @@ impl FrameTmp {
             expanded: Vec::new(),
             synthetic: Vec::new(),
             grown_by: None,
+            failed: false,
+            track: false,
         }
     }
 
-    /// Start a new piece attempt: nothing is synthetic yet, and no hull is grown.
+    /// Start a new piece attempt: nothing is synthetic yet, no hull is grown, nothing failed.
+    #[inline]
     pub(crate) fn reset(&mut self) {
         self.synthetic.clear();
         self.grown_by = None;
+        self.failed = false;
     }
 
     /// Record the `count` edges from vertex `first` as synthetic.
@@ -447,8 +517,10 @@ impl FrameTmp {
         reason = "a piece's vertex count is checked to fit u32 as its rings end"
     )]
     pub(crate) fn mark(&mut self, first: usize, count: usize) {
-        self.synthetic
-            .extend((first..first + count).map(|i| i as u32));
+        if self.track {
+            self.synthetic
+                .extend((first..first + count).map(|i| i as u32));
+        }
     }
 }
 
@@ -522,9 +594,9 @@ fn frame_bridge<V: PolyVertex>(
     let result = (|| {
         // The grown vertex a tip generates: the tip plus a corner of the lane square.
         let generated = |t: Coord<i32>| {
-            grown
-                .iter()
-                .position(|e| (e.x - t.x).abs() == lane && (e.y - t.y).abs() == lane)
+            grown.iter().position(|e| {
+                e.x.abs_diff(t.x) == lane.unsigned_abs() && e.y.abs_diff(t.y) == lane.unsigned_abs()
+            })
         };
         let (Some(i), Some(j)) = (generated(u), generated(v)) else {
             return Ok(false);
@@ -580,7 +652,7 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
     min: Coord<i32>,
     max: Coord<i32>,
     mut winding: impl FnMut(usize, usize) -> i64,
-    plan: RingPlan<'_>,
+    plan: &RingPlan<'_>,
     tmp: &mut FrameTmp,
     out: &mut Vec<V>,
 ) -> Result<(), TileError> {
@@ -629,8 +701,10 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
                 .ok_or(TileError::Overflow)?;
             if let Some(hull) = plan.frame {
                 let before = out.len();
-                if !frame_bridge(u, v, w_exc, (min, max), hull, lane + 1, tmp, out)? {
-                    return Err(TileError::Overflow); // a failed repair attempt, see `valid_piece`
+                let lane = lane.checked_add(1).ok_or(TileError::Overflow)?;
+                if !frame_bridge(u, v, w_exc, (min, max), hull, lane, tmp, out)? {
+                    tmp.failed = true; // the attempt fails, so the ring is left unfinished
+                    return Ok(());
                 }
                 tmp.mark(before - 1, out.len() - before + 1);
                 out.extend((vi..next).map(|i| ring[i % m]));
@@ -638,7 +712,12 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
             }
             lane_bounds(min, max, lane)?
         };
-        match plan_bridge(u, v, w_exc, vi - ui - 1, (min, max), (cmin, cmax), cy)? {
+        let bridge = if PLAIN {
+            plan_bridge(u, v, w_exc, vi - ui - 1, min, max, cy)?
+        } else {
+            plan_bridge_lane(u, v, w_exc, vi - ui - 1, (min, max), (cmin, cmax), cy)?
+        };
+        match bridge {
             Bridge::Keep => out.extend((ui + 1..vi).map(|i| ring[i % m])),
             Bridge::Detour { start, advance } => {
                 let before = out.len();
@@ -695,7 +774,38 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     min: Coord<i32>,
     max: Coord<i32>,
     scratch: &mut ClipScratch<V>,
-    plan: RingPlan<'_>,
+    out: &mut Vec<V>,
+) -> Result<RingClip, TileError> {
+    clip_ring_by::<true, V>(ring, min, max, scratch, &RingPlan::PLAIN, None, out)
+}
+
+/// [`clip_ring`] for a repair: the ring is closed by `plan`, or, given a `probe`, not built at all:
+/// the vertices it would keep outside the box go there.
+pub(crate) fn clip_ring_planned<V: PolyVertex>(
+    ring: &[V],
+    min: Coord<i32>,
+    max: Coord<i32>,
+    scratch: &mut ClipScratch<V>,
+    plan: &RingPlan<'_>,
+    probe: Option<&mut Probe>,
+    out: &mut Vec<V>,
+) -> Result<RingClip, TileError> {
+    clip_ring_by::<false, V>(ring, min, max, scratch, plan, probe, out)
+}
+
+/// [`clip_ring`] (`PLAIN`, ignoring `plan` and `probe`) and [`clip_ring_planned`] in one body, so the
+/// plain clip, the hot one, takes no more arguments than it needs.
+#[inline(always)]
+#[expect(
+    clippy::inline_always,
+    reason = "each caller is one instance; passing the plan's arguments costs the plain clip ~3%"
+)]
+fn clip_ring_by<const PLAIN: bool, V: PolyVertex>(
+    ring: &[V],
+    min: Coord<i32>,
+    max: Coord<i32>,
+    scratch: &mut ClipScratch<V>,
+    plan: &RingPlan<'_>,
     probe: Option<&mut Probe>,
     out: &mut Vec<V>,
 ) -> Result<RingClip, TileError> {
@@ -718,10 +828,10 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         return Ok(RingClip::Outside);
     }
     u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
-    if pts.iter().all(|p| outcode(p.position(), min, max) == 0) {
+    if all_inside(pts, min, max) {
         // Every vertex is inside (most rings of small polygons): every edge touches, and the ring is
         // kept verbatim, as `close_ring` would. Reserved exactly: a fresh slicer's buffer needs no regrowth.
-        if probe.is_some() {
+        if !PLAIN && probe.is_some() {
             return Ok(RingClip::Clipped); // nothing outside the box
         }
         out.reserve(m + 1);
@@ -767,7 +877,7 @@ pub(crate) fn clip_ring<V: PolyVertex>(
             "ray parity must agree with point-in-ring containment"
         );
         return if inside {
-            if probe.is_none() {
+            if PLAIN || probe.is_none() {
                 tmp.mark(out.len(), 4);
                 push_fill_box(out, ring_orientation(pts), min, max)?;
             }
@@ -800,12 +910,10 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         );
         w
     };
-    if let Some(acc) = probe {
-        arcs_points(pts, arcs, plan, (min, max), acc);
-        return Ok(RingClip::Clipped);
-    }
-    if plan == RingPlan::default() {
-        close_ring::<true, V>(pts, arcs, min, max, winding, plan, tmp, out)?;
+    if PLAIN || *plan == RingPlan::PLAIN {
+        close_ring::<true, V>(pts, arcs, min, max, winding, &RingPlan::PLAIN, tmp, out)?;
+    } else if let Some(acc) = probe {
+        arcs_points(pts, arcs, *plan, (min, max), acc);
     } else {
         close_ring::<false, V>(pts, arcs, min, max, winding, plan, tmp, out)?;
     }
@@ -898,16 +1006,7 @@ mod tests {
     /// [`clip_ring`] into a fresh output, with how the ring met the tile.
     fn clip(ring: &[Coord<i32>]) -> (RingClip, Vec<Coord<i32>>) {
         let mut out = Vec::new();
-        let rc = clip_ring(
-            ring,
-            MIN,
-            MAX,
-            &mut ClipScratch::new(),
-            RingPlan::default(),
-            None,
-            &mut out,
-        )
-        .unwrap();
+        let rc = clip_ring(ring, MIN, MAX, &mut ClipScratch::new(), &mut out).unwrap();
         (rc, out)
     }
 

@@ -350,6 +350,11 @@ fn random_self_intersecting_polygons_match_single_tile() {
         let got = all_tiles(&mut slicer, &input).unwrap();
         let mut whole = unclipped(extent, buffer);
         let got_whole = all_tiles(&mut whole, &input).unwrap();
+        // Valid pieces: the repairs run on this garbage too, and must agree between both calls.
+        let mut valid = Slicer::new(extent, buffer)
+            .unwrap()
+            .with_clip_mode(ClipMode::ClippedValid);
+        let got_valid = all_tiles(&mut valid, &input).unwrap();
         let e = i64::from(extent);
         let (t0, t1) = ((-span / e) - 3, (span / e) + 3);
         for ty in t0..=t1 {
@@ -369,6 +374,11 @@ fn random_self_intersecting_polygons_match_single_tile() {
                     "unclipped case {case}"
                 );
                 assert_eq!(ids(w), ids(g), "unclipped case {case} tile {tile:?}");
+                assert_eq!(
+                    got_valid.get(&tile).unwrap_or(&empty),
+                    &one_tile(&mut valid, tile, &input),
+                    "valid case {case} e{extent} b{buffer} {tile:?}\ninput {input:?}"
+                );
                 tiles_checked += 1;
             }
         }
@@ -401,28 +411,36 @@ fn small_polygons_match_single_tile() {
         if case % 5 == 0 && w > 4 && h > 4 {
             rings.push(vec![c(1, 1), c(1, h - 1), c(w - 1, h - 1), c(w - 1, 1)]);
         }
+        // Open, closed (as OSM's are), or closed twice.
+        for _ in 0..case % 4 % 3 {
+            let first = rings[0][0];
+            rings[0].push(first);
+        }
         let input = vec![rings];
-        let mut slicer = Slicer::new(extent, buffer).unwrap();
-        let got = all_tiles(&mut slicer, &input).unwrap();
-        let (t0x, t1x) = (((x - 2 * e) / e) as i32 - 2, ((x + 2 * e) / e) as i32 + 2);
-        let (t0y, t1y) = (((y - 2 * e) / e) as i32 - 2, ((y + 2 * e) / e) as i32 + 2);
-        for ty in t0y..=t1y {
-            for tx in t0x..=t1x {
-                let tile = TileId::new(tx, ty);
-                let empty = Vec::new();
-                assert_eq!(
-                    got.get(&tile).unwrap_or(&empty),
-                    &one_tile(&mut slicer, tile, &input),
-                    "case {case} e{extent} b{buffer} {tile:?}\ninput {input:?}"
-                );
+        for mode in [ClipMode::Clipped, ClipMode::ClippedValid] {
+            let mut slicer = Slicer::new(extent, buffer).unwrap().with_clip_mode(mode);
+            let got = all_tiles(&mut slicer, &input).unwrap();
+            let (t0x, t1x) = (((x - 2 * e) / e) as i32 - 2, ((x + 2 * e) / e) as i32 + 2);
+            let (t0y, t1y) = (((y - 2 * e) / e) as i32 - 2, ((y + 2 * e) / e) as i32 + 2);
+            for ty in t0y..=t1y {
+                for tx in t0x..=t1x {
+                    let tile = TileId::new(tx, ty);
+                    let empty = Vec::new();
+                    assert_eq!(
+                        got.get(&tile).unwrap_or(&empty),
+                        &one_tile(&mut slicer, tile, &input),
+                        "{mode:?} case {case} e{extent} b{buffer} {tile:?}\ninput {input:?}"
+                    );
+                }
             }
         }
     }
 }
 
 /// Garbage, not geometry: rings of hundreds of random vertices over a few dozen tiles (so thousands of
-/// long, crossing spikes reach each tile), several to a polygon. Nothing is promised of what comes
-/// out, but it must come out, from the all-tiles and the single-tile slicer alike and the same from both:
+/// long, crossing spikes reach each tile), several to a polygon, sliced with valid pieces
+/// ([`ClipMode::ClippedValid`]). Nothing is promised of what comes out, but it must come out, from the
+/// all-tiles and the single-tile slicer alike and the same from both:
 /// a repair is bounded work per tile whatever the data, and gives up for the plain clip when it runs out.
 #[test]
 fn garbage_polygons_finish_and_match_single_tile() {
@@ -441,7 +459,9 @@ fn garbage_polygons_finish_and_match_single_tile() {
             })
             .collect();
         let input = vec![rings];
-        let mut slicer = Slicer::new(extent, buffer).unwrap();
+        let mut slicer = Slicer::new(extent, buffer)
+            .unwrap()
+            .with_clip_mode(ClipMode::ClippedValid);
         let got = all_tiles(&mut slicer, &input).unwrap();
         let e = i64::from(extent);
         let (t0, t1) = ((-span / e) - 2, (span / e) + 2);
