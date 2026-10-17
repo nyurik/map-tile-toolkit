@@ -21,7 +21,7 @@ use geo_types::Coord;
 
 use crate::TileError;
 use crate::clip_polyline::{line_meets_box, segment_intersects};
-use crate::geom::{point_in_ring, ring_orientation};
+use crate::geom::{orient, point_in_distinct_ring, ring_orientation};
 use crate::vertex::{PolyVertex, Vertex};
 
 // Cohen–Sutherland outcode bits for a point vs the inclusive box `[min, max]`.
@@ -65,6 +65,63 @@ fn slot(oc: u8) -> u8 {
         LEFT => 7,
         _ => 0,
     }
+}
+
+/// How [`close_ring`] bridges a ring's dropped gaps. The default is the plain clip: each gap becomes a
+/// chord, a corner detour or the verbatim gap, whichever is cheapest. A repair attempt (see
+/// `valid_piece`) asks for more: `deepen` original vertices kept past each tip of an excursion, and
+/// detour corners moved `lane` units further out, so concurrent detours don't share a line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RingPlan<'a> {
+    /// Original vertices kept past each tip into every gap; `usize::MAX` keeps every gap whole.
+    pub(crate) deepen: usize,
+    /// The first bridge's lane, and how much each further bridge of the ring moves out.
+    pub(crate) lane_base: i32,
+    pub(crate) lane_step: i32,
+    /// Close every excursion on a frame around this convex hull (of everything the piece keeps
+    /// outside the box, and `B⁺`) instead of hugging `B⁺`: each tip leaves the hull through a short
+    /// stub, which nothing kept can cross, and runs along the hull grown by the lane. Needs every
+    /// tip to be a vertex of the hull, else the attempt fails.
+    pub(crate) frame: Option<&'a [Coord<i32>]>,
+    /// Per bridge of the piece (its excursions, in ring then arc order), how many vertices to keep
+    /// past the tip before it and after the one behind it, instead of `deepen` for all.
+    pub(crate) depths: Option<&'a [(u32, u32)]>,
+    /// The index among the piece's bridges of this ring's first.
+    pub(crate) bridge_base: usize,
+}
+
+impl RingPlan<'_> {
+    /// How many vertices of a gap of `gap` to keep after the tip before it, and before the tip after
+    /// it, for the piece's bridge number `bridge`.
+    fn depth(&self, bridge: usize, gap: usize) -> (usize, usize) {
+        let (head, tail) = match self.depths {
+            Some(d) => d
+                .get(bridge)
+                .map_or((0, 0), |&(h, t)| (h as usize, t as usize)),
+            None => (self.deepen, self.deepen),
+        };
+        let head = head.min(gap);
+        (head, tail.min(gap - head))
+    }
+}
+
+/// `[min, max]` grown by `lane` units per side — the box detour corners are placed around.
+pub(crate) fn lane_bounds(
+    min: Coord<i32>,
+    max: Coord<i32>,
+    lane: i32,
+) -> Result<(Coord<i32>, Coord<i32>), TileError> {
+    let g = |v: i32, d: i32| v.checked_add(d).ok_or(TileError::Overflow);
+    Ok((
+        Coord {
+            x: g(min.x, -lane)?,
+            y: g(min.y, -lane)?,
+        },
+        Coord {
+            x: g(max.x, lane)?,
+            y: g(max.y, lane)?,
+        },
+    ))
 }
 
 /// The `B⁺` corner at an even `slot`, one unit outside the box. [`TileError::Overflow`] if the tile
@@ -170,8 +227,8 @@ fn plan_bridge(
     v: Coord<i32>,
     w_exc: i64,
     gap_len: usize,
-    min: Coord<i32>,
-    max: Coord<i32>,
+    (min, max): (Coord<i32>, Coord<i32>),
+    (cmin, cmax): (Coord<i32>, Coord<i32>),
     cy: i32,
 ) -> Result<Bridge, TileError> {
     let su = slot(outcode(u, min, max));
@@ -181,7 +238,7 @@ fn plan_bridge(
     let mut w_ref = 0;
     let mut prev = u;
     for s in corner_slots(su, base) {
-        let c = corner(s, min, max)?;
+        let c = corner(s, cmin, cmax)?;
         w_ref += ray_crossing(prev, c, cy, max.x);
         prev = c;
     }
@@ -259,6 +316,7 @@ pub(crate) struct ClipScratch<V> {
     copy: Vec<V>,
     crossings: Vec<(u32, i64)>,
     arcs: Vec<(usize, usize)>,
+    pub(crate) tmp: FrameTmp,
 }
 
 impl<V> ClipScratch<V> {
@@ -267,8 +325,232 @@ impl<V> ClipScratch<V> {
             copy: Vec::new(),
             crossings: Vec::new(),
             arcs: Vec::new(),
+            tmp: FrameTmp::new(),
         }
     }
+}
+
+/// The first arc to emit: `1` when the last arc runs on, across the ring's seam, into the first
+/// (the last is then extended over it), else `0`.
+fn merge_seam(arcs: &mut [(usize, usize)], m: usize) -> usize {
+    if let (Some(&(s0, e0)), Some(last)) = (arcs.first(), arcs.len().checked_sub(1))
+        && last > 0
+        && arcs[last].1 + 1 >= s0 + m
+    {
+        arcs[last].1 = e0 + m;
+        return 1;
+    }
+    0
+}
+
+/// What a frame attempt probes before building anything: the outside vertices it would keep, and the
+/// tips it would have to close (each must turn out to be a vertex of the hull of the first).
+pub(crate) struct Probe {
+    pub(crate) pts: Vec<Coord<i32>>,
+    /// Each tip, with its bridge's number in the piece and which end of the excursion it is (`0`
+    /// after an arc, `1` before the next).
+    pub(crate) tips: Vec<(Coord<i32>, u32, u8)>,
+    /// How many bridges the rings probed so far have.
+    pub(crate) bridges: usize,
+}
+
+impl Probe {
+    pub(crate) const fn new() -> Self {
+        Self {
+            pts: Vec::new(),
+            tips: Vec::new(),
+            bridges: 0,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pts.clear();
+        self.tips.clear();
+        self.bridges = 0;
+    }
+}
+
+/// Push onto `probe` the vertices [`close_ring`] keeps of a ring (its arcs, and `deepen` vertices past
+/// each tip) that lie outside the box `[min, max]`, without building the ring: the ones that can be
+/// on the hull of the piece's outside geometry.
+pub(crate) fn arcs_points<V: Vertex>(
+    ring: &[V],
+    arcs: &mut [(usize, usize)],
+    plan: RingPlan<'_>,
+    (min, max): (Coord<i32>, Coord<i32>),
+    probe: &mut Probe,
+) {
+    let m = ring.len();
+    let first = merge_seam(arcs, m);
+    let arcs = &arcs[first..];
+    let Probe { pts, tips, bridges } = probe;
+    let base = *bridges;
+    let mut add = |i: usize| {
+        let p = ring[i % m].position();
+        if outcode(p, min, max) != 0 {
+            pts.push(p);
+        }
+    };
+    if let [(s, e)] = *arcs
+        && e - s + 1 >= m
+    {
+        (0..m).for_each(&mut add); // every vertex is kept
+        return;
+    }
+    for (j, &(s, e)) in arcs.iter().enumerate() {
+        (s..=e).for_each(&mut add);
+        let next = arcs.get(j + 1).map_or(arcs[0].0 + m, |a| a.0);
+        let gap = next - e - 1;
+        let (head, tail) = plan.depth(plan.bridge_base + j, gap);
+        (e + 1..=e + head).for_each(&mut add);
+        (next - tail..next).for_each(&mut add);
+        if head + tail < gap {
+            let bridge = u32::try_from(plan.bridge_base + j).unwrap_or(u32::MAX);
+            tips.push((ring[(e + head) % m].position(), bridge, 0));
+            tips.push((ring[(next - tail) % m].position(), bridge, 1));
+        }
+    }
+    *bridges = base + arcs.len();
+}
+
+/// Reusable buffers of the frame construction.
+pub(crate) struct FrameTmp {
+    pts: Vec<Coord<i32>>,
+    expanded: Vec<Coord<i32>>,
+    /// The piece's synthetic edges so far, ascending: edge `i` runs from vertex `i` of the piece's
+    /// vertex buffer to vertex `i + 1`. Only these can cross anything, so only these are checked.
+    pub(crate) synthetic: Vec<u32>,
+    /// The lane `expanded` was grown by, for the current attempt's hull.
+    pub(crate) grown_by: Option<i32>,
+}
+
+impl FrameTmp {
+    pub(crate) const fn new() -> Self {
+        Self {
+            pts: Vec::new(),
+            expanded: Vec::new(),
+            synthetic: Vec::new(),
+            grown_by: None,
+        }
+    }
+
+    /// Start a new piece attempt: nothing is synthetic yet, and no hull is grown.
+    pub(crate) fn reset(&mut self) {
+        self.synthetic.clear();
+        self.grown_by = None;
+    }
+
+    /// Record the `count` edges from vertex `first` as synthetic.
+    #[inline]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a piece's vertex count is checked to fit u32 as its rings end"
+    )]
+    pub(crate) fn mark(&mut self, first: usize, count: usize) {
+        self.synthetic
+            .extend((first..first + count).map(|i| i as u32));
+    }
+}
+
+/// The strict convex hull of `pts` (sorted and deduplicated in place), counter-clockwise, into `hull`.
+pub(crate) fn convex_hull(pts: &mut Vec<Coord<i32>>, hull: &mut Vec<Coord<i32>>) {
+    hull.clear();
+    pts.sort_unstable_by_key(|c| (c.x, c.y));
+    pts.dedup();
+    if pts.len() < 3 {
+        hull.extend_from_slice(pts);
+        return;
+    }
+    // Andrew's monotone chain: the lower hull left to right, then the upper one back.
+    for pass in 0..2 {
+        let from = hull.len();
+        let walk: &mut dyn Iterator<Item = &Coord<i32>> = if pass == 0 {
+            &mut pts.iter()
+        } else {
+            &mut pts.iter().rev()
+        };
+        for &p in walk {
+            while hull.len() >= from + 2
+                && orient(hull[hull.len() - 2], hull[hull.len() - 1], p) != Ordering::Greater
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop(); // the end point starts the next pass
+    }
+}
+
+/// Close the excursion from tip `u` to tip `v` (winding `w_exc` around the box center) on the hull
+/// `hull` grown by `lane` units: each tip steps out to the vertex of the grown hull that it
+/// generates, and the grown hull's vertices between them follow, whichever way round winds like the
+/// excursion. Appends them and returns `true`, or appends nothing and returns `false` if a tip is
+/// not a hull vertex or neither way round has the excursion's winding.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::many_single_char_names,
+    reason = "u and v are the excursion's tips; the rest is the box, hull, lane and buffers it needs"
+)]
+fn frame_bridge<V: PolyVertex>(
+    u: Coord<i32>,
+    v: Coord<i32>,
+    w_exc: i64,
+    (min, max): (Coord<i32>, Coord<i32>),
+    hull: &[Coord<i32>],
+    lane: i32,
+    tmp: &mut FrameTmp,
+    out: &mut Vec<V>,
+) -> Result<bool, TileError> {
+    let lane = lane.max(1);
+    // The hull grown by `lane` (its Minkowski sum with the square `[-lane, lane]²`), kept for the
+    // other excursions of the attempt that close in the same lane.
+    let mut grown = core::mem::take(&mut tmp.expanded);
+    if tmp.grown_by != Some(lane) {
+        tmp.pts.clear();
+        let g = |a: i32, d: i32| a.checked_add(d).ok_or(TileError::Overflow);
+        for c in hull {
+            for (sx, sy) in [(-lane, -lane), (lane, -lane), (lane, lane), (-lane, lane)] {
+                tmp.pts.push(Coord {
+                    x: g(c.x, sx)?,
+                    y: g(c.y, sy)?,
+                });
+            }
+        }
+        convex_hull(&mut tmp.pts, &mut grown);
+        tmp.grown_by = Some(lane);
+    }
+    let result = (|| {
+        // The grown vertex a tip generates: the tip plus a corner of the lane square.
+        let generated = |t: Coord<i32>| {
+            grown
+                .iter()
+                .position(|e| (e.x - t.x).abs() == lane && (e.y - t.y).abs() == lane)
+        };
+        let (Some(i), Some(j)) = (generated(u), generated(v)) else {
+            return Ok(false);
+        };
+        let n = grown.len();
+        let cy = center_y(min, max);
+        // Both ways round, each as the grown vertices from `i` to `j` (a tip's own vertex first).
+        let ccw = (0..=(j + n - i) % n).map(|k| grown[(i + k) % n]);
+        let cw = (0..=(i + n - j) % n).map(|k| grown[(i + n - k) % n]);
+        let wind = |way: &mut dyn Iterator<Item = Coord<i32>>| {
+            ray_crossings(iter::once(u).chain(way).chain(iter::once(v)), cy, max.x)
+        };
+        let forward = if wind(&mut ccw.clone()) == w_exc {
+            true
+        } else if wind(&mut cw.clone()) == w_exc {
+            false
+        } else {
+            return Ok(false);
+        };
+        let way: &mut dyn Iterator<Item = Coord<i32>> =
+            if forward { &mut { ccw } } else { &mut { cw } };
+        out.extend(way.map(V::synthetic_at));
+        Ok::<_, TileError>(true)
+    })();
+    tmp.expanded = grown;
+    result
 }
 
 /// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), appended
@@ -288,24 +570,22 @@ impl<V> ClipScratch<V> {
 ///
 /// [`TileError::Overflow`] if a synthetic corner can't be placed strictly outside the box.
 #[inline]
-pub(crate) fn close_ring<V: PolyVertex>(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the ring, its arcs, the box, the winding, the plan and the buffers: one hot function"
+)]
+pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
     ring: &[V],
     arcs: &mut [(usize, usize)],
     min: Coord<i32>,
     max: Coord<i32>,
     mut winding: impl FnMut(usize, usize) -> i64,
+    plan: RingPlan<'_>,
+    tmp: &mut FrameTmp,
     out: &mut Vec<V>,
 ) -> Result<(), TileError> {
     let m = ring.len();
-    // The last arc may run on, across the ring's seam, into the first.
-    let mut first = 0;
-    if let (Some(&(s0, e0)), Some(last)) = (arcs.first(), arcs.len().checked_sub(1))
-        && last > 0
-        && arcs[last].1 + 1 >= s0 + m
-    {
-        arcs[last].1 = e0 + m;
-        first = 1;
-    }
+    let first = merge_seam(arcs, m);
     let arcs = &arcs[first..];
     if let [(s, e)] = *arcs
         && e - s + 1 >= m
@@ -322,15 +602,50 @@ pub(crate) fn close_ring<V: PolyVertex>(
         out.extend((s..=e).map(|i| ring[i % m]));
         // Bridge the gap to the next arc (cyclically): the dropped vertices `e+1 .. next`.
         let next = arcs.get(j + 1).map_or(arcs[0].0 + m, |a| a.0);
-        let (u, v) = (ring[e % m].position(), ring[next % m].position());
-        let w_exc = winding(e % m, next - e);
-        match plan_bridge(u, v, w_exc, next - e - 1, min, max, cy)? {
-            Bridge::Keep => out.extend((e + 1..next).map(|i| ring[i % m])),
+        // The plain clip bridges from the tips; a repair may keep `head` more vertices after this
+        // arc's tip and `tail` before the next one's (all, if they meet).
+        let (head, tail) = if PLAIN {
+            (0, 0)
+        } else {
+            plan.depth(plan.bridge_base + j, next - e - 1)
+        };
+        if !PLAIN {
+            if head + tail == next - e - 1 {
+                out.extend((e + 1..next).map(|i| ring[i % m]));
+                continue;
+            }
+            out.extend((e + 1..=e + head).map(|i| ring[i % m]));
+        }
+        let (ui, vi) = (e + head, next - tail);
+        let (u, v) = (ring[ui % m].position(), ring[vi % m].position());
+        let w_exc = winding(ui % m, vi - ui);
+        let (cmin, cmax) = if PLAIN {
+            (min, max)
+        } else {
+            let lane = i32::try_from(j)
+                .ok()
+                .and_then(|j| j.checked_mul(plan.lane_step))
+                .and_then(|l| l.checked_add(plan.lane_base))
+                .ok_or(TileError::Overflow)?;
+            if let Some(hull) = plan.frame {
+                let before = out.len();
+                if !frame_bridge(u, v, w_exc, (min, max), hull, lane + 1, tmp, out)? {
+                    return Err(TileError::Overflow); // a failed repair attempt, see `valid_piece`
+                }
+                tmp.mark(before - 1, out.len() - before + 1);
+                out.extend((vi..next).map(|i| ring[i % m]));
+                continue;
+            }
+            lane_bounds(min, max, lane)?
+        };
+        match plan_bridge(u, v, w_exc, vi - ui - 1, (min, max), (cmin, cmax), cy)? {
+            Bridge::Keep => out.extend((ui + 1..vi).map(|i| ring[i % m])),
             Bridge::Detour { start, advance } => {
                 let before = out.len();
                 for s in corner_slots(start, advance) {
-                    out.push(V::synthetic_at(corner(s, min, max)?));
+                    out.push(V::synthetic_at(corner(s, cmin, cmax)?));
                 }
+                tmp.mark(before - 1, out.len() - before + 1);
                 debug_assert_eq!(
                     ray_crossings(
                         iter::once(u)
@@ -343,6 +658,9 @@ pub(crate) fn close_ring<V: PolyVertex>(
                     "detour winding must match the excursion it replaces"
                 );
             }
+        }
+        if !PLAIN {
+            out.extend((vi..next).map(|i| ring[i % m]));
         }
     }
     out.push(out[ring_start]); // close the ring
@@ -377,12 +695,15 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     min: Coord<i32>,
     max: Coord<i32>,
     scratch: &mut ClipScratch<V>,
+    plan: RingPlan<'_>,
+    probe: Option<&mut Probe>,
     out: &mut Vec<V>,
 ) -> Result<RingClip, TileError> {
     let ClipScratch {
         copy,
         crossings,
         arcs,
+        tmp,
     } = scratch;
     // Borrow the ring when it is already distinct (the usual case), copying only to drop duplicates.
     let pts = if let Some(n) = distinct_prefix(ring) {
@@ -400,6 +721,9 @@ pub(crate) fn clip_ring<V: PolyVertex>(
     if pts.iter().all(|p| outcode(p.position(), min, max) == 0) {
         // Every vertex is inside (most rings of small polygons): every edge touches, and the ring is
         // kept verbatim, as `close_ring` would. Reserved exactly: a fresh slicer's buffer needs no regrowth.
+        if probe.is_some() {
+            return Ok(RingClip::Clipped); // nothing outside the box
+        }
         out.reserve(m + 1);
         out.extend_from_slice(pts);
         out.push(pts[0]);
@@ -439,11 +763,14 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         let inside = crossings.len() % 2 == 1;
         debug_assert_eq!(
             inside,
-            point_in_ring(min, &pts.iter().map(Vertex::position).collect::<Vec<_>>()),
+            point_in_distinct_ring(min, m, |i| pts[i].position()),
             "ray parity must agree with point-in-ring containment"
         );
         return if inside {
-            push_fill_box(out, ring_orientation(pts), min, max)?;
+            if probe.is_none() {
+                tmp.mark(out.len(), 4);
+                push_fill_box(out, ring_orientation(pts), min, max)?;
+            }
             Ok(RingClip::Covers)
         } else {
             Ok(RingClip::Outside)
@@ -473,7 +800,15 @@ pub(crate) fn clip_ring<V: PolyVertex>(
         );
         w
     };
-    close_ring(pts, arcs, min, max, winding, out)?;
+    if let Some(acc) = probe {
+        arcs_points(pts, arcs, plan, (min, max), acc);
+        return Ok(RingClip::Clipped);
+    }
+    if plan == RingPlan::default() {
+        close_ring::<true, V>(pts, arcs, min, max, winding, plan, tmp, out)?;
+    } else {
+        close_ring::<false, V>(pts, arcs, min, max, winding, plan, tmp, out)?;
+    }
     Ok(RingClip::Clipped)
 }
 
@@ -514,6 +849,38 @@ pub(crate) fn distinct_prefix<V: Vertex>(ring: &[V]) -> Option<usize> {
         .then_some(n)
 }
 
+/// The kept arcs of `ring` for the box `[min, max]` — what [`clip_ring`] finds — appended to `store`,
+/// so a probe can revisit them without scanning the ring again. Returns the ring's distinct length
+/// and where its arcs are in `store` (empty when no edge touches the box, or every vertex is
+/// inside), or `None` if the ring has repeated vertices, which only a copy can drop.
+pub(crate) fn scan_arcs<V: Vertex>(
+    ring: &[V],
+    min: Coord<i32>,
+    max: Coord<i32>,
+    store: &mut Vec<(usize, usize)>,
+) -> Option<(usize, core::ops::Range<usize>)> {
+    let m = distinct_prefix(ring)?;
+    let pts = &ring[..m];
+    let start = store.len();
+    if m < 3 || pts.iter().all(|p| outcode(p.position(), min, max) == 0) {
+        return Some((m, start..start));
+    }
+    let (mut a, mut oa) = (pts[0].position(), outcode(pts[0].position(), min, max));
+    for (i, b) in pts[1..].iter().chain(iter::once(&pts[0])).enumerate() {
+        let b = b.position();
+        let ob = outcode(b, min, max);
+        if oa & ob == 0 && (oa == 0 || ob == 0 || line_meets_box(a, b, min, max)) {
+            // (`keep_edge`, on this ring's arcs only.)
+            match store[start..].last_mut() {
+                Some((_, end)) if i <= *end + 1 => *end = i + 1,
+                _ => store.push((i, i + 1)),
+            }
+        }
+        (a, oa) = (b, ob);
+    }
+    Some((m, start..store.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use geo_types::Coord;
@@ -531,7 +898,16 @@ mod tests {
     /// [`clip_ring`] into a fresh output, with how the ring met the tile.
     fn clip(ring: &[Coord<i32>]) -> (RingClip, Vec<Coord<i32>>) {
         let mut out = Vec::new();
-        let rc = clip_ring(ring, MIN, MAX, &mut ClipScratch::new(), &mut out).unwrap();
+        let rc = clip_ring(
+            ring,
+            MIN,
+            MAX,
+            &mut ClipScratch::new(),
+            RingPlan::default(),
+            None,
+            &mut out,
+        )
+        .unwrap();
         (rc, out)
     }
 
@@ -540,6 +916,27 @@ mod tests {
         // Distinct only after dropping consecutive duplicates, and then just a line there and back.
         let ring = [c(2, 2), c(2, 2), c(7, 7), c(7, 7), c(2, 2)];
         assert!(matches!(clip(&ring), (RingClip::Outside, out) if out.is_empty()));
+    }
+
+    #[test]
+    fn hull_is_strict_and_counter_clockwise() {
+        let mut pts = vec![
+            c(0, 0),
+            c(4, 0),
+            c(4, 4),
+            c(0, 4),
+            c(2, 2),
+            c(2, 0),
+            c(4, 4),
+        ];
+        let mut hull = Vec::new();
+        convex_hull(&mut pts, &mut hull);
+        // The interior point and the collinear one on the bottom edge are dropped.
+        assert_eq!(hull, [c(0, 0), c(4, 0), c(4, 4), c(0, 4)]);
+        // Fewer than three distinct points come back as they are.
+        let mut two = vec![c(1, 1), c(1, 1), c(2, 3)];
+        convex_hull(&mut two, &mut hull);
+        assert_eq!(hull, [c(1, 1), c(2, 3)]);
     }
 
     #[test]

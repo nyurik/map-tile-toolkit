@@ -376,6 +376,89 @@ fn random_self_intersecting_polygons_match_single_tile() {
     eprintln!("{tiles_checked} tiles");
 }
 
+/// Polygons smaller than a tile (a building): they are sliced by a walk over the few tiles they reach,
+/// not a sweep, and must still give every tile what the one-tile call gives it — straddling a border or
+/// a corner, on the grid lines and inside the buffer, with and without a hole.
+#[test]
+fn small_polygons_match_single_tile() {
+    let mut rng = Rng(0x05EE_D0FA_B01D_1234);
+    for case in 0..400 {
+        let (extent, buffer) = [(8u32, 0u16), (8, 3), (16, 1), (64, 5), (25, 0), (10, 4)][case % 6];
+        let e = i64::from(extent);
+        // A box under a tile wide and tall, placed within a few units of a tile corner or border.
+        let (w, h) = (rng.range(1, e - 1), rng.range(1, e - 1));
+        let near = |rng: &mut Rng| rng.range(-e / 2, e / 2) + e * rng.range(-2, 2);
+        let (x, y) = (near(&mut rng), near(&mut rng));
+        let c = |dx: i64, dy: i64| Coord {
+            x: (x + dx) as i32,
+            y: (y + dy) as i32,
+        };
+        let mut rings: Rings = vec![match case % 3 {
+            0 => vec![c(0, 0), c(w, 0), c(w, h), c(0, h)],
+            1 => vec![c(0, 0), c(w, rng.range(0, h)), c(rng.range(0, w), h)],
+            _ => vec![c(0, 0), c(w, 0), c(w, h), c(w / 2, h / 2), c(0, h)],
+        }];
+        if case % 5 == 0 && w > 4 && h > 4 {
+            rings.push(vec![c(1, 1), c(1, h - 1), c(w - 1, h - 1), c(w - 1, 1)]);
+        }
+        let input = vec![rings];
+        let mut slicer = Slicer::new(extent, buffer).unwrap();
+        let got = all_tiles(&mut slicer, &input).unwrap();
+        let (t0x, t1x) = (((x - 2 * e) / e) as i32 - 2, ((x + 2 * e) / e) as i32 + 2);
+        let (t0y, t1y) = (((y - 2 * e) / e) as i32 - 2, ((y + 2 * e) / e) as i32 + 2);
+        for ty in t0y..=t1y {
+            for tx in t0x..=t1x {
+                let tile = TileId::new(tx, ty);
+                let empty = Vec::new();
+                assert_eq!(
+                    got.get(&tile).unwrap_or(&empty),
+                    &one_tile(&mut slicer, tile, &input),
+                    "case {case} e{extent} b{buffer} {tile:?}\ninput {input:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Garbage, not geometry: rings of hundreds of random vertices over a few dozen tiles (so thousands of
+/// long, crossing spikes reach each tile), several to a polygon. Nothing is promised of what comes
+/// out, but it must come out, from the all-tiles and the single-tile slicer alike and the same from both:
+/// a repair is bounded work per tile whatever the data, and gives up for the plain clip when it runs out.
+#[test]
+fn garbage_polygons_finish_and_match_single_tile() {
+    let mut rng = Rng(0x0DDB_1A5E_5BAD_5EED);
+    for case in 0..3 {
+        let (extent, buffer) = [(16u32, 0u16), (16, 3), (25, 5)][case % 3];
+        let span = i64::from(extent) * 12;
+        let rings: Rings = (0..rng.range(1, 4))
+            .map(|_| {
+                (0..rng.range(100, 300))
+                    .map(|_| Coord {
+                        x: rng.range(-span, span) as i32,
+                        y: rng.range(-span, span) as i32,
+                    })
+                    .collect()
+            })
+            .collect();
+        let input = vec![rings];
+        let mut slicer = Slicer::new(extent, buffer).unwrap();
+        let got = all_tiles(&mut slicer, &input).unwrap();
+        let e = i64::from(extent);
+        let (t0, t1) = ((-span / e) - 2, (span / e) + 2);
+        for ty in t0..=t1 {
+            for tx in t0..=t1 {
+                let tile = TileId::new(tx as i32, ty as i32);
+                let empty = Vec::new();
+                assert_eq!(
+                    got.get(&tile).unwrap_or(&empty),
+                    &one_tile(&mut slicer, tile, &input),
+                    "case {case} e{extent} b{buffer} {tile:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn extreme_coordinates_never_panic() {
     let mut rng = Rng(0x0F0F_1234_9876_5432);

@@ -19,6 +19,9 @@ pub use geom::signed_area_2x;
 // Low-level per-tile polygon-ring clipping (keep-original with synthetic clip-boundary corners).
 mod clip_polygon;
 
+// Whether a tile's piece is planar outside its box (the check behind valid polygon pieces).
+mod planar;
+
 // The stateless tile geometry under the slicer: tile boxes and the lazy per-segment tile walk.
 mod grid;
 
