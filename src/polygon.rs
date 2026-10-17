@@ -24,7 +24,7 @@
 //! would get a piece, and each tile of a fill run, gets the whole polygon, lent from the input.
 
 use core::cmp::Ordering;
-use core::ops::Range;
+use core::ops::{Range, RangeInclusive};
 
 use geo_types::Coord;
 
@@ -544,6 +544,8 @@ struct Sweep {
     tile_ready: Option<i32>,
     /// The exterior's winding, once a fill needs it.
     orient: Option<Ordering>,
+    /// The columns yielded: see [`PolygonSlices::within`].
+    cols: RangeInclusive<i32>,
 }
 
 /// Lazy iterator over the slices of a polygon in every tile it reaches; see
@@ -561,6 +563,9 @@ pub struct PolygonSlices<'s, V, R> {
     start: Option<Start>,
     sweep: &'s mut Option<Sweep>,
     done: bool,
+    /// The columns and rows yielded: see [`Self::within`].
+    cols: RangeInclusive<i32>,
+    rows: RangeInclusive<i32>,
 }
 
 /// How a loaded polygon starts: small, so the iterator can be built in place, its sweep only on the
@@ -593,7 +598,21 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
             start,
             sweep,
             done: false,
+            cols: i32::MIN..=i32::MAX,
+            rows: i32::MIN..=i32::MAX,
         })
+    }
+
+    /// Yield only the slices in tiles `min..=max` (columns `min.x..=max.x`, rows `min.y..=max.y`):
+    /// the same pieces as without it, and fill runs cut to those columns. Rows outside the window are
+    /// never swept and edge tiles outside it never built, so slicing a large polygon into a few tiles
+    /// costs loading it and sweeping those rows, not every tile it reaches. Call it before
+    /// [`next`](Self::next).
+    #[must_use]
+    pub fn within(mut self, min: TileId, max: TileId) -> Self {
+        debug_assert!(self.sweep.is_none(), "within() before the first next()");
+        (self.cols, self.rows) = (min.x..=max.x, min.y..=max.y);
+        self
     }
 
     /// The next slice, or `None` when the polygon is done. An error ends the iteration: only
@@ -656,8 +675,15 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
 
     fn step(&mut self) -> Result<Option<Event>, TileError> {
         match self.start.take() {
-            Some(Start::Whole { tile, origin }) => return Ok(Some(Event::Whole { tile, origin })),
-            Some(Start::Sweep { row, last_row }) => *self.sweep = Some(Sweep::new(row, last_row)),
+            Some(Start::Whole { tile, origin }) => {
+                let inside = self.cols.contains(&tile.x) && self.rows.contains(&tile.y);
+                return Ok(inside.then_some(Event::Whole { tile, origin }));
+            }
+            Some(Start::Sweep { row, last_row }) => {
+                let row = row.max(i64::from(*self.rows.start()));
+                let last_row = last_row.min(i64::from(*self.rows.end()));
+                *self.sweep = Some(Sweep::new(row, last_row, self.cols.clone()));
+            }
             None => {}
         }
         let Some(sw) = self.sweep.as_mut() else {
@@ -755,7 +781,7 @@ struct Cx<'x, V, R> {
 
 impl Sweep {
     /// A sweep over rows `row..=last_row`, before its first row.
-    fn new(row: i64, last_row: i64) -> Self {
+    fn new(row: i64, last_row: i64, cols: RangeInclusive<i32>) -> Self {
         Self {
             row,
             last_row,
@@ -773,6 +799,7 @@ impl Sweep {
             lh: 0,
             cover: Some(0..0),
             long_last: i64::MIN,
+            cols,
         }
     }
 
@@ -822,6 +849,14 @@ impl Sweep {
                 (self.cover, self.long_last) = (Some(0..0), i64::MIN);
                 continue;
             }
+            if self.next > i64::from(*self.cols.end()) {
+                // Past the window: nothing more in this row, whose parity starts the next one even.
+                self.ready = self.take_pending();
+                cx.s.inside.fill(false);
+                self.holes_in = 0;
+                (self.in_row, self.row) = (false, self.row + 1);
+                continue;
+            }
             // Tiles `next..=bound` all see the same crossings on their winding rays.
             let s = &*cx.s;
             let bound = s
@@ -857,7 +892,7 @@ impl Sweep {
                 self.fill(cx, self.next, i64::from(tx))?;
                 // The edge tile ends any covered span before it.
                 self.ready = self.take_pending();
-                self.tile_ready = Some(tx);
+                self.tile_ready = self.cols.contains(&tx).then_some(tx);
                 self.next = i64::from(tx) + 1;
                 continue;
             }
@@ -978,6 +1013,11 @@ impl Sweep {
         }
         i32::try_from(start).map_err(|_| TileError::Overflow)?;
         i32::try_from(end).map_err(|_| TileError::Overflow)?;
+        let start = start.max(i64::from(*self.cols.start()));
+        let end = end.min(i64::from(*self.cols.end()) + 1);
+        if start >= end {
+            return Ok(());
+        }
         if self.orient.is_none() {
             let ext = cx.s.rings[0].pts(cx.rings, &cx.s.copies);
             self.orient = Some(ring_orientation(ext));
