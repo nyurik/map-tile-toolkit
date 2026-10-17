@@ -485,9 +485,6 @@ pub(crate) struct FrameTmp {
     /// Set when a frame can't close an excursion (a tip is not on the hull, or neither way round
     /// winds like it): the attempt's piece is then incomplete, and the attempt fails.
     pub(crate) failed: bool,
-    /// Whether [`Self::mark`] records anything: only pieces that will be checked need it
-    /// ([`ClipMode::ClippedValid`](crate::ClipMode::ClippedValid)), so it is set per polygon.
-    pub(crate) track: bool,
 }
 
 impl FrameTmp {
@@ -498,7 +495,6 @@ impl FrameTmp {
             synthetic: Vec::new(),
             grown_by: None,
             failed: false,
-            track: false,
         }
     }
 
@@ -517,10 +513,8 @@ impl FrameTmp {
         reason = "a piece's vertex count is checked to fit u32 as its rings end"
     )]
     pub(crate) fn mark(&mut self, first: usize, count: usize) {
-        if self.track {
-            self.synthetic
-                .extend((first..first + count).map(|i| i as u32));
-        }
+        self.synthetic
+            .extend((first..first + count).map(|i| i as u32));
     }
 }
 

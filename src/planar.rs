@@ -89,6 +89,23 @@ fn meet(p1: Coord<i32>, p2: Coord<i32>, q1: Coord<i32>, q2: Coord<i32>) -> Meet 
     {
         return Meet::Apart;
     }
+    // Sharing an endpoint (consecutive edges, most pairs tested), two segments meet only there,
+    // unless they run the same way along one line: one orientation tells.
+    let shared = if p1 == q1 || p1 == q2 {
+        Some((p1, p2, if p1 == q1 { q2 } else { q1 }))
+    } else if p2 == q1 || p2 == q2 {
+        Some((p2, p1, if p2 == q1 { q2 } else { q1 }))
+    } else {
+        None
+    };
+    if let Some((at, x, y)) = shared {
+        let folds = x == y
+            || (orient(at, x, y) == Ordering::Equal
+                && (i64::from(x.x) - i64::from(at.x)) * (i64::from(y.x) - i64::from(at.x))
+                    + (i64::from(x.y) - i64::from(at.y)) * (i64::from(y.y) - i64::from(at.y))
+                    > 0);
+        return if folds { Meet::Bad } else { Meet::Vertex(at) };
+    }
     let (s1, s2) = (sign(orient(p1, p2, q1)), sign(orient(p1, p2, q2)));
     let (s3, s4) = (sign(orient(q1, q2, p1)), sign(orient(q1, q2, p2)));
     if s1 * s2 < 0 && s3 * s4 < 0 {
@@ -335,6 +352,18 @@ mod tests {
         assert!(matches!(meets((0, 0), (4, 0), (5, 0), (9, 0)), Meet::Apart));
         assert!(matches!(meets((0, 0), (4, 0), (0, 1), (4, 1)), Meet::Apart));
         assert!(matches!(meets((0, 0), (1, 1), (5, 5), (6, 6)), Meet::Apart));
+        // Sharing an endpoint: a vertex touch, unless the two fold onto each other along one line.
+        assert!(matches!(meets((0, 0), (4, 0), (0, 0), (0, 4)), Meet::Vertex(v) if v == c(0, 0)));
+        assert!(matches!(meets((0, 0), (4, 0), (0, 0), (-3, 0)), Meet::Vertex(v) if v == c(0, 0)));
+        assert!(matches!(meets((0, 0), (4, 0), (0, 0), (2, 0)), Meet::Bad));
+        assert!(matches!(meets((0, 0), (4, 0), (6, 0), (4, 0)), Meet::Vertex(v) if v == c(4, 0)));
+        assert!(matches!(meets((0, 0), (4, 0), (9, 0), (4, 0)), Meet::Vertex(v) if v == c(4, 0)));
+        assert!(matches!(meets((0, 0), (4, 0), (1, 0), (4, 0)), Meet::Bad));
+        assert!(matches!(meets((0, 0), (4, 4), (4, 4), (0, 0)), Meet::Bad));
+        assert!(matches!(
+            meets((i32::MIN, 0), (i32::MAX, 0), (i32::MAX, 0), (i32::MIN, 1)),
+            Meet::Vertex(_)
+        ));
     }
 
     /// A closed ring of `pts` (its first vertex repeated) and the edges marked synthetic.
