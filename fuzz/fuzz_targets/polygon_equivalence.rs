@@ -4,9 +4,8 @@
 //! For a structured input (up to two multipolygon features of arbitrary — often self-intersecting or
 //! overlapping — rings, and a slicer config):
 //!
-//! The rings are arbitrary, so the repairs that make a piece valid (for valid input, in
-//! `ClipMode::ClippedValid`) run here on garbage too: they are bounded work per tile, and a run that
-//! does not finish is a failure.
+//! The rings are arbitrary, so the repairs that make a piece valid (for valid input) run here on
+//! garbage too: they are bounded work per tile, and a run that does not finish is a failure.
 //!
 //! 1. **No panic, ever.** `Slicer::polygon` yields `Ok`/`Err` items; the fuzz build enables overflow
 //!    checks, so unchecked arithmetic surfaces as a crash.
@@ -328,15 +327,6 @@ fuzz_target!(|input: Input| {
     for (polygons, out) in features.iter().zip(&outputs) {
         if let Some(out) = out {
             check(&mut slicer, polygons, out);
-        }
-    }
-
-    // With valid pieces (`ClipMode::ClippedValid`) the repairs run on garbage too: they must finish,
-    // and give the all-tiles and one-tile slicers the same pieces.
-    let mut valid = slicer.clone().with_clip_mode(ClipMode::ClippedValid);
-    for polygons in &features {
-        if let Some(out) = output(&mut valid, polygons) {
-            check(&mut valid, polygons, &out);
         }
     }
 

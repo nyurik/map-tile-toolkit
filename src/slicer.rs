@@ -64,19 +64,11 @@ use crate::vertex::{PolyVertex, Vertex};
 #[non_exhaustive]
 pub enum ClipMode {
     /// Each tile gets only the part of the geometry that touches its buffered box: a line's runs, a
-    /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely.
+    /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely. A
+    /// piece of a valid polygon is itself a valid polygon (OGC), beyond the buffered box too, so it
+    /// can be used on its own; best effort, see the crate docs.
     #[default]
     Clipped,
-    /// [`Clipped`](Self::Clipped), and each polygon piece is also a **valid polygon** (OGC: simple
-    /// rings, holes inside the exterior and clear of each other) beyond the buffered box, for
-    /// consumers that use a piece on its own rather than clip it to the tile, as MVT renderers do. A
-    /// piece whose plain clip is already valid there is the one [`Clipped`](Self::Clipped) gives, for
-    /// the cost of one check of its segments outside the box; the others are rebuilt (see the crate
-    /// docs), at several times the cost. Best effort, for valid
-    /// input: a piece whose repair would cost too much (a tile's check budget runs out, or only
-    /// keeping a polygon of over 2048 vertices whole works) keeps its plain clip. Lines and points are
-    /// as [`Clipped`](Self::Clipped).
-    ClippedValid,
     /// Each tile the geometry reaches — exactly the tiles [`Clipped`](Self::Clipped) gives anything —
     /// gets the **whole** geometry, once, in that tile's local frame: a line as a single
     /// [`LineSlice`] of all its vertices, a polygon as a [`PolygonPiece`] of all its rings (also in
@@ -335,8 +327,7 @@ impl<V: PolyVertex> Slicer<V> {
         u32::try_from(rings.len()).map_err(|_| TileError::GeometryTooLarge)?;
         let s = &mut self.poly.get().scratch;
         match self.mode {
-            ClipMode::Clipped => clip_polygon_to_tile::<false, _, _>(self.grid, tile, rings, s),
-            ClipMode::ClippedValid => clip_polygon_to_tile::<true, _, _>(self.grid, tile, rings, s),
+            ClipMode::Clipped => clip_polygon_to_tile(self.grid, tile, rings, s),
             ClipMode::Unclipped => whole_polygon_in_tile(self.grid, tile, rings, s),
         }
     }

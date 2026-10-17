@@ -25,7 +25,7 @@
 //! Nothing outside the current row is kept, and a piece is built in one reused buffer, in the global
 //! frame: [`Local`] moves it into the tile's frame as it is read.
 //!
-//! With valid pieces ([`ClipMode::ClippedValid`]) the plain clip is kept if its outside segments
+//! A piece is a valid polygon whenever the input is: the plain clip is kept if its outside segments
 //! (those with an endpoint outside the box) are planar, which [`planar`](crate::planar) checks, and
 //! otherwise rebuilt by the cheapest repair that is: [`repair`] runs the search for both slicers, each
 //! building the attempts its own way (from the sweep's hits, or by clipping the rings).
@@ -590,8 +590,6 @@ pub struct PolygonSlices<'s, V, R> {
     grid: Grid,
     /// [`ClipMode::Unclipped`]: every tile gets the whole polygon.
     whole: bool,
-    /// [`ClipMode::ClippedValid`]: every piece is repaired to a valid polygon where it is not.
-    valid: bool,
     rings: &'s [R],
     s: &'s mut PolyScratch<V>,
     /// How the polygon starts, until the first step; then its sweep, if it has one.
@@ -644,13 +642,10 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         *sweep = None;
         *small = None;
         let whole = mode == ClipMode::Unclipped;
-        let valid = mode == ClipMode::ClippedValid;
-        s.clip.tmp.track = valid;
         let start = prepare(grid, rings, s, !whole)?;
         Ok(Self {
             grid,
             whole,
-            valid,
             rings,
             s,
             start,
@@ -753,11 +748,7 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
                 let origin = self.grid.origin_of(min);
                 return Ok(Some(Event::Whole { tile, origin }));
             }
-            let built = if self.valid {
-                build_tile_piece::<true, V, R>(self.grid, min, max, self.rings, self.s)?
-            } else {
-                build_tile_piece::<false, V, R>(self.grid, min, max, self.rings, self.s)?
-            };
+            let built = build_tile_piece(self.grid, min, max, self.rings, self.s)?;
             if let Some(origin) = built {
                 return Ok(Some(Event::Built { tile, origin }));
             }
@@ -789,7 +780,6 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
             grid: self.grid,
             s: &mut *self.s,
             rings: self.rings,
-            valid: self.valid,
         };
         if self.whole {
             sw.step_whole(&mut cx)
@@ -906,8 +896,6 @@ struct Cx<'x, V, R> {
     grid: Grid,
     s: &'x mut PolyScratch<V>,
     rings: &'x [R],
-    /// Whether a piece that is not planar outside its box is repaired ([`ClipMode::ClippedValid`]).
-    valid: bool,
 }
 
 impl Sweep {
@@ -1311,13 +1299,10 @@ impl Sweep {
             return Ok(None);
         };
         let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
-        // The plain clip: what [`Self::piece`] builds for [`Attempt::PLAIN`], without its bookkeeping
-        // (synthetic edges are recorded only for the check of valid pieces).
+        // The plain clip: what [`Self::piece`] builds for [`Attempt::PLAIN`], without its bookkeeping.
         s.verts.clear();
         s.ring_ends.clear();
-        if cx.valid {
-            s.clip.tmp.reset();
-        }
+        s.clip.tmp.reset();
         if !exterior_touched {
             // A tile the exterior covers gets a fill box, wound like the exterior.
             let orient = *self
@@ -1341,7 +1326,7 @@ impl Sweep {
             close_ring::<true, V>(pts, arcs, min, max, winding, &RingPlan::PLAIN, tmp, verts)?;
             s.ring_ends.push(offset(s.verts.len())?);
         }
-        if cx.valid && !self.make_valid(s, rings, (min, max), origin, exterior_touched)? {
+        if !self.make_valid(s, rings, (min, max), origin, exterior_touched)? {
             return Ok(None);
         }
         Ok(Some(origin))
@@ -2009,7 +1994,7 @@ fn repair<V: PolyVertex>(
 /// Clip a polygon's `rings` to one `tile` into the scratch's piece buffer, and lend the piece; `None`
 /// if the polygon leaves nothing in the tile. See [`Slicer::tile_polygon`](crate::Slicer::tile_polygon).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) fn clip_polygon_to_tile<'s, const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
+pub(crate) fn clip_polygon_to_tile<'s, V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
     tile: TileId,
     rings: &'s [R],
@@ -2040,7 +2025,7 @@ pub(crate) fn clip_polygon_to_tile<'s, const VALID: bool, V: PolyVertex, R: AsRe
             },
         }));
     }
-    let Some(origin) = build_tile_piece::<VALID, V, R>(grid, min, max, rings, s)? else {
+    let Some(origin) = build_tile_piece(grid, min, max, rings, s)? else {
         return Ok(None);
     };
     Ok(Some(PolygonPiece {
@@ -2055,13 +2040,13 @@ pub(crate) fn clip_polygon_to_tile<'s, const VALID: bool, V: PolyVertex, R: AsRe
 
 /// Clip a polygon's `rings` to the tile with buffered box `(min, max)` into the scratch's piece buffer
 /// (tile-global frame), and return the tile's origin; `None` if the polygon leaves nothing in it.
-/// With `VALID` ([`ClipMode::ClippedValid`]), a piece not planar outside the box is repaired.
+/// A piece not planar outside the box is repaired.
 #[inline(always)]
 #[expect(
     clippy::inline_always,
     reason = "out of line, the one-tile call costs the polygon_one benchmark about 4%"
 )]
-fn build_tile_piece<const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
+fn build_tile_piece<V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
     min: Coord<i32>,
     max: Coord<i32>,
@@ -2071,11 +2056,7 @@ fn build_tile_piece<const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
     let origin = grid.origin_of(min);
     s.verts.clear();
     s.ring_ends.clear();
-    // Synthetic edges are recorded only for the check of valid pieces.
-    s.clip.tmp.track = VALID;
-    if VALID {
-        s.clip.tmp.reset();
-    }
+    s.clip.tmp.reset();
     let Some((exterior, holes)) = rings.split_first() else {
         return Ok(None);
     };
@@ -2097,14 +2078,14 @@ fn build_tile_piece<const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
             RingClip::Outside => {}
         }
     }
-    if VALID && !make_valid(rings, (min, max), origin, s)? {
+    if !make_valid(rings, (min, max), origin, s)? {
         return Ok(None);
     }
     Ok(Some(origin))
 }
 
 /// [`build_tile_piece`]'s plain clip, just built, made planar outside the box if it is not: `false`
-/// if the polygon then leaves nothing in the tile. Out of line, to keep the plain clip's small.
+/// if the polygon then leaves nothing in the tile. Out of line, to keep the plain clip's code small.
 #[inline(never)]
 fn make_valid<V: PolyVertex, R: AsRef<[V]>>(
     rings: &[R],
