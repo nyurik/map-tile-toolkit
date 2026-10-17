@@ -57,7 +57,7 @@ use crate::vertex::{PolyVertex, Vertex};
 /// How a [`Slicer`] cuts lines and polygons into the tiles they reach (points are never cut, so they
 /// ignore it).
 ///
-/// Both modes slice the same inputs to the same tiles, with one difference in failures: a clipped
+/// Every mode slices the same inputs to the same tiles, with one difference in failures: a clipped
 /// slicer can still fail building a piece too large to index (`GeometryTooLarge`) where an
 /// unclipped one, which builds nothing, succeeds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -67,6 +67,16 @@ pub enum ClipMode {
     /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely.
     #[default]
     Clipped,
+    /// [`Clipped`](Self::Clipped), and each polygon piece is also a **valid polygon** (OGC: simple
+    /// rings, holes inside the exterior and clear of each other) beyond the buffered box, for
+    /// consumers that use a piece on its own rather than clip it to the tile, as MVT renderers do. A
+    /// piece whose plain clip is already valid there is the one [`Clipped`](Self::Clipped) gives, for
+    /// the cost of one check of its segments outside the box; the others are rebuilt (see the crate
+    /// docs), at several times the cost. Best effort, for valid
+    /// input: a piece whose repair would cost too much (a tile's check budget runs out, or only
+    /// keeping a polygon of over 2048 vertices whole works) keeps its plain clip. Lines and points are
+    /// as [`Clipped`](Self::Clipped).
+    ClippedValid,
     /// Each tile the geometry reaches — exactly the tiles [`Clipped`](Self::Clipped) gives anything —
     /// gets the **whole** geometry, once, in that tile's local frame: a line as a single
     /// [`LineSlice`] of all its vertices, a polygon as a [`PolygonPiece`] of all its rings (also in
@@ -317,6 +327,7 @@ impl<V: PolyVertex> Slicer<V> {
     ///   kept vertex does.
     /// - [`TileError::GeometryTooLarge`] if there are more than `u32::MAX` rings, or the piece has
     ///   more than `u32::MAX` vertices.
+    #[inline]
     pub fn tile_polygon<'s, R: AsRef<[V]>>(
         &'s mut self,
         tile: TileId,
@@ -325,7 +336,8 @@ impl<V: PolyVertex> Slicer<V> {
         u32::try_from(rings.len()).map_err(|_| TileError::GeometryTooLarge)?;
         let s = &mut self.poly.get().scratch;
         match self.mode {
-            ClipMode::Clipped => clip_polygon_to_tile(self.grid, tile, rings, s),
+            ClipMode::Clipped => clip_polygon_to_tile::<false, _, _>(self.grid, tile, rings, s),
+            ClipMode::ClippedValid => clip_polygon_to_tile::<true, _, _>(self.grid, tile, rings, s),
             ClipMode::Unclipped => whole_polygon_in_tile(self.grid, tile, rings, s),
         }
     }
@@ -346,9 +358,9 @@ impl<V: PolyVertex> Slicer<V> {
 /// A line run is lent from the caller's input, and skips consecutive duplicate positions (the first
 /// of each is kept). A polygon ring has no consecutive duplicates, and is closed: its first vertex
 /// repeated at the end, which a ring lent open has [`iter`](Self::iter) append (drop it for an MVT
-/// `ClosePath`). It is lent from the input when the polygon lies inside one tile or the slicer is
-/// [`ClipMode::Unclipped`], else built in the slicer's working memory, clipped and with synthetic
-/// corners.
+/// `ClosePath`). It is lent from the input when the polygon lies inside one tile, when it is one small
+/// ring inside the tile's buffered box, or when the slicer is [`ClipMode::Unclipped`]; else built in
+/// the slicer's working memory, clipped and with synthetic corners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Local<'a, V> {
     verts: &'a [V],

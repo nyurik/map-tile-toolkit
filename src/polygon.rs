@@ -5,8 +5,9 @@
 //! A polygon inside one tile's inner box is yielded whole, and one smaller than a tile with few vertices
 //! (a building) by a walk over the few tiles it reaches, each given what
 //! [`Slicer::tile_polygon`](crate::Slicer::tile_polygon) gives it: no tile it reaches can be covered, and
-//! the sweep's setup would cost more than the clips. Any other polygon is sliced lazily by a row-by-row
-//! scanline:
+//! the sweep's setup would cost more than the clips. Both lend a lone ring that lies inside a tile's
+//! buffered box as it is, without clipping it (most of OSM's polygons are rings of 4 to 8 vertices).
+//! Any other polygon is sliced lazily by a row-by-row scanline:
 //!
 //! 1. **Prepare** — one pass over the polygon's rings, borrowing them in place: drop degenerate rings,
 //!    take the bounding box, and record the `y`-range of every run of [`CHUNK`] consecutive edges. A
@@ -24,9 +25,10 @@
 //! Nothing outside the current row is kept, and a piece is built in one reused buffer, in the global
 //! frame: [`Local`] moves it into the tile's frame as it is read.
 //!
-//! A piece is a valid polygon whenever the input is: the plain clip is kept if its outside segments
+//! With valid pieces ([`ClipMode::ClippedValid`]) the plain clip is kept if its outside segments
 //! (those with an endpoint outside the box) are planar, which [`planar`](crate::planar) checks, and
-//! otherwise rebuilt by the cheapest repair that is (see `repair_attempts`), from the same hits.
+//! otherwise rebuilt by the cheapest repair that is: [`repair`] runs the search for both slicers, each
+//! building the attempts its own way (from the sweep's hits, or by clipping the rings).
 //!
 //! Unclipped ([`ClipMode::Unclipped`]), the sweep is the same but builds nothing: each edge tile that
 //! would get a piece, and each tile of a fill run, gets the whole polygon, lent from the input.
@@ -39,12 +41,13 @@ use geo_types::Coord;
 
 use crate::TileError;
 use crate::clip_polygon::{
-    ClipScratch, Probe, RingClip, RingPlan, arcs_points, clip_ring, close_ring, convex_hull,
-    fill_box, keep_edge, lane_bounds, push_distinct, push_fill_box, ring_meets_box, scan_arcs,
+    ClipScratch, Probe, RingClip, RingPlan, arcs_points, clip_ring, clip_ring_planned, close_ring,
+    convex_hull, fill_box, keep_edge, lane_bounds, push_distinct, push_fill_box, ring_meets_box,
+    scan_arcs,
 };
 use crate::clip_polyline::to_local;
 use crate::geom::{crossing_x_ceil, ring_orientation};
-use crate::grid::{Grid, Seg};
+use crate::grid::{Grid, Seg, ring_within};
 use crate::planar::{PAIR_BUDGET, PlanarScratch, Verdict, is_planar};
 use crate::slicer::{ClipMode, Local};
 use crate::tile::TileId;
@@ -588,6 +591,8 @@ pub struct PolygonSlices<'s, V, R> {
     grid: Grid,
     /// [`ClipMode::Unclipped`]: every tile gets the whole polygon.
     whole: bool,
+    /// [`ClipMode::ClippedValid`]: every piece is repaired to a valid polygon where it is not.
+    valid: bool,
     rings: &'s [R],
     s: &'s mut PolyScratch<V>,
     /// How the polygon starts, until the first step; then its sweep, if it has one.
@@ -643,10 +648,13 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         *sweep = None;
         *small = None;
         let whole = mode == ClipMode::Unclipped;
+        let valid = mode == ClipMode::ClippedValid;
+        s.clip.tmp.track = valid;
         let start = prepare(grid, rings, s, !whole)?;
         Ok(Self {
             grid,
             whole,
+            valid,
             rings,
             s,
             start,
@@ -679,7 +687,7 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         if self.done {
             return None;
         }
-        // A polygon inside one tile's inner box is that tile's only slice.
+        // A polygon inside one tile's inner box (most of them) is that tile's only slice.
         if let Some(&Start::Whole { tile, origin }) = self.start.as_ref() {
             self.start = None;
             self.done = true;
@@ -733,12 +741,52 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         PolygonSlice::Piece(PolygonPiece { tile, rings })
     }
 
+    /// The next tile of a small polygon's walk ([`Start::Small`]).
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "the walk of most polygons that cross a tile edge; out of line it costs them ~2%"
+    )]
+    fn step_small(&mut self) -> Result<Option<Event>, TileError> {
+        let Some(walk) = self.small.as_mut() else {
+            return Ok(None);
+        };
+        while walk.y <= walk.y1 {
+            let tile = TileId::new(walk.x, walk.y);
+            if walk.x < walk.x1 {
+                walk.x += 1;
+            } else {
+                (walk.x, walk.y) = (walk.x0, walk.y + 1);
+            }
+            // (`prepare` proved the box of every tile the polygon reaches fits `i32`.)
+            let (min, max) = self.grid.tile_box(tile);
+            // A lone ring inside the tile's buffered box (a building near a tile edge) is its
+            // piece there as it is: lent, not clipped.
+            if let [info] = self.s.rings[..]
+                // (The box's side may pass `i32::MAX`, but fits `u32`.)
+                && let span = max.x.wrapping_sub(min.x).cast_unsigned()
+                && ring_within(info.pts(self.rings, &self.s.copies), min, span).is_some()
+            {
+                let origin = self.grid.origin_of(min);
+                return Ok(Some(Event::Whole { tile, origin }));
+            }
+            let built = if self.valid {
+                build_tile_piece::<true, V, R>(self.grid, min, max, self.rings, self.s)?
+            } else {
+                build_tile_piece::<false, V, R>(self.grid, min, max, self.rings, self.s)?
+            };
+            if let Some(origin) = built {
+                return Ok(Some(Event::Built { tile, origin }));
+            }
+        }
+        *self.small = None;
+        Ok(None)
+    }
+
     fn step(&mut self) -> Result<Option<Event>, TileError> {
         match self.start.take() {
-            Some(Start::Whole { tile, origin }) => {
-                let inside = self.cols.contains(&tile.x) && self.rows.contains(&tile.y);
-                return Ok(inside.then_some(Event::Whole { tile, origin }));
-            }
+            // (`next` yields a polygon that starts whole itself.)
+            Some(Start::Whole { .. }) | None => {}
             Some(Start::Sweep { rows }) => {
                 let first = (*rows.start()).max(i64::from(*self.rows.start()));
                 let last = (*rows.end()).min(i64::from(*self.rows.end()));
@@ -757,32 +805,16 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
                     });
                 }
             }
-            None => {}
         }
-        if let Some(walk) = self.small.as_mut() {
-            while walk.y <= walk.y1 {
-                let tile = TileId::new(walk.x, walk.y);
-                if walk.x < walk.x1 {
-                    walk.x += 1;
-                } else {
-                    (walk.x, walk.y) = (walk.x0, walk.y + 1);
-                }
-                // (`prepare` proved the box of every tile the polygon reaches fits `i32`.)
-                let bounds = self.grid.tile_box(tile);
-                if let Some(origin) = build_tile_piece(self.grid, bounds, self.rings, self.s)? {
-                    return Ok(Some(Event::Built { tile, origin }));
-                }
-            }
-            *self.small = None;
-            return Ok(None);
-        }
+        // (No sweep: a small polygon's walk, if any.)
         let Some(sw) = self.sweep.as_mut() else {
-            return Ok(None);
+            return self.step_small();
         };
         let mut cx = Cx {
             grid: self.grid,
             s: &mut *self.s,
             rings: self.rings,
+            valid: self.valid,
         };
         if self.whole {
             sw.step_whole(&mut cx)
@@ -898,6 +930,8 @@ struct Cx<'x, V, R> {
     grid: Grid,
     s: &'x mut PolyScratch<V>,
     rings: &'x [R],
+    /// Whether a piece that is not planar outside its box is repaired ([`ClipMode::ClippedValid`]).
+    valid: bool,
 }
 
 impl Sweep {
@@ -1314,17 +1348,18 @@ impl Sweep {
             return Ok(None);
         };
         let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
-        let orient = if exterior_touched {
-            Ordering::Equal
-        } else {
-            *self
-                .orient
-                .get_or_insert_with(|| ring_orientation(s.rings[0].pts(rings, &s.copies)))
-        };
+        // The plain clip: what [`Self::piece`] builds for [`Attempt::PLAIN`], without its bookkeeping
+        // (synthetic edges are recorded only for the check of valid pieces).
         s.verts.clear();
         s.ring_ends.clear();
-        s.clip.tmp.reset();
+        if cx.valid {
+            s.clip.tmp.reset();
+        }
         if !exterior_touched {
+            // A tile the exterior covers gets a fill box, wound like the exterior.
+            let orient = *self
+                .orient
+                .get_or_insert_with(|| ring_orientation(s.rings[0].pts(rings, &s.copies)));
             s.clip.tmp.mark(s.verts.len(), 4);
             push_fill_box(&mut s.verts, orient, min, max)?;
             s.ring_ends.push(offset(s.verts.len())?);
@@ -1338,204 +1373,148 @@ impl Sweep {
             let (cs, fenwick) = (&s.crossings, &s.fenwick);
             let winding =
                 |first: usize, count: usize| excursion_winding(cs, fenwick, info, first, count);
-            close_ring::<true, V>(
-                info.pts(rings, &s.copies),
-                &mut s.arcs,
-                min,
-                max,
-                winding,
-                RingPlan::default(),
-                &mut s.clip.tmp,
-                &mut s.verts,
-            )?;
+            let pts = info.pts(rings, &s.copies);
+            let (arcs, tmp, verts) = (&mut s.arcs, &mut s.clip.tmp, &mut s.verts);
+            close_ring::<true, V>(pts, arcs, min, max, winding, &RingPlan::PLAIN, tmp, verts)?;
             s.ring_ends.push(offset(s.verts.len())?);
         }
-        // The plain clip is the piece unless it is not planar outside the box: nothing synthetic
-        // can't be, and the rest is checked (a check too costly to finish passes it).
-        if s.clip.tmp.synthetic.is_empty() {
-            return Ok(Some(origin));
+        if cx.valid && !self.make_valid(s, rings, (min, max), origin, exterior_touched)? {
+            return Ok(None);
         }
-        let mut budget = PAIR_BUDGET;
-        let plain = is_planar(
-            &s.verts,
-            &s.ring_ends,
-            &s.clip.tmp.synthetic,
-            false,
-            min,
-            max,
-            &mut s.segs,
-            &mut budget,
-        );
-        if plain != Verdict::Crossing {
-            return Ok(Some(origin));
-        }
-        self.repair_tile(s, rings, (min, max), origin, orient, budget)
+        Ok(Some(origin))
     }
 
-    /// The piece of the edge tile with box `(min, max)` when its plain clip (just built into the piece
-    /// buffer) is not planar: each repair in turn (see [`valid_piece`]), rebuilt from the same hits
-    /// and winding index, so a repair costs the piece, not the ring.
-    #[cold]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one cohesive loop over the repair attempts; splitting it would only scatter shared state"
-    )]
-    fn repair_tile<V: PolyVertex, R: AsRef<[V]>>(
+    /// [`Self::build_tile`]'s plain clip, just built, made planar outside the box if it is not:
+    /// `false` if the polygon then leaves nothing in the tile. Out of line, to keep the plain clip's
+    /// small.
+    #[inline(never)]
+    fn make_valid<V: PolyVertex, R: AsRef<[V]>>(
         &self,
         s: &mut PolyScratch<V>,
         rings: &[R],
         (min, max): (Coord<i32>, Coord<i32>),
         origin: Coord<i32>,
-        orient: Ordering,
-        mut budget: usize,
-    ) -> Result<Option<Coord<i32>>, TileError> {
-        let Some(hits) = self.tile_hits(&s.hits, &s.covering, &s.inside) else {
-            return Ok(None);
+        exterior_touched: bool,
+    ) -> Result<bool, TileError> {
+        let Some(budget) = needs_repair(s, (min, max)) else {
+            return Ok(true);
         };
-        let exterior_touched = hits.first().is_some_and(|x| x.ring == 0);
-        // Out of budget, the plain clip stays: nothing more is tried.
-        let mut exhausted = false;
-        for attempt in repair_attempts(rings.len()) {
-            let mut last = attempt.deepen == usize::MAX;
-            let mut attempt = attempt;
-            if exhausted
-                || (last && rings.iter().map(|r| r.as_ref().len()).sum::<usize>() > WHOLE_LIMIT)
-            {
-                (attempt, last) = (Attempt::PLAIN, true);
-            }
-            // Growing the fill box does nothing unless the exterior covers the tile and there are holes.
-            if attempt == Attempt::ENCLOSE && (exterior_touched || rings.len() == 1) {
-                continue;
-            }
-            s.verts.clear();
-            s.ring_ends.clear();
-            s.clip.tmp.reset();
-            if attempt.frame {
-                let probed = adapt_frame(
-                    |depths, probe, bases| {
-                        bases.clear();
-                        bases.resize(rings.len(), 0);
-                        for ring_hits in ring_groups(hits) {
-                            let info = s.rings[ring_hits[0].ring as usize];
-                            s.arcs.clear();
-                            for x in ring_hits {
-                                keep_edge(&mut s.arcs, (x.edge - info.edge0) as usize);
-                            }
-                            let plan = RingPlan {
-                                depths: Some(depths),
-                                bridge_base: probe.bridges,
-                                ..RingPlan::default()
-                            };
-                            bases[info.input as usize] = probe.bridges;
-                            let pts = info.pts(rings, &s.copies);
-                            arcs_points(pts, &mut s.arcs, plan, (min, max), probe);
+        // (The plain clip of a covered tile just found the exterior's winding.)
+        let fill = (!exterior_touched).then(|| self.orient.unwrap_or(Ordering::Equal));
+        let whole_fits = fits_whole(rings);
+        repair(
+            s,
+            (min, max),
+            origin,
+            rings.len(),
+            whole_fits,
+            budget,
+            |s, a, b| self.piece(s, rings, (min, max), fill, a, b),
+        )
+    }
+
+    /// Build the piece of the edge tile with box `(min, max)`, which [`Self::tile_hits`] found gets one,
+    /// by `attempt` into the piece buffer, from the spans covering it and the winding index, so a repair costs the piece, not
+    /// the ring. `fill` is the exterior's winding if it covers the tile, which then gets a fill box.
+    #[inline]
+    fn piece<V: PolyVertex, R: AsRef<[V]>>(
+        &self,
+        s: &mut PolyScratch<V>,
+        rings: &[R],
+        (min, max): (Coord<i32>, Coord<i32>),
+        fill: Option<Ordering>,
+        attempt: Attempt,
+        budget: &mut usize,
+    ) -> Result<Built, TileError> {
+        // (The caller checked the tile gets a piece: these are the spans covering it.)
+        let hits = match &self.cover {
+            Some(range) => &s.hits[range.clone()],
+            None => &s.covering[..],
+        };
+        let covered = fill.is_some();
+        // Growing the fill box does nothing unless the exterior covers the tile and there are holes.
+        if attempt == Attempt::ENCLOSE && (!covered || rings.len() == 1) {
+            return Ok(Built::Failed);
+        }
+        s.verts.clear();
+        s.ring_ends.clear();
+        s.clip.tmp.reset();
+        if attempt.frame {
+            let probed = adapt_frame(
+                |depths, probe, bases| {
+                    bases.clear();
+                    bases.resize(rings.len(), 0);
+                    for ring_hits in ring_groups(hits) {
+                        let info = s.rings[ring_hits[0].ring as usize];
+                        s.arcs.clear();
+                        for x in ring_hits {
+                            keep_edge(&mut s.arcs, (x.edge - info.edge0) as usize);
                         }
-                        Ok(())
-                    },
-                    &mut s.depths,
-                    &mut s.probe,
-                    &mut s.frame_hull,
-                    &mut s.ring_bases,
-                    (min, max),
-                    &mut budget,
-                );
-                match probed {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        exhausted |= budget == 0;
-                        continue;
+                        let plan = RingPlan {
+                            depths: Some(depths),
+                            bridge_base: probe.bridges,
+                            ..RingPlan::PLAIN
+                        };
+                        bases[info.input as usize] = probe.bridges;
+                        let pts = info.pts(rings, &s.copies);
+                        arcs_points(pts, &mut s.arcs, plan, (min, max), probe);
                     }
-                    Err(TileError::Overflow) if !last => continue,
-                    Err(e) => return Err(e),
-                }
+                    Ok(())
+                },
+                &mut s.depths,
+                &mut s.probe,
+                &mut s.frame_hull,
+                &mut s.ring_bases,
+                (min, max),
+                budget,
+            )?;
+            if !probed {
+                return Ok(Built::Failed);
             }
-            let frame = |ring: usize| {
-                attempt.frame.then(|| {
+        }
+        if let Some(orient) = fill {
+            s.clip.tmp.mark(s.verts.len(), 4);
+            push_fill_box(&mut s.verts, orient, min, max)?;
+            s.ring_ends.push(offset(s.verts.len())?);
+        }
+        for ring_hits in ring_groups(hits) {
+            let info = s.rings[ring_hits[0].ring as usize];
+            s.arcs.clear();
+            for x in ring_hits {
+                keep_edge(&mut s.arcs, (x.edge - info.edge0) as usize);
+            }
+            let (cs, fenwick) = (&s.crossings, &s.fenwick);
+            let winding =
+                |first: usize, count: usize| excursion_winding(cs, fenwick, info, first, count);
+            let pts = info.pts(rings, &s.copies);
+            let plan = if attempt == Attempt::PLAIN {
+                RingPlan::PLAIN
+            } else {
+                let frame = attempt.frame.then(|| {
+                    let ring = info.input as usize;
                     (
                         s.frame_hull.as_slice(),
                         s.depths.as_slice(),
                         s.ring_bases[ring],
                     )
-                })
+                });
+                attempt.ring_plan(info.input as usize, rings.len(), frame)
             };
-            let built = (|| -> Result<(), TileError> {
-                if !exterior_touched {
-                    s.clip.tmp.mark(s.verts.len(), 4);
-                    push_fill_box(&mut s.verts, orient, min, max)?;
-                    s.ring_ends.push(offset(s.verts.len())?);
-                }
-                for ring_hits in ring_groups(hits) {
-                    let info = s.rings[ring_hits[0].ring as usize];
-                    s.arcs.clear();
-                    for x in ring_hits {
-                        keep_edge(&mut s.arcs, (x.edge - info.edge0) as usize);
-                    }
-                    let (cs, fenwick) = (&s.crossings, &s.fenwick);
-                    let winding = |first: usize, count: usize| {
-                        excursion_winding(cs, fenwick, info, first, count)
-                    };
-                    let plan = attempt.ring_plan(
-                        info.input as usize,
-                        rings.len(),
-                        frame(info.input as usize),
-                    );
-                    let pts = info.pts(rings, &s.copies);
-                    if plan == RingPlan::default() {
-                        close_ring::<true, V>(
-                            pts,
-                            &mut s.arcs,
-                            min,
-                            max,
-                            winding,
-                            plan,
-                            &mut s.clip.tmp,
-                            &mut s.verts,
-                        )?;
-                    } else {
-                        close_ring::<false, V>(
-                            pts,
-                            &mut s.arcs,
-                            min,
-                            max,
-                            winding,
-                            plan,
-                            &mut s.clip.tmp,
-                            &mut s.verts,
-                        )?;
-                    }
-                    s.ring_ends.push(offset(s.verts.len())?);
-                }
-                if attempt.enclose && !exterior_touched && s.ring_ends.len() > 1 {
-                    enclose_holes(&mut s.verts, &s.ring_ends, min, max)?;
-                }
-                Ok(())
-            })();
-            let verdict = match built {
-                Ok(()) if last => Verdict::Planar,
-                Ok(()) => is_planar(
-                    &s.verts,
-                    &s.ring_ends,
-                    &s.clip.tmp.synthetic,
-                    attempt.frame,
-                    min,
-                    max,
-                    &mut s.segs,
-                    &mut budget,
-                ),
-                // A lane too far out for `i32` is only a failed attempt, until nothing is left.
-                Err(TileError::Overflow) if !last => continue,
-                Err(e) => return Err(e),
-            };
-            match verdict {
-                Verdict::Planar => {
-                    check_local(&s.verts, origin)?;
-                    return Ok(Some(origin));
-                }
-                Verdict::Crossing => {}
-                Verdict::OverBudget => exhausted = true,
+            let (arcs, tmp, verts) = (&mut s.arcs, &mut s.clip.tmp, &mut s.verts);
+            if plan == RingPlan::PLAIN {
+                close_ring::<true, V>(pts, arcs, min, max, winding, &plan, tmp, verts)?;
+            } else {
+                close_ring::<false, V>(pts, arcs, min, max, winding, &plan, tmp, verts)?;
             }
+            s.ring_ends.push(offset(s.verts.len())?);
         }
-        Ok(None)
+        if s.clip.tmp.failed {
+            return Ok(Built::Failed);
+        }
+        if attempt.enclose && covered && s.ring_ends.len() > 1 {
+            enclose_holes(&mut s.verts, &s.ring_ends, min, max)?;
+        }
+        Ok(Built::Piece)
     }
 }
 
@@ -1752,10 +1731,15 @@ fn adapt_frame(
     Ok(false)
 }
 
-/// The most vertices a repair may fall back to keeping whole, as its last resort: a bigger polygon
-/// keeps the plain clip (invalid outside the box, but bounded) rather than costing a tile its whole
-/// ring.
+/// The most vertices a repair may fall back to keeping whole, as its last resort, counted over all
+/// the polygon's rings (as given): a bigger polygon keeps the plain clip (invalid outside the box, but
+/// bounded) rather than costing a tile its whole ring.
 const WHOLE_LIMIT: usize = 2048;
+
+/// Whether the polygon `rings` is small enough for its excursions to be kept whole ([`WHOLE_LIMIT`]).
+fn fits_whole<V, R: AsRef<[V]>>(rings: &[R]) -> bool {
+    rings.iter().map(|r| r.as_ref().len()).sum::<usize>() <= WHOLE_LIMIT
+}
 
 /// How deep the repairs without a frame keep each excursion's original vertices, shallowest first.
 const DEPTHS: [usize; 5] = [1, 2, 4, 8, 16];
@@ -1788,8 +1772,7 @@ fn repair_attempts(rings: usize) -> impl Iterator<Item = Attempt> {
 }
 
 /// Build `rings`' piece in the box `[min, max]` for one `attempt` into the scratch's piece buffer,
-/// in the input's frame. `false` if the polygon leaves nothing there, [`TileError::Overflow`] if the
-/// attempt cannot work (see [`valid_piece`]).
+/// in the input's frame: what [`Sweep::piece`] builds for the same attempt, from the rings.
 #[expect(
     clippy::too_many_lines,
     reason = "one cohesive build of an attempt's piece; splitting it would only scatter shared state"
@@ -1801,12 +1784,12 @@ fn build_piece<V: PolyVertex, R: AsRef<[V]>>(
     attempt: Attempt,
     s: &mut PolyScratch<V>,
     budget: &mut usize,
-) -> Result<bool, TileError> {
+) -> Result<Built, TileError> {
     s.verts.clear();
     s.ring_ends.clear();
     s.clip.tmp.reset();
     let Some((exterior, holes)) = rings.split_first() else {
-        return Ok(false);
+        return Ok(Built::Empty);
     };
     // A frame goes around the hull of everything the piece keeps outside the box: find how deep each
     // tip must go to be on it.
@@ -1826,7 +1809,7 @@ fn build_piece<V: PolyVertex, R: AsRef<[V]>>(
                     let plan = RingPlan {
                         depths: Some(depths),
                         bridge_base: probe.bridges,
-                        ..RingPlan::default()
+                        ..RingPlan::PLAIN
                     };
                     match scan {
                         Some((m, arcs)) => {
@@ -1843,12 +1826,12 @@ fn build_piece<V: PolyVertex, R: AsRef<[V]>>(
                         }
                         // A ring with repeated vertices is scanned from a copy, each round.
                         None => {
-                            clip_ring(
+                            clip_ring_planned(
                                 ring.as_ref(),
                                 min,
                                 max,
                                 &mut s.clip,
-                                plan,
+                                &plan,
                                 Some(&mut *probe),
                                 &mut s.verts,
                             )?;
@@ -1865,7 +1848,7 @@ fn build_piece<V: PolyVertex, R: AsRef<[V]>>(
             budget,
         )?;
         if !probed {
-            return Err(TileError::Overflow); // a failed attempt
+            return Ok(Built::Failed);
         }
     }
     let frame = |ring: usize| {
@@ -1879,44 +1862,47 @@ fn build_piece<V: PolyVertex, R: AsRef<[V]>>(
     };
     let plan = attempt.ring_plan(0, rings.len(), frame(0));
     // If the exterior misses the tile entirely, the whole polygon is absent here.
-    let exterior_clip = clip_ring(
+    let exterior_clip = clip_ring_planned(
         exterior.as_ref(),
         min,
         max,
         &mut s.clip,
-        plan,
+        &plan,
         None,
         &mut s.verts,
     )?;
     if exterior_clip == RingClip::Outside {
-        return Ok(false);
+        return Ok(Built::Empty);
     }
     // Growing the fill box does nothing unless the exterior covers the tile and there are holes.
     if attempt == Attempt::ENCLOSE && (exterior_clip != RingClip::Covers || rings.len() == 1) {
-        return Err(TileError::Overflow);
+        return Ok(Built::Failed);
     }
     s.ring_ends.push(offset(s.verts.len())?);
     for (i, hole) in (1..).zip(holes) {
         let plan = attempt.ring_plan(i, rings.len(), frame(i));
-        match clip_ring(
+        match clip_ring_planned(
             hole.as_ref(),
             min,
             max,
             &mut s.clip,
-            plan,
+            &plan,
             None,
             &mut s.verts,
         )? {
             // A hole covering the whole tile leaves nothing to draw here.
-            RingClip::Covers => return Ok(false),
+            RingClip::Covers => return Ok(Built::Empty),
             RingClip::Clipped => s.ring_ends.push(offset(s.verts.len())?),
             RingClip::Outside => {}
         }
     }
+    if s.clip.tmp.failed {
+        return Ok(Built::Failed);
+    }
     if attempt.enclose && exterior_clip == RingClip::Covers && s.ring_ends.len() > 1 {
         enclose_holes(&mut s.verts, &s.ring_ends, min, max)?;
     }
-    Ok(true)
+    Ok(Built::Piece)
 }
 
 /// The tile is covered by the exterior: grow its fill box (the piece's first ring) to enclose the
@@ -1941,85 +1927,157 @@ fn enclose_holes<V: PolyVertex>(
         };
     }
     let (lo, hi) = lane_bounds(lo, hi, 1)?;
-    // The fill box is wound like the exterior: `nw` second when counter-clockwise.
-    let orient = if verts[1].position().x == verts[0].position().x {
-        Ordering::Less
-    } else {
-        Ordering::Greater
-    };
-    let ring = fill_box(orient, lo, hi);
+    // The grown box is wound like the fill box it replaces (like the exterior).
+    let ring = fill_box(ring_orientation(&verts[..first_hole]), lo, hi);
+    debug_assert_eq!(
+        ring.len(),
+        first_hole,
+        "the fill box is the piece's first ring"
+    );
     for (slot, c) in verts.iter_mut().zip(ring) {
         *slot = V::synthetic_at(c);
     }
     Ok(())
 }
 
-/// Build the polygon's piece in `[min, max]` so that it is planar outside the box: the plain clip
-/// (already built, and not planar) is replaced by the cheapest repair that is — see
-/// [`repair_attempts`] — and at worst every excursion whole (valid because the input is). `false` if
-/// the polygon leaves nothing in the tile; every vertex then fits the frame of `origin`. An attempt
-/// that cannot work fails with [`TileError::Overflow`], which only ends the search when nothing is
-/// left to try.
-fn valid_piece<V: PolyVertex, R: AsRef<[V]>>(
-    rings: &[R],
-    min: Coord<i32>,
-    max: Coord<i32>,
-    origin: Coord<i32>,
+/// What building one attempt's piece came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Built {
+    /// The polygon leaves nothing in the tile.
+    Empty,
+    /// The attempt does not apply here, or can't be built: a fill box grown with no covered tile or
+    /// no hole, a frame whose tips never reach its hull (within the budget) or can't close an
+    /// excursion, or a lane past the `i32` limits.
+    Failed,
+    /// The piece is in the scratch's piece buffer.
+    Piece,
+}
+
+/// For the plain clip just built into `s` for the box `[min, max]`: `None` if it is planar outside
+/// the box, or nothing says it is not (nothing synthetic can cross anything, and a check that runs
+/// out of budget passes it); else the budget the check left for repairs.
+#[inline]
+fn needs_repair<V: PolyVertex>(
     s: &mut PolyScratch<V>,
+    (min, max): (Coord<i32>, Coord<i32>),
+) -> Option<usize> {
+    if s.clip.tmp.synthetic.is_empty() {
+        return None;
+    }
+    let mut budget = PAIR_BUDGET;
+    let verdict = is_planar(
+        &s.verts,
+        &s.ring_ends,
+        &s.clip.tmp.synthetic,
+        false,
+        min,
+        max,
+        &mut s.segs,
+        &mut budget,
+    );
+    (verdict == Verdict::Crossing).then_some(budget)
+}
+
+/// Rebuild the piece in `[min, max]`, whose plain clip is not planar outside the box, by the cheapest
+/// repair that is (see [`repair_attempts`]), into the scratch's piece buffer; if none is found within
+/// `budget`, or the last resort would keep more than [`WHOLE_LIMIT`] vertices (`!whole_fits`), the
+/// plain clip again. `attempt_piece(s, attempt, budget)` builds one attempt's piece: [`Sweep::piece`] for the
+/// all-tiles slicer, [`build_piece`] for one tile, which build the same pieces, so this one search
+/// gives a tile the same piece either way. `false` if the polygon leaves nothing in the tile (as its
+/// plain clip says).
+#[cold]
+#[inline(never)]
+fn repair<V: PolyVertex>(
+    s: &mut PolyScratch<V>,
+    (min, max): (Coord<i32>, Coord<i32>),
+    origin: Coord<i32>,
+    rings: usize,
+    whole_fits: bool,
     mut budget: usize,
+    mut attempt_piece: impl FnMut(&mut PolyScratch<V>, Attempt, &mut usize) -> Result<Built, TileError>,
 ) -> Result<bool, TileError> {
-    // Out of budget, the plain clip stays: nothing more is tried.
-    let mut exhausted = false;
-    for attempt in repair_attempts(rings.len()) {
-        let mut last = attempt.deepen == usize::MAX;
-        let mut attempt = attempt;
-        if exhausted
-            || (last && rings.iter().map(|r| r.as_ref().len()).sum::<usize>() > WHOLE_LIMIT)
-        {
-            (attempt, last) = (Attempt::PLAIN, true);
+    for attempt in repair_attempts(rings) {
+        let whole = attempt.deepen == usize::MAX;
+        if whole && !whole_fits {
+            break;
         }
-        let verdict = match build_piece(rings, min, max, attempt, s, &mut budget) {
-            Ok(false) => return Ok(false),
-            Ok(true) if last => Verdict::Planar,
-            Ok(true) => is_planar(
-                &s.verts,
-                &s.ring_ends,
-                &s.clip.tmp.synthetic,
-                attempt.frame,
-                min,
-                max,
-                &mut s.segs,
-                &mut budget,
-            ),
-            Err(TileError::Overflow) if !last => {
-                exhausted |= budget == 0;
-                continue;
-            }
-            Err(e) => return Err(e),
+        let built = match attempt_piece(s, attempt, &mut budget) {
+            // The plain clip fits `i32`: only a repair's growth past it can overflow.
+            Err(TileError::Overflow) => Built::Failed,
+            built => built?,
         };
-        match verdict {
-            Verdict::Planar => {
-                check_local(&s.verts, origin)?;
-                return Ok(true);
+        match built {
+            Built::Empty => return Ok(false),
+            Built::Failed => {}
+            Built::Piece => {
+                // Every excursion whole is the input's own rings: as valid as it is.
+                let verdict = if whole {
+                    Verdict::Planar
+                } else {
+                    is_planar(
+                        &s.verts,
+                        &s.ring_ends,
+                        &s.clip.tmp.synthetic,
+                        attempt.frame,
+                        min,
+                        max,
+                        &mut s.segs,
+                        &mut budget,
+                    )
+                };
+                match verdict {
+                    // (A piece grown past the tile's local frame is only a failed attempt.)
+                    Verdict::Planar if check_local(&s.verts, origin).is_ok() => return Ok(true),
+                    Verdict::Planar | Verdict::Crossing => {}
+                    Verdict::OverBudget => break,
+                }
             }
-            Verdict::Crossing => {}
-            Verdict::OverBudget => exhausted = true,
+        }
+        if budget == 0 {
+            break;
         }
     }
-    Ok(false)
+    // Nothing better within the budget: the plain clip, as it was.
+    let built = attempt_piece(s, Attempt::PLAIN, &mut budget)?;
+    debug_assert_ne!(built, Built::Failed, "the plain clip was built before");
+    Ok(built == Built::Piece)
 }
 
 /// Clip a polygon's `rings` to one `tile` into the scratch's piece buffer, and lend the piece; `None`
 /// if the polygon leaves nothing in the tile. See [`Slicer::tile_polygon`](crate::Slicer::tile_polygon).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) fn clip_polygon_to_tile<'s, V: PolyVertex, R: AsRef<[V]>>(
+pub(crate) fn clip_polygon_to_tile<'s, const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
     tile: TileId,
-    rings: &[R],
+    rings: &'s [R],
     s: &'s mut PolyScratch<V>,
 ) -> Result<Option<PolygonPiece<'s, V, R>>, TileError> {
-    let bounds = grid.tile_buffered_bounds(tile)?;
-    let Some(origin) = build_tile_piece(grid, bounds, rings, s)? else {
+    let (min, max) = grid.tile_buffered_bounds(tile)?;
+    // A lone small ring inside the tile's buffered box (a building, most often) is its piece there as
+    // it is: lent, as `polygon` lends it, not clipped.
+    if let [ring] = rings
+        && let ring = ring.as_ref()
+        && ring.len() <= LONE_RING
+        && let Some(n) = ring_within(ring, min, max.x.wrapping_sub(min.x).cast_unsigned())
+    {
+        s.rings.clear();
+        s.rings.push(RingInfo {
+            input: 0,
+            src: Src::Input,
+            len: u32::try_from(n).unwrap_or(0),
+            edge0: 0,
+        });
+        return Ok(Some(PolygonPiece {
+            tile,
+            rings: PieceRings::Whole {
+                rings: &s.rings,
+                input: rings,
+                copies: &s.copies,
+                origin: grid.origin_of(min),
+            },
+        }));
+    }
+    let Some(origin) = build_tile_piece::<VALID, V, R>(grid, min, max, rings, s)? else {
         return Ok(None);
     };
     Ok(Some(PolygonPiece {
@@ -2034,51 +2092,39 @@ pub(crate) fn clip_polygon_to_tile<'s, V: PolyVertex, R: AsRef<[V]>>(
 
 /// Clip a polygon's `rings` to the tile with buffered box `(min, max)` into the scratch's piece buffer
 /// (tile-global frame), and return the tile's origin; `None` if the polygon leaves nothing in it.
+/// With `VALID` ([`ClipMode::ClippedValid`]), a piece not planar outside the box is repaired.
 #[inline(always)]
 #[expect(
     clippy::inline_always,
     reason = "out of line, the one-tile call costs the polygon_one benchmark about 4%"
 )]
-fn build_tile_piece<V: PolyVertex, R: AsRef<[V]>>(
+fn build_tile_piece<const VALID: bool, V: PolyVertex, R: AsRef<[V]>>(
     grid: Grid,
-    (min, max): (Coord<i32>, Coord<i32>),
+    min: Coord<i32>,
+    max: Coord<i32>,
     rings: &[R],
     s: &mut PolyScratch<V>,
 ) -> Result<Option<Coord<i32>>, TileError> {
     let origin = grid.origin_of(min);
     s.verts.clear();
     s.ring_ends.clear();
-    s.clip.tmp.reset();
+    // Synthetic edges are recorded only for the check of valid pieces.
+    s.clip.tmp.track = VALID;
+    if VALID {
+        s.clip.tmp.reset();
+    }
     let Some((exterior, holes)) = rings.split_first() else {
         return Ok(None);
     };
-    let plain = RingPlan::default();
     // If the exterior misses the tile entirely, the whole polygon is absent here.
-    if clip_ring(
-        exterior.as_ref(),
-        min,
-        max,
-        &mut s.clip,
-        plain,
-        None,
-        &mut s.verts,
-    )? == RingClip::Outside
-    {
+    if clip_ring(exterior.as_ref(), min, max, &mut s.clip, &mut s.verts)? == RingClip::Outside {
         return Ok(None);
     }
     check_local(&s.verts, origin)?;
     s.ring_ends.push(offset(s.verts.len())?);
     for hole in holes {
         let start = s.verts.len();
-        match clip_ring(
-            hole.as_ref(),
-            min,
-            max,
-            &mut s.clip,
-            plain,
-            None,
-            &mut s.verts,
-        )? {
+        match clip_ring(hole.as_ref(), min, max, &mut s.clip, &mut s.verts)? {
             // A hole covering the whole tile leaves nothing to draw here.
             RingClip::Covers => return Ok(None),
             RingClip::Clipped => {
@@ -2088,25 +2134,34 @@ fn build_tile_piece<V: PolyVertex, R: AsRef<[V]>>(
             RingClip::Outside => {}
         }
     }
-    // The plain clip is the piece unless it is not planar outside the box (a check too costly to
-    // finish passes it).
-    if !s.clip.tmp.synthetic.is_empty() {
-        let mut budget = PAIR_BUDGET;
-        let plain = is_planar(
-            &s.verts,
-            &s.ring_ends,
-            &s.clip.tmp.synthetic,
-            false,
-            min,
-            max,
-            &mut s.segs,
-            &mut budget,
-        );
-        if plain == Verdict::Crossing && !valid_piece(rings, min, max, origin, s, budget)? {
-            return Ok(None);
-        }
+    if VALID && !make_valid(rings, (min, max), origin, s)? {
+        return Ok(None);
     }
     Ok(Some(origin))
+}
+
+/// [`build_tile_piece`]'s plain clip, just built, made planar outside the box if it is not: `false`
+/// if the polygon then leaves nothing in the tile. Out of line, to keep the plain clip's small.
+#[inline(never)]
+fn make_valid<V: PolyVertex, R: AsRef<[V]>>(
+    rings: &[R],
+    (min, max): (Coord<i32>, Coord<i32>),
+    origin: Coord<i32>,
+    s: &mut PolyScratch<V>,
+) -> Result<bool, TileError> {
+    let Some(budget) = needs_repair(s, (min, max)) else {
+        return Ok(true);
+    };
+    let whole_fits = fits_whole(rings);
+    repair(
+        s,
+        (min, max),
+        origin,
+        rings.len(),
+        whole_fits,
+        budget,
+        |s, a, b| build_piece(rings, min, max, a, s, b),
+    )
 }
 
 /// A polygon's `rings` whole, lent in one `tile`'s local frame; `None` if the polygon leaves nothing

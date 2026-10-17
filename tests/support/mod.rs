@@ -443,6 +443,53 @@ pub fn buildings() -> Vec<FixturePolygon> {
         .collect()
 }
 
+/// Building footprints as OSM has them: 2000 closed rings (the first vertex repeated) of 4 to 8
+/// distinct vertices, drawn with the shares of OSM Europe's polygons of those sizes (4: 62%, 5: 9%,
+/// 6: 14%, 7: 5%, 8: 9% — together 78% of all its polygons), 10–90 units across, turned anyhow, over
+/// the same `4 × 4` tiles of extent 4096 as [`buildings`]. Each is a ring around its center at evenly
+/// spread angles with jittered radii, so simple; the odd sizes are a little concave.
+#[must_use]
+pub fn footprints() -> Vec<FixturePolygon> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u32| -> f64 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        f64::from((state >> 33) as u32 % n)
+    };
+    (0..2000)
+        .map(|_| {
+            let pick = next(100);
+            let n = match pick as u32 {
+                0..62 => 4,
+                62..71 => 5,
+                71..85 => 6,
+                85..91 => 7,
+                _ => 8,
+            };
+            let (cx, cy) = (next(4 * 4096), next(4 * 4096));
+            let r = 5.0 + next(40);
+            let turn = next(6283) / 1000.0;
+            let mut exterior: Vec<Coord<i32>> = (0..n)
+                .map(|i| {
+                    let a = turn + f64::from(i) * std::f64::consts::TAU / f64::from(n);
+                    let rr = r * (0.6 + next(41) / 100.0);
+                    Coord {
+                        x: (cx + rr * a.cos()).round() as i32,
+                        y: (cy + rr * a.sin()).round() as i32,
+                    }
+                })
+                .collect();
+            exterior.dedup();
+            exterior.push(exterior[0]);
+            FixturePolygon {
+                exterior,
+                holes: vec![],
+            }
+        })
+        .collect()
+}
+
 /// A z14-like block of points on `4 × 4` tiles of extent 4096, from a fixed linear congruential
 /// sequence: `n` points, scattered uniformly (`edge_heavy == false`: a few percent land within a
 /// buffer of 64 of a tile edge) or all packed into the buffer bands along the tile edges

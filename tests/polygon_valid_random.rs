@@ -1,5 +1,6 @@
-//! Random **valid** polygons with holes, sliced into every tile they reach: every piece of every one
-//! must itself be a valid polygon (OGC, via `geo`), not just look right inside its tile.
+//! Random **valid** polygons with holes, sliced into every tile they reach in
+//! [`ClipMode::ClippedValid`]: every piece of every one must itself be a valid polygon (OGC, via
+//! `geo`), not just look right inside its tile.
 //!
 //! The polygons are a star-shaped exterior with disjoint star-shaped holes inside it, so they are
 //! valid by construction (any that is not, by rounding to the grid, is skipped). The streams are
@@ -9,7 +10,7 @@
 
 use geo::Validation;
 use geo_types::{Coord, LineString, Polygon};
-use map_tile_toolkit::{PolygonSlice, Slicer};
+use map_tile_toolkit::{ClipMode, PolygonSlice, Slicer};
 
 struct Rng(u64);
 impl Rng {
@@ -92,7 +93,9 @@ fn pieces_of_random_valid_polygons_are_valid() {
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let (mut polygons, mut pieces, mut invalid) = (0, 0, Vec::new());
     for (extent, buffer, big) in [(25, 0, 60), (25, 5, 60), (64, 3, 150), (40, 8, 90)] {
-        let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
+        let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer)
+            .expect("config")
+            .with_clip_mode(ClipMode::ClippedValid);
         for i in 0..250 {
             let rings = random_polygon(&mut rng, big, (i % 6) as usize);
             if polygon(&rings).check_validation().is_err() {
