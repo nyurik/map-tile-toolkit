@@ -4,6 +4,9 @@
 //! For a structured input (up to two multipolygon features of arbitrary — often self-intersecting or
 //! overlapping — rings, and a slicer config):
 //!
+//! The rings are arbitrary, so the repairs that make a piece valid (for valid input) run here on
+//! garbage too: they are bounded work per tile, and a run that does not finish is a failure.
+//!
 //! 1. **No panic, ever.** `Slicer::polygon` yields `Ok`/`Err` items; the fuzz build enables overflow
 //!    checks, so unchecked arithmetic surfaces as a crash.
 //! 2. For every feature sliced without error, over the whole reachable tile span (skipped when the
