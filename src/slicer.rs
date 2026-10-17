@@ -57,14 +57,16 @@ use crate::vertex::{PolyVertex, Vertex};
 /// How a [`Slicer`] cuts lines and polygons into the tiles they reach (points are never cut, so they
 /// ignore it).
 ///
-/// Both modes slice the same inputs to the same tiles, with one difference in failures: a clipped
+/// Every mode slices the same inputs to the same tiles, with one difference in failures: a clipped
 /// slicer can still fail building a piece too large to index (`GeometryTooLarge`) where an
 /// unclipped one, which builds nothing, succeeds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ClipMode {
     /// Each tile gets only the part of the geometry that touches its buffered box: a line's runs, a
-    /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely.
+    /// polygon's piece (with synthetic corners), or a [`FillRun`] for tiles it covers entirely. A
+    /// piece of a valid polygon is itself a valid polygon (OGC), beyond the buffered box too, so it
+    /// can be used on its own; best effort, see the crate docs.
     #[default]
     Clipped,
     /// Each tile the geometry reaches — exactly the tiles [`Clipped`](Self::Clipped) gives anything —
@@ -316,6 +318,7 @@ impl<V: PolyVertex> Slicer<V> {
     ///   kept vertex does.
     /// - [`TileError::GeometryTooLarge`] if there are more than `u32::MAX` rings, or the piece has
     ///   more than `u32::MAX` vertices.
+    #[inline]
     pub fn tile_polygon<'s, R: AsRef<[V]>>(
         &'s mut self,
         tile: TileId,
@@ -345,9 +348,9 @@ impl<V: PolyVertex> Slicer<V> {
 /// A line run is lent from the caller's input, and skips consecutive duplicate positions (the first
 /// of each is kept). A polygon ring has no consecutive duplicates, and is closed: its first vertex
 /// repeated at the end, which a ring lent open has [`iter`](Self::iter) append (drop it for an MVT
-/// `ClosePath`). It is lent from the input when the polygon lies inside one tile or the slicer is
-/// [`ClipMode::Unclipped`], else built in the slicer's working memory, clipped and with synthetic
-/// corners.
+/// `ClosePath`). It is lent from the input when the polygon lies inside one tile, when it is one small
+/// ring inside the tile's buffered box, or when the slicer is [`ClipMode::Unclipped`]; else built in
+/// the slicer's working memory, clipped and with synthetic corners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Local<'a, V> {
     verts: &'a [V],
