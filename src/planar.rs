@@ -11,6 +11,7 @@ use core::cmp::Ordering;
 
 use geo_types::Coord;
 
+use crate::clip_polygon::PieceBuf;
 use crate::geom::orient;
 use crate::vertex::Vertex;
 
@@ -165,26 +166,21 @@ pub(crate) const PAIR_BUDGET: usize = 1 << 16;
 /// Up to this many vertices, a single ring is checked without collecting its segments.
 const SMALL: usize = 24;
 
-/// Whether the piece in `verts` (rings closed, ending at `ring_ends`) is planar outside the box
-/// `[min, max]`. With `connectors_only`, only the synthetic segments are checked against one another:
-/// for a frame, whose connectors lie outside the hull of everything else, and so can't meet it.
+/// Whether `piece` is planar outside the box `[min, max]`. With `connectors_only`, only the synthetic
+/// segments are checked against one another: for a frame, whose connectors lie outside the hull of
+/// everything else, and so can't meet it.
 ///
 /// The outside segments are swept in `x`, so a pair is tested only if their `x` ranges overlap. Each
 /// pair tested is taken off `budget`, and the check gives up when it runs out.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the piece, what is synthetic in it, the box, and the check's scratch and budget"
-)]
 pub(crate) fn is_planar<V: Vertex>(
-    verts: &[V],
-    ring_ends: &[u32],
-    synthetic: &[u32],
+    piece: &PieceBuf<V>,
     connectors_only: bool,
     min: Coord<i32>,
     max: Coord<i32>,
     scratch: &mut PlanarScratch,
     budget: &mut usize,
 ) -> Verdict {
+    let (verts, ring_ends, synthetic) = (piece.verts(), piece.ring_ends(), piece.synthetic());
     if let [end] = *ring_ends
         && !connectors_only
         && end as usize <= SMALL + 1
@@ -374,10 +370,9 @@ mod tests {
         let mut scratch = PlanarScratch::new();
         // The box is the single point (0, 0): every other vertex is outside.
         let mut budget = PAIR_BUDGET;
+        let piece = PieceBuf::from_parts(verts, vec![end], synthetic.to_vec());
         is_planar(
-            &verts,
-            &[end],
-            synthetic,
+            &piece,
             only_connectors,
             c(0, 0),
             c(0, 0),
@@ -453,10 +448,9 @@ mod tests {
             synthetic.dedup();
             let only = case % 3 == 0;
             let mut budget = usize::MAX;
+            let piece = PieceBuf::from_parts(verts.clone(), ends.clone(), synthetic.clone());
             let got = is_planar(
-                &verts,
-                &ends,
-                &synthetic,
+                &piece,
                 only,
                 c(0, 0),
                 c(0, 0),
