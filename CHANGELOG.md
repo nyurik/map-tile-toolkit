@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/nyurik/map-tile-toolkit/compare/v0.3.2...v0.3.3) - 2026-10-18
+
+### Added
+
+- valid polygon pieces, and a faster path for small polygons ([#40](https://github.com/nyurik/map-tile-toolkit/pull/40))
+
+### Other
+
+- one piece buffer owns the synthetic-edge marks ([#42](https://github.com/nyurik/map-tile-toolkit/pull/42))
+- slice a polygon within a window of tiles ([#41](https://github.com/nyurik/map-tile-toolkit/pull/41))
+
 ## [0.3.2](https://github.com/nyurik/map-tile-toolkit/compare/v0.3.1...v0.3.2) - 2026-10-15
 
 ### Other
