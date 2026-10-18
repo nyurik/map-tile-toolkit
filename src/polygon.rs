@@ -516,9 +516,8 @@ enum Event {
 
 /// The row sweep of the current polygon.
 struct Sweep {
-    /// The next row to load, and the last row.
-    row: i64,
-    last_row: i64,
+    /// The rows not yet loaded.
+    rows: RangeInclusive<i64>,
     /// Chunks not yet active, as an index into the by-first-row order.
     next_chunk: usize,
     /// Whether a row is loaded, and the sweep's place in it: the next crossing (by `right_of`), the
@@ -573,8 +572,8 @@ pub struct PolygonSlices<'s, V, R> {
 enum Start {
     /// It lies wholly in `tile`'s inner box.
     Whole { tile: TileId, origin: Coord<i32> },
-    /// It is swept over rows `row..=last_row`.
-    Sweep { row: i64, last_row: i64 },
+    /// It is swept over `rows`.
+    Sweep { rows: RangeInclusive<i64> },
 }
 
 impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
@@ -679,10 +678,10 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
                 let inside = self.cols.contains(&tile.x) && self.rows.contains(&tile.y);
                 return Ok(inside.then_some(Event::Whole { tile, origin }));
             }
-            Some(Start::Sweep { row, last_row }) => {
-                let row = row.max(i64::from(*self.rows.start()));
-                let last_row = last_row.min(i64::from(*self.rows.end()));
-                *self.sweep = Some(Sweep::new(row, last_row, self.cols.clone()));
+            Some(Start::Sweep { rows }) => {
+                let first = (*rows.start()).max(i64::from(*self.rows.start()));
+                let last = (*rows.end()).min(i64::from(*self.rows.end()));
+                *self.sweep = Some(Sweep::new(first..=last, self.cols.clone()));
             }
             None => {}
         }
@@ -766,10 +765,9 @@ fn prepare<V: PolyVertex, R: AsRef<[V]>>(
     s.active.clear();
     s.inside.clear();
     s.inside.resize(s.rings.len(), false);
-    Ok(Some(Start::Sweep {
-        row: (i64::from(lo.y) - buffer).div_euclid(extent),
-        last_row: (i64::from(hi.y) + buffer).div_euclid(extent),
-    }))
+    let first = (i64::from(lo.y) - buffer).div_euclid(extent);
+    let last = (i64::from(hi.y) + buffer).div_euclid(extent);
+    Ok(Some(Start::Sweep { rows: first..=last }))
 }
 
 /// What the sweep reads besides its own state: the grid, the scratch, and the polygon being swept.
@@ -780,11 +778,10 @@ struct Cx<'x, V, R> {
 }
 
 impl Sweep {
-    /// A sweep over rows `row..=last_row`, before its first row.
-    fn new(row: i64, last_row: i64, cols: RangeInclusive<i32>) -> Self {
+    /// A sweep over `rows`, before its first row.
+    fn new(rows: RangeInclusive<i64>, cols: RangeInclusive<i32>) -> Self {
         Self {
-            row,
-            last_row,
+            rows,
             next_chunk: 0,
             in_row: false,
             ty: 0,
@@ -840,11 +837,11 @@ impl Sweep {
                 continue;
             }
             if !self.in_row {
-                if self.row > self.last_row {
+                let Some(row) = self.rows.next() else {
                     return Ok(None);
-                }
-                self.load_row(cx)?;
-                self.ty = i32::try_from(self.row).map_err(|_| TileError::Overflow)?;
+                };
+                self.load_row(cx, row)?;
+                self.ty = i32::try_from(row).map_err(|_| TileError::Overflow)?;
                 (self.in_row, self.k, self.h, self.lh, self.next) = (true, 0, 0, 0, i64::MIN);
                 (self.cover, self.long_last) = (Some(0..0), i64::MIN);
                 continue;
@@ -854,7 +851,7 @@ impl Sweep {
                 self.ready = self.take_pending();
                 cx.s.inside.fill(false);
                 self.holes_in = 0;
-                (self.in_row, self.row) = (false, self.row + 1);
+                self.in_row = false;
                 continue;
             }
             // Tiles `next..=bound` all see the same crossings on their winding rays.
@@ -900,7 +897,7 @@ impl Sweep {
                 // Past every crossing each ring's parity is even again: nothing covers.
                 debug_assert!(cx.s.inside.iter().all(|&i| !i), "parity ends even");
                 self.ready = self.take_pending();
-                (self.in_row, self.row) = (false, self.row + 1);
+                self.in_row = false;
                 continue;
             }
             // `bound` is a crossing's `right_of` (|·| ≤ 2^32), so `+ 1` cannot overflow.
@@ -1048,8 +1045,8 @@ impl Sweep {
     fn load_row<V: PolyVertex, R: AsRef<[V]>>(
         &mut self,
         cx: &mut Cx<'_, V, R>,
+        ty: i64,
     ) -> Result<(), TileError> {
-        let ty = self.row;
         let (extent, buffer) = (i64::from(cx.grid.extent()), i64::from(cx.grid.buffer()));
         let s = &mut *cx.s;
         let rings = cx.rings;
