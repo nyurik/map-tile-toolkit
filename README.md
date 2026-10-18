@@ -78,14 +78,34 @@ gets nothing. Synthetic corners sit one unit outside the buffered box, at tile-l
 
 ![Which polygon vertices a tile keeps](https://raw.githubusercontent.com/nyurik/map-tile-toolkit/main/docs/images/clip-polygons.svg)
 
-Each ring is clipped on its own, so a hole crossing the tile keeps its outside vertices even where the
-exterior was cut short: past the box, the hole can reach outside the exterior. A piece is therefore
-technically invalid geometry, but only outside the buffered box; what a renderer draws, clipped to the
-tile (as MVT renderers do), is valid. Measured on random valid polygons with holes, 11.6% of pieces fail
-OGC validation there: a hole outside the exterior, an exterior and a hole detouring along the same line,
-or two detours of one ring crossing. Making the outside valid too would need hole-aware detours and a
-separate route per excursion, which slow the sweep and still miss cases, for no visible gain. Consumers
-needing OGC-valid pieces should clip them with a general-purpose clipper.
+A piece is a **valid polygon** (OGC: simple rings, holes inside the exterior and clear of each other)
+whenever the input is, outside the buffered box too, so a consumer can use a piece on its own,
+triangulating it say, without clipping it to the tile. The plain clip above is not always valid out there:
+each ring is clipped on its own, so a hole crossing the tile keeps its outside vertices even where the
+exterior was cut short, and past the box it can reach outside the exterior, or two detours can cross. A
+piece whose plain clip is valid is kept, so most cost one check of their outside segments: those with an
+endpoint outside the box, the edges that cross out and the corners and chords that close the rings (a
+ring that never leaves the box, or one whose gaps keep their original vertices, has none to check).
+Otherwise the piece is rebuilt, trying in turn:
+
+* a tile the exterior covers gets a fill box around the holes' kept vertices, not just around the box;
+* every excursion closes on a **frame**, the convex hull of everything kept outside the box grown by a
+  lane, each tip leaving the hull through a short stub, and each excursion in a lane of its own; a tip
+  keeps as many more original vertices as it takes to be a vertex of the hull;
+* each excursion keeps a few more original vertices past its tip, with no frame;
+* at worst, every excursion whole, which is valid because the input is.
+
+The first vertex outside the box of every edge crossing its border is always kept, and the rebuilt rings
+stay outside the box wherever they differ from the plain clip, so [`PolygonMosaic`] reassembles repaired
+pieces exactly as it does plain ones: it keeps only the edges touching each tile's buffered box.
+
+A piece keeps its plain clip, **invalid** outside the box, when its repair would cost too much: when the
+checks and probes of the tile run out of their budget (about 65 000 segment pairs, of those whose `x`
+ranges overlap), or when only the last resort works and the polygon has over 2048 vertices, rather than
+cost the tile its whole ring. So garbage input (a self-intersecting ring, holes that overlap), for which
+nothing is promised, still slices in bounded time. The repairs are not cheap: on spiky valid polygons,
+where most edge tiles need one, slicing took 6 to 12 times as long as the plain clip alone, and the pieces
+kept 40% to 60% more vertices.
 
 The polygon is sliced row by row: the call reads the rings once, to bound and index them, and the
 iterator then holds one tile row at a time (a polygon inside one tile is lent as it is). Tiles the

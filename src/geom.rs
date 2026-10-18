@@ -113,6 +113,7 @@ pub(crate) fn ring_orientation<V: Vertex>(ring: &[V]) -> Ordering {
 /// and it is exact for all `i32` inputs. A half-open rule on each edge's `y` span (`[y_lo, y_hi)`)
 /// counts every crossing once, so a ray grazing a shared vertex is handled consistently. Points on an
 /// edge or vertex return `true`. The ring is treated cyclically; a repeated closing vertex is fine.
+#[cfg(test)]
 pub(crate) fn point_in_ring(p: Coord<i32>, ring: &[Coord<i32>]) -> bool {
     let n = ring.len();
     if n < 3 {
@@ -123,11 +124,20 @@ pub(crate) fn point_in_ring(p: Coord<i32>, ring: &[Coord<i32>]) -> bool {
     if m < 3 {
         return false;
     }
+    point_in_distinct_ring(p, m, |i| ring[i])
+}
+
+/// [`point_in_ring`] over the `m ≥ 3` vertices `at(0..m)` of a ring with no repeated closing vertex.
+pub(crate) fn point_in_distinct_ring(
+    p: Coord<i32>,
+    m: usize,
+    at: impl Fn(usize) -> Coord<i32>,
+) -> bool {
     let mut inside = false;
     let mut prev = m - 1;
     for i in 0..m {
-        let tail = ring[prev];
-        let head = ring[i];
+        let tail = at(prev);
+        let head = at(i);
         // On-boundary check: collinear and within the edge's bounding box → treat as inside.
         if orient(tail, head, p) == Ordering::Equal
             && p.x >= tail.x.min(head.x)

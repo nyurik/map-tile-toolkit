@@ -8,6 +8,7 @@ use geo_types::Coord;
 
 use crate::TileError;
 use crate::tile::{TileId, tile_of};
+use crate::vertex::Vertex;
 
 /// `c` shifted by `d` on both axes. Used for the `± buffer` corner offsets, where the caller has
 /// already proved the result stays in `i32` (so no checked arithmetic).
@@ -476,10 +477,78 @@ impl Grid {
         }
     }
 
+    /// `log2(extent)` when the extent is a power of two (every tile size in use), so a tile index is a
+    /// shift, and the coordinates `lo..=hi` whose tile boxes, buffer included, surely fit `i32`. (Not
+    /// kept in the grid: it is passed by value everywhere, and fits a register as it is.)
+    #[inline]
+    const fn fast(self) -> Option<(u32, i32, i32)> {
+        let extent = self.extent.cast_unsigned();
+        if !extent.is_power_of_two() {
+            return None;
+        }
+        // `extent + buffer` fits `i32` (checked when the grid was made), so these cannot overflow.
+        let reach = self.extent + self.buffer;
+        Some((extent.trailing_zeros(), i32::MIN + reach, i32::MAX - reach))
+    }
+
+    /// The tile whose inner box holds every vertex of `ring`, with its origin, and how many distinct
+    /// vertices the ring has: what [`Self::inner_tile`] finds for its bounding box, without computing
+    /// one. Only for a power-of-two extent and a ring far from the `i32` limits (the usual case), as
+    /// [`ring_within`] takes it; `None` otherwise, or if some vertex is outside the inner box of the
+    /// first vertex's tile: the caller takes the general path.
+    ///
+    /// The tile comes from the first vertex by a shift, and each vertex then costs one unsigned
+    /// comparison per axis of its offset from the inner box's corner.
+    #[inline]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "a span of the inner box, which is not empty"
+    )]
+    pub(crate) fn inner_tile_of_ring<V: Vertex>(
+        self,
+        ring: &[V],
+    ) -> Option<(TileId, Coord<i32>, usize)> {
+        let first = ring.first()?.position();
+        let (shift, lo, hi) = self.fast()?;
+        if first.x < lo || first.x > hi || first.y < lo || first.y > hi {
+            return None;
+        }
+        let (tx, ty) = (first.x >> shift, first.y >> shift);
+        let (x, y) = (tx << shift, ty << shift);
+        // (Far from the limits, the inner box's corner fits `i32`.)
+        let inner = Coord {
+            x: x + self.buffer,
+            y: y + self.buffer,
+        };
+        let n = ring_within(ring, inner, (self.extent - 1 - 2 * self.buffer) as u32)?;
+        Some((TileId::new(tx, ty), Coord { x, y }, n))
+    }
+
     /// The tile whose inner box (≥ `buffer` from every cell edge) holds the whole bounding box
     /// `[lo, hi]`, with its origin, if one does and its buffered box fits `i32`; one division per
     /// axis.
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "offsets from a tile's corner, below, are non-negative"
+    )]
     pub(crate) fn inner_tile(self, lo: Coord<i32>, hi: Coord<i32>) -> Option<(TileId, Coord<i32>)> {
+        // The usual case: a power-of-two extent, and coordinates far from the `i32` limits, where
+        // the tile box surely fits and a tile index is a shift.
+        if let Some((shift, fast_lo, fast_hi)) = self.fast()
+            && lo.x >= fast_lo
+            && lo.y >= fast_lo
+            && hi.x <= fast_hi
+            && hi.y <= fast_hi
+        {
+            let (last, buffer) = ((self.extent - 1 - self.buffer) as u32, self.buffer as u32);
+            let (tx, ty) = (lo.x >> shift, lo.y >> shift);
+            let (x, y) = (tx << shift, ty << shift);
+            // Offsets from the tile's corner, exact as `u32` (`hi ≥ lo ≥ corner`).
+            let (ox, oy) = (lo.x.wrapping_sub(x) as u32, lo.y.wrapping_sub(y) as u32);
+            let (ex, ey) = (hi.x.wrapping_sub(x) as u32, hi.y.wrapping_sub(y) as u32);
+            return (ox >= buffer && oy >= buffer && ex <= last && ey <= last)
+                .then_some((TileId::new(tx, ty), Coord { x, y }));
+        }
         let (extent, buffer) = (i64::from(self.extent), i64::from(self.buffer));
         let axis = |lo: i32, hi: i32| {
             let (lo, hi) = (i64::from(lo), i64::from(hi));
@@ -497,10 +566,151 @@ impl Grid {
     }
 }
 
+/// How many distinct vertices `ring` has — its length, less a closing vertex repeating the first — if
+/// it has at least three, no two consecutive the same (a ring closed twice included), and every one
+/// in the square `lo ..= lo + span` on both axes; else `None`, for the general path.
+///
+/// An offset from `lo` is inside iff, as `u32` (so below zero wraps far past it), it is at most
+/// `span`: one comparison per axis, and no branch per vertex.
+#[inline]
+pub(crate) fn ring_within<V: Vertex>(ring: &[V], lo: Coord<i32>, span: u32) -> Option<usize> {
+    let first = ring.first()?.position();
+    let n = ring.len() - usize::from(ring[ring.len() - 1].position() == first);
+    if n < 3 || ring[n - 1].position() == first {
+        return None;
+    }
+    let off = |v: i32, l: i32| v.wrapping_sub(l).cast_unsigned();
+    let (mut prev, mut bad) = (ring[n - 1].position(), false);
+    for v in &ring[..n] {
+        let p = v.position();
+        #[expect(
+            clippy::needless_bitwise_bool,
+            reason = "no branch per vertex: a ring is almost always inside"
+        )]
+        {
+            bad |= (off(p.x, lo.x) > span) | (off(p.y, lo.y) > span) | (p == prev);
+        }
+        prev = p;
+    }
+    (!bad).then_some(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clip_polyline::segment_intersects;
+
+    /// [`Grid::inner_tile_of_ring`] finds exactly what [`Grid::inner_tile`] does for the ring's
+    /// bounding box, wherever it applies: a power-of-two extent, a ring with three or more distinct
+    /// vertices and no consecutive repeat, far from the `i32` limits.
+    #[test]
+    fn lone_ring_tile_agrees_with_the_bounding_box() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move |n: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            i64::try_from(state % u64::try_from(n).unwrap()).unwrap()
+        };
+        let mut found = 0;
+        for case in 0..20_000 {
+            let (extent, buffer) = [
+                (16u32, 0u16),
+                (16, 3),
+                (64, 5),
+                (4096, 64),
+                (8, 3),
+                (4096, 0),
+            ][case % 6];
+            let grid = Grid::new(extent, buffer).unwrap();
+            // Rings of a few vertices near one tile's inner box, often straddling it.
+            let e = i64::from(extent);
+            let (cx, cy) = (next(7) - 3, next(7) - 3);
+            let n = usize::try_from(3 + next(4)).unwrap();
+            let mut ring: Vec<Coord<i32>> = (0..n)
+                .map(|_| Coord {
+                    x: i32::try_from(cx * e + next(e + 12) - 6).unwrap(),
+                    y: i32::try_from(cy * e + next(e + 12) - 6).unwrap(),
+                })
+                .collect();
+            if case % 3 == 0 {
+                ring.push(ring[0]); // closed
+            }
+            let Some((tile, origin, vertices)) = grid.inner_tile_of_ring(&ring) else {
+                continue;
+            };
+            let distinct = &ring[..vertices];
+            assert_eq!(distinct.len(), n, "closing vertex dropped, only then");
+            let lo = Coord {
+                x: distinct.iter().map(|c| c.x).min().unwrap(),
+                y: distinct.iter().map(|c| c.y).min().unwrap(),
+            };
+            let hi = Coord {
+                x: distinct.iter().map(|c| c.x).max().unwrap(),
+                y: distinct.iter().map(|c| c.y).max().unwrap(),
+            };
+            assert_eq!(
+                grid.inner_tile(lo, hi),
+                Some((tile, origin)),
+                "{ring:?} e{extent} b{buffer}"
+            );
+            found += 1;
+        }
+        assert!(found > 1_000, "{found} rings found a tile");
+    }
+
+    /// The reverse: a ring the quick test declines, though it is distinct and inside one inner box,
+    /// is declined only for a reason the general path handles (a repeat, or too few vertices).
+    #[test]
+    fn lone_ring_tile_declines_only_what_it_should() {
+        let grid = Grid::new(4096, 64).unwrap();
+        let c = |x, y| Coord { x, y };
+        let inside = [c(100, 100), c(130, 100), c(130, 120), c(100, 120)];
+        assert!(grid.inner_tile_of_ring(&inside).is_some());
+        // Not the same tile, or in the buffer band.
+        assert!(
+            grid.inner_tile_of_ring(&[c(100, 100), c(5000, 100), c(130, 120)])
+                .is_none()
+        );
+        assert!(
+            grid.inner_tile_of_ring(&[c(100, 100), c(130, 100), c(130, 30)])
+                .is_none()
+        );
+        // A repeated vertex, or two distinct ones, goes to the general path.
+        assert!(
+            grid.inner_tile_of_ring(&[c(100, 100), c(100, 100), c(130, 100), c(130, 120)])
+                .is_none()
+        );
+        assert!(
+            grid.inner_tile_of_ring(&[c(100, 100), c(130, 100), c(100, 100)])
+                .is_none()
+        );
+        // A ring closed twice: the general path drops both closing vertices.
+        assert!(
+            grid.inner_tile_of_ring(&[inside[0], inside[1], inside[2], inside[0], inside[0]])
+                .is_none()
+        );
+        // A closing vertex is not counted; far from the origin or off a power of two, the general path.
+        assert_eq!(
+            grid.inner_tile_of_ring(&[inside[0], inside[1], inside[2], inside[0]])
+                .map(|r| r.2),
+            Some(3)
+        );
+        assert!(
+            grid.inner_tile_of_ring(&[
+                c(i32::MAX - 5, 100),
+                c(i32::MAX - 6, 100),
+                c(i32::MAX - 6, 120)
+            ])
+            .is_none()
+        );
+        assert!(
+            Grid::new(100, 5)
+                .unwrap()
+                .inner_tile_of_ring(&inside)
+                .is_none()
+        );
+    }
 
     #[test]
     fn mul_div_floor_is_exact_past_i64() {
