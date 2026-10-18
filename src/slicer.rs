@@ -286,7 +286,8 @@ impl<V: PolyVertex> Slicer<V> {
     /// Lazy and lending: see [`PolygonSlices`]. The call reads the rings once, to bound and index
     /// them (only a ring with consecutive duplicate vertices is copied, to drop them); after that the
     /// iterator holds one tile row of the polygon at a time, and builds each piece as it is reached.
-    /// Every row of the polygon's bounding box is visited, including rows where it yields nothing.
+    /// Every row of the polygon's bounding box is visited, including rows where it yields nothing;
+    /// [`PolygonSlices::within`] limits the slices, and the rows visited, to a window of tiles.
     ///
     /// # Errors
     ///

@@ -56,10 +56,16 @@ impl Sliced {
     }
 }
 
-/// A multipolygon feature sliced polygon by polygon with `polygon`, checking the structural promises
-/// along the way: for each polygon, edge tiles in row-major order and each once, runs non-empty,
-/// row-major, disjoint and maximal, and no tile both an edge tile and filled.
-fn all_tiles(polygons: &[FixturePolygon], extent: u32, buffer: u16) -> Sliced {
+/// A multipolygon feature sliced polygon by polygon with `polygon`, limited to `window` with
+/// [`PolygonSlices::within`](map_tile_toolkit::PolygonSlices::within) when given, checking the
+/// structural promises along the way: for each polygon, edge tiles in row-major order and each once,
+/// runs non-empty, row-major, disjoint and maximal, and no tile both an edge tile and filled.
+fn all_tiles(
+    polygons: &[FixturePolygon],
+    extent: u32,
+    buffer: u16,
+    window: Option<(TileId, TileId)>,
+) -> Sliced {
     let mut slicer = Slicer::<Coord<i32>>::new(extent, buffer).expect("config");
     let mut sliced = Sliced {
         tiles: BTreeMap::new(),
@@ -68,6 +74,9 @@ fn all_tiles(polygons: &[FixturePolygon], extent: u32, buffer: u16) -> Sliced {
     for (polygon, fixture) in (0_u32..).zip(polygons) {
         let input = support::rings(fixture);
         let mut slices = slicer.polygon(&input).expect("slice");
+        if let Some((min, max)) = window {
+            slices = slices.within(min, max);
+        }
         // This polygon's edge tiles and runs, in yield order.
         let mut edges: Vec<TileId> = Vec::new();
         let mut runs: Vec<FillRun> = Vec::new();
@@ -140,7 +149,7 @@ fn span(polygons: &[FixturePolygon], extent: u32) -> (TileId, TileId) {
 
 /// Assert the all-tiles slicer agrees with the single-tile oracle on every tile of the span.
 fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
-    let all = all_tiles(polygons, extent, buffer);
+    let all = all_tiles(polygons, extent, buffer, None);
     // Consecutive duplicate vertices are dropped, so repeating every vertex changes nothing.
     let dup = |ring: &[Coord<i32>]| ring.iter().flat_map(|&c| [c, c]).collect::<Vec<_>>();
     let duped: Vec<FixturePolygon> = polygons
@@ -152,7 +161,7 @@ fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
         .collect();
     assert_eq!(
         all,
-        all_tiles(&duped, extent, buffer),
+        all_tiles(&duped, extent, buffer, None),
         "{label}: duplicated vertices"
     );
     let (lo, hi) = span(polygons, extent);
@@ -161,6 +170,7 @@ fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
         all.fills.keys().all(in_span),
         "{label}: a fill run escapes the span"
     );
+    check_windows(&all, polygons, extent, buffer, label);
     for y in lo.y..=hi.y {
         for x in lo.x..=hi.x {
             let tile = TileId::new(x, y);
@@ -168,6 +178,48 @@ fn check(polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
             let at = format!("{label}: extent {extent} buffer {buffer} tile {tile:?}");
             assert_eq!(all.content(tile), one, "{at}");
         }
+    }
+}
+
+/// Sliced within a window, the feature yields exactly its unwindowed slices in the window's tiles:
+/// for a single tile at each corner and the center of the span, a row and a column through it, each
+/// quadrant, and a window reaching past the span.
+fn check_windows(all: &Sliced, polygons: &[FixturePolygon], extent: u32, buffer: u16, label: &str) {
+    let (lo, hi) = span(polygons, extent);
+    let mid = TileId::new(lo.x + (hi.x - lo.x) / 2, lo.y + (hi.y - lo.y) / 2);
+    let windows = [
+        (lo, lo),
+        (hi, hi),
+        (mid, mid),
+        (TileId::new(lo.x, mid.y), TileId::new(hi.x, mid.y)),
+        (TileId::new(mid.x, lo.y), TileId::new(mid.x, hi.y)),
+        (lo, mid),
+        (mid, hi),
+        (TileId::new(lo.x, mid.y), TileId::new(mid.x, hi.y)),
+        (TileId::new(mid.x, lo.y), TileId::new(hi.x, mid.y)),
+        (
+            TileId::new(lo.x - 3, lo.y - 3),
+            TileId::new(hi.x + 3, hi.y + 3),
+        ),
+    ];
+    for (min, max) in windows {
+        let inside = |t: &TileId| (min.x..=max.x).contains(&t.x) && (min.y..=max.y).contains(&t.y);
+        let keep = |tiles: &BTreeMap<TileId, Vec<(u32, Rings)>>| {
+            tiles
+                .iter()
+                .filter(|(t, _)| inside(t))
+                .map(|(t, v)| (*t, v.clone()))
+                .collect()
+        };
+        let expected = Sliced {
+            tiles: keep(&all.tiles),
+            fills: keep(&all.fills),
+        };
+        assert_eq!(
+            all_tiles(polygons, extent, buffer, Some((min, max))),
+            expected,
+            "{label}: extent {extent} buffer {buffer} window {min:?}..={max:?}"
+        );
     }
 }
 
@@ -219,7 +271,7 @@ fn fixture_fill_matches_geo(path: &Path) {
     let polygons = support::load_polygon_fixture(path);
     let geo: Vec<Polygon<f64>> = polygons.iter().map(geo_polygon).collect();
     for (extent, buffer) in [(EXTENT, 0), (EXTENT, 5), (7, 1), (3, 0)] {
-        let all = all_tiles(&polygons, extent, buffer);
+        let all = all_tiles(&polygons, extent, buffer, None);
         let (lo, hi) = span(&polygons, extent);
         for y in lo.y..=hi.y {
             for x in lo.x..=hi.x {

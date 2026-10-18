@@ -217,6 +217,20 @@ fn polygons([path]: [&Path; 1]) {
                     .is_ok()
                     .then(|| to_local(tile, &whole));
                 assert_eq!(one, expected, "{what}: tile_polygon differs at {tile:?}");
+                let mut within = Vec::new();
+                let mut slices = slicer.polygon(&rings).expect("polygon").within(tile, tile);
+                while let Some(slice) = slices.next() {
+                    let PolygonSlice::Piece(piece) = slice.expect("slice") else {
+                        panic!("{what}: an unclipped slicer yielded a fill run");
+                    };
+                    within.push((
+                        piece.tile(),
+                        piece.rings().map(|r| local(tile, r)).collect(),
+                    ));
+                }
+                let expected: Vec<(TileId, Vec<_>)> =
+                    expected.into_iter().map(|e| (tile, e)).collect();
+                assert_eq!(within, expected, "{what}: within({tile:?}) differs");
             }
             for tile in reached {
                 *tiles.entry(tile).or_default() += 1;
