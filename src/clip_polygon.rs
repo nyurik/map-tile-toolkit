@@ -334,18 +334,6 @@ pub(crate) fn push_distinct<V: Vertex>(ring: &[V], out: &mut Vec<V>) -> usize {
     out.len() - start
 }
 
-/// Append the `B⁺` fill box as a closed ring oriented like `orient` (a solid tile fill), all synthetic.
-pub(crate) fn push_fill_box<V: PolyVertex>(
-    out: &mut Vec<V>,
-    orient: Ordering,
-    min: Coord<i32>,
-    max: Coord<i32>,
-) -> Result<(), TileError> {
-    let ring = fill_box(orient, corner(0, min, max)?, corner(4, min, max)?);
-    out.extend(ring.into_iter().map(V::synthetic_at));
-    Ok(())
-}
-
 /// The closed fill-box ring through the `B⁺` corners `sw` and `ne`, oriented like `orient`.
 pub(crate) fn fill_box(orient: Ordering, sw: Coord<i32>, ne: Coord<i32>) -> [Coord<i32>; 5] {
     let se = Coord { x: ne.x, y: sw.y };
@@ -376,7 +364,7 @@ pub(crate) struct ClipScratch<V> {
     copy: Vec<V>,
     crossings: Vec<(u32, i64)>,
     arcs: Vec<(usize, usize)>,
-    pub(crate) tmp: FrameTmp,
+    tmp: FrameTmp,
 }
 
 impl<V> ClipScratch<V> {
@@ -386,6 +374,50 @@ impl<V> ClipScratch<V> {
             crossings: Vec::new(),
             arcs: Vec::new(),
             tmp: FrameTmp::new(),
+        }
+    }
+}
+
+impl<V: PolyVertex> ClipScratch<V> {
+    /// Start a repair attempt: its frame's hull is not grown yet.
+    #[inline]
+    pub(crate) fn start_attempt(&mut self) {
+        self.tmp.grown_by = None;
+    }
+
+    /// The plain clip's [`close_ring`](fn@close_ring), for a caller that found the ring's `arcs`
+    /// itself (the all-tiles slicer).
+    #[inline]
+    pub(crate) fn close_ring(
+        &mut self,
+        ring: &[V],
+        arcs: &mut [(usize, usize)],
+        (min, max): (Coord<i32>, Coord<i32>),
+        winding: impl FnMut(usize, usize) -> i64,
+        piece: &mut PieceBuf<V>,
+    ) -> Result<(), TileError> {
+        // (The plain clip has no frame to miss.)
+        let plain = &RingPlan::PLAIN;
+        close_ring::<true, V>(ring, arcs, min, max, winding, plain, &mut self.tmp, piece)?;
+        Ok(())
+    }
+
+    /// [`Self::close_ring`] for a repair, closed by `plan`.
+    #[inline]
+    pub(crate) fn close_ring_planned(
+        &mut self,
+        ring: &[V],
+        arcs: &mut [(usize, usize)],
+        (min, max): (Coord<i32>, Coord<i32>),
+        winding: impl FnMut(usize, usize) -> i64,
+        plan: &RingPlan<'_>,
+        piece: &mut PieceBuf<V>,
+    ) -> Result<Closed, TileError> {
+        let tmp = &mut self.tmp;
+        if *plan == RingPlan::PLAIN {
+            close_ring::<true, V>(ring, arcs, min, max, winding, plan, tmp, piece)
+        } else {
+            close_ring::<false, V>(ring, arcs, min, max, winding, plan, tmp, piece)
         }
     }
 }
@@ -474,45 +506,191 @@ pub(crate) fn arcs_points<V: Vertex>(
 }
 
 /// Reusable buffers of the frame construction.
-pub(crate) struct FrameTmp {
+struct FrameTmp {
     pts: Vec<Coord<i32>>,
     expanded: Vec<Coord<i32>>,
-    /// The piece's synthetic edges so far, ascending: edge `i` runs from vertex `i` of the piece's
-    /// vertex buffer to vertex `i + 1`. Only these can cross anything, so only these are checked.
-    pub(crate) synthetic: Vec<u32>,
     /// The lane `expanded` was grown by, for the current attempt's hull.
-    pub(crate) grown_by: Option<i32>,
-    /// Set when a frame can't close an excursion (a tip is not on the hull, or neither way round
-    /// winds like it): the attempt's piece is then incomplete, and the attempt fails.
-    pub(crate) failed: bool,
+    grown_by: Option<i32>,
 }
 
 impl FrameTmp {
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             pts: Vec::new(),
             expanded: Vec::new(),
-            synthetic: Vec::new(),
             grown_by: None,
-            failed: false,
+        }
+    }
+}
+
+/// A tile's piece as it is built: its vertices, where each ring ends, and which of its edges are
+/// synthetic (the connectors that close the rings, and the sides of a fill box). Synthetic geometry
+/// is only ever written with its marks, so the marks are exactly the synthetic edges, in increasing
+/// order, as [`is_planar`](crate::planar::is_planar) looks them up.
+pub(crate) struct PieceBuf<V> {
+    verts: Vec<V>,
+    /// Where each ring ends in `verts`. Every ring is closed: its first vertex repeated.
+    ring_ends: Vec<u32>,
+    /// The synthetic edges, increasing: edge `i` runs from vertex `i` to vertex `i + 1`. Only these
+    /// can cross anything, so only these are checked.
+    synthetic: Vec<u32>,
+}
+
+impl<V> PieceBuf<V> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            verts: Vec::new(),
+            ring_ends: Vec::new(),
+            synthetic: Vec::new(),
         }
     }
 
-    /// Start a new piece attempt: nothing is synthetic yet, no hull is grown, nothing failed.
-    #[inline]
-    pub(crate) fn reset(&mut self) {
-        self.synthetic.clear();
-        self.grown_by = None;
-        self.failed = false;
+    /// A piece of `verts`, its rings ending at `ring_ends`, with the `synthetic` edges marked as
+    /// given, for testing what reads a piece.
+    #[cfg(test)]
+    pub(crate) fn from_parts(verts: Vec<V>, ring_ends: Vec<u32>, synthetic: Vec<u32>) -> Self {
+        Self {
+            verts,
+            ring_ends,
+            synthetic,
+        }
     }
 
-    /// Record the `count` edges from vertex `first` as synthetic.
+    /// Start a new piece.
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.verts.clear();
+        self.ring_ends.clear();
+        self.synthetic.clear();
+    }
+
+    /// The piece's vertices, each ring closed.
+    pub(crate) fn verts(&self) -> &[V] {
+        &self.verts
+    }
+
+    /// Where each ring ends in [`Self::verts`].
+    pub(crate) fn ring_ends(&self) -> &[u32] {
+        &self.ring_ends
+    }
+
+    /// The synthetic edges, increasing: edge `i` runs from vertex `i` to vertex `i + 1`.
+    pub(crate) fn synthetic(&self) -> &[u32] {
+        &self.synthetic
+    }
+
+    /// How many vertices are written.
+    pub(crate) fn len(&self) -> usize {
+        self.verts.len()
+    }
+
+    /// Make room for `additional` more vertices.
+    #[inline]
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.verts.reserve(additional);
+    }
+}
+
+impl<V: PolyVertex> PieceBuf<V> {
+    /// Original vertices, never marked.
+    #[inline]
+    pub(crate) fn extend_input(&mut self, vs: impl IntoIterator<Item = V>) {
+        self.verts.extend(vs);
+    }
+
+    /// A ring kept whole: its distinct vertices `ring`, closed, ending its ring.
+    #[inline]
+    pub(crate) fn push_whole_ring(&mut self, ring: &[V]) -> Result<(), TileError> {
+        self.verts.extend_from_slice(ring);
+        self.end_ring()
+    }
+
+    /// A synthetic path from the last vertex written through `corners` to the next vertex written:
+    /// marks every edge of it, the plain chord (no corners) included.
+    #[inline]
+    pub(crate) fn push_connector(
+        &mut self,
+        corners: impl IntoIterator<Item = Result<Coord<i32>, TileError>>,
+    ) -> Result<(), TileError> {
+        let from = self.verts.len() - 1;
+        for c in corners {
+            self.verts.push(V::synthetic_at(c?));
+        }
+        self.mark(from, self.verts.len() - from);
+        Ok(())
+    }
+
+    /// The `B⁺` fill box of the box `[min, max]` as a ring oriented like `orient` (a solid tile
+    /// fill), all synthetic, ending its ring.
+    pub(crate) fn push_fill_box(
+        &mut self,
+        orient: Ordering,
+        min: Coord<i32>,
+        max: Coord<i32>,
+    ) -> Result<(), TileError> {
+        let ring = fill_box(orient, corner(0, min, max)?, corner(4, min, max)?);
+        self.mark(self.verts.len(), 4);
+        self.verts
+            .extend(ring[..4].iter().copied().map(V::synthetic_at));
+        self.end_ring()
+    }
+
+    /// The tile is covered by the exterior: grow its fill box (the piece's first ring) to enclose
+    /// the vertices of the rings after it too, one unit clear of them, so no hole reaches outside
+    /// its exterior. The ring keeps its length, so its marks still fit it.
+    pub(crate) fn grow_fill_box(
+        &mut self,
+        min: Coord<i32>,
+        max: Coord<i32>,
+    ) -> Result<(), TileError> {
+        let first_hole = self.ring_ends[0] as usize;
+        let (mut lo, mut hi) = (min, max);
+        for v in &self.verts[first_hole..] {
+            let p = v.position();
+            lo = Coord {
+                x: lo.x.min(p.x),
+                y: lo.y.min(p.y),
+            };
+            hi = Coord {
+                x: hi.x.max(p.x),
+                y: hi.y.max(p.y),
+            };
+        }
+        let (lo, hi) = lane_bounds(lo, hi, 1)?;
+        // The grown box is wound like the fill box it replaces (like the exterior).
+        let ring = fill_box(ring_orientation(&self.verts[..first_hole]), lo, hi);
+        debug_assert_eq!(
+            ring.len(),
+            first_hole,
+            "the fill box is the piece's first ring"
+        );
+        for (slot, c) in self.verts.iter_mut().zip(ring) {
+            *slot = V::synthetic_at(c);
+        }
+        Ok(())
+    }
+
+    /// Close the current ring, repeating its first vertex, and end it.
+    #[inline]
+    fn end_ring(&mut self) -> Result<(), TileError> {
+        let start = self.ring_ends.last().map_or(0, |&e| e as usize);
+        self.verts.push(self.verts[start]);
+        let end = u32::try_from(self.verts.len()).map_err(|_| TileError::GeometryTooLarge)?;
+        self.ring_ends.push(end);
+        Ok(())
+    }
+
+    /// Mark the `count` edges from vertex `first`, all after the ones marked so far.
     #[inline]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "a piece's vertex count is checked to fit u32 as its rings end"
     )]
-    pub(crate) fn mark(&mut self, first: usize, count: usize) {
+    fn mark(&mut self, first: usize, count: usize) {
+        debug_assert!(
+            self.synthetic.last().is_none_or(|&l| (l as usize) < first),
+            "marks are written in increasing order"
+        );
         self.synthetic
             .extend((first..first + count).map(|i| i as u32));
     }
@@ -550,8 +728,8 @@ pub(crate) fn convex_hull(pts: &mut Vec<Coord<i32>>, hull: &mut Vec<Coord<i32>>)
 /// Close the excursion from tip `u` to tip `v` (winding `w_exc` around the box center) on the hull
 /// `hull` grown by `lane` units: each tip steps out to the vertex of the grown hull that it
 /// generates, and the grown hull's vertices between them follow, whichever way round winds like the
-/// excursion. Appends them and returns `true`, or appends nothing and returns `false` if a tip is
-/// not a hull vertex or neither way round has the excursion's winding.
+/// excursion. Writes them as a connector and returns `true`, or writes nothing and returns `false`
+/// if a tip is not a hull vertex or neither way round has the excursion's winding.
 #[expect(
     clippy::too_many_arguments,
     clippy::many_single_char_names,
@@ -565,7 +743,7 @@ fn frame_bridge<V: PolyVertex>(
     hull: &[Coord<i32>],
     lane: i32,
     tmp: &mut FrameTmp,
-    out: &mut Vec<V>,
+    piece: &mut PieceBuf<V>,
 ) -> Result<bool, TileError> {
     let lane = lane.max(1);
     // The hull grown by `lane` (its Minkowski sum with the square `[-lane, lane]²`), kept for the
@@ -612,15 +790,24 @@ fn frame_bridge<V: PolyVertex>(
         };
         let way: &mut dyn Iterator<Item = Coord<i32>> =
             if forward { &mut { ccw } } else { &mut { cw } };
-        out.extend(way.map(V::synthetic_at));
+        piece.push_connector(way.map(Ok))?;
         Ok::<_, TileError>(true)
     })();
     tmp.expanded = grown;
     result
 }
 
-/// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), appended
-/// to `out` in the ring's own coordinate frame.
+/// Whether [`close_ring`] closed its ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Closed {
+    Ring,
+    /// A frame can't close an excursion (a tip is not on the hull, or neither way round winds like
+    /// it): the ring is left unfinished, and the attempt fails.
+    FrameMissed,
+}
+
+/// Close one ring's kept arcs into a single closed ring (first vertex repeated at the end), written
+/// to `piece` in the ring's own coordinate frame, ending its ring.
 ///
 /// `ring` holds the ring's distinct vertices in cyclic order (see [`push_distinct`]); edge `i` runs
 /// `ring[i] → ring[(i + 1) % m]`. `arcs` holds, non-empty, the kept arcs that [`keep_edge`] built from
@@ -630,17 +817,19 @@ fn frame_bridge<V: PolyVertex>(
 /// box's ray; the caller supplies it so the single-tile clip can walk the edges while the all-tiles
 /// slicer answers from its per-row crossing index.
 ///
-/// Output starts at the first arc in index order, so it is a pure function of the inputs.
+/// Output starts at the first arc in index order, so it is a pure function of the inputs. Only a
+/// `plan` with a frame can leave the ring unfinished ([`Closed::FrameMissed`]).
 ///
 /// # Errors
 ///
-/// [`TileError::Overflow`] if a synthetic corner can't be placed strictly outside the box.
+/// - [`TileError::Overflow`] if a synthetic corner can't be placed strictly outside the box.
+/// - [`TileError::GeometryTooLarge`] if the piece passes `u32::MAX` vertices.
 #[inline]
 #[expect(
     clippy::too_many_arguments,
     reason = "the ring, its arcs, the box, the winding, the plan and the buffers: one hot function"
 )]
-pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
+fn close_ring<const PLAIN: bool, V: PolyVertex>(
     ring: &[V],
     arcs: &mut [(usize, usize)],
     min: Coord<i32>,
@@ -648,8 +837,8 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
     mut winding: impl FnMut(usize, usize) -> i64,
     plan: &RingPlan<'_>,
     tmp: &mut FrameTmp,
-    out: &mut Vec<V>,
-) -> Result<(), TileError> {
+    piece: &mut PieceBuf<V>,
+) -> Result<Closed, TileError> {
     let m = ring.len();
     let first = merge_seam(arcs, m);
     let arcs = &arcs[first..];
@@ -657,15 +846,13 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
         && e - s + 1 >= m
     {
         // Every vertex is kept: the ring is returned verbatim, re-closed.
-        out.extend_from_slice(ring);
-        out.push(ring[0]);
-        return Ok(());
+        piece.push_whole_ring(ring)?;
+        return Ok(Closed::Ring);
     }
 
     let cy = center_y(min, max);
-    let ring_start = out.len();
     for (j, &(s, e)) in arcs.iter().enumerate() {
-        out.extend((s..=e).map(|i| ring[i % m]));
+        piece.extend_input((s..=e).map(|i| ring[i % m]));
         // Bridge the gap to the next arc (cyclically): the dropped vertices `e+1 .. next`.
         let next = arcs.get(j + 1).map_or(arcs[0].0 + m, |a| a.0);
         // The plain clip bridges from the tips; a repair may keep `head` more vertices after this
@@ -677,10 +864,10 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
         };
         if !PLAIN {
             if head + tail == next - e - 1 {
-                out.extend((e + 1..next).map(|i| ring[i % m]));
+                piece.extend_input((e + 1..next).map(|i| ring[i % m]));
                 continue;
             }
-            out.extend((e + 1..=e + head).map(|i| ring[i % m]));
+            piece.extend_input((e + 1..=e + head).map(|i| ring[i % m]));
         }
         let (ui, vi) = (e + head, next - tail);
         let (u, v) = (ring[ui % m].position(), ring[vi % m].position());
@@ -694,14 +881,11 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
                 .and_then(|l| l.checked_add(plan.lane_base))
                 .ok_or(TileError::Overflow)?;
             if let Some(hull) = plan.frame {
-                let before = out.len();
                 let lane = lane.checked_add(1).ok_or(TileError::Overflow)?;
-                if !frame_bridge(u, v, w_exc, (min, max), hull, lane, tmp, out)? {
-                    tmp.failed = true; // the attempt fails, so the ring is left unfinished
-                    return Ok(());
+                if !frame_bridge(u, v, w_exc, (min, max), hull, lane, tmp, piece)? {
+                    return Ok(Closed::FrameMissed);
                 }
-                tmp.mark(before - 1, out.len() - before + 1);
-                out.extend((vi..next).map(|i| ring[i % m]));
+                piece.extend_input((vi..next).map(|i| ring[i % m]));
                 continue;
             }
             lane_bounds(min, max, lane)?
@@ -712,17 +896,15 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
             plan_bridge_lane(u, v, w_exc, vi - ui - 1, (min, max), (cmin, cmax), cy)?
         };
         match bridge {
-            Bridge::Keep => out.extend((ui + 1..vi).map(|i| ring[i % m])),
+            Bridge::Keep => piece.extend_input((ui + 1..vi).map(|i| ring[i % m])),
             Bridge::Detour { start, advance } => {
-                let before = out.len();
-                for s in corner_slots(start, advance) {
-                    out.push(V::synthetic_at(corner(s, cmin, cmax)?));
-                }
-                tmp.mark(before - 1, out.len() - before + 1);
+                let before = piece.len();
+                piece
+                    .push_connector(corner_slots(start, advance).map(|s| corner(s, cmin, cmax)))?;
                 debug_assert_eq!(
                     ray_crossings(
                         iter::once(u)
-                            .chain(out[before..].iter().map(Vertex::position))
+                            .chain(piece.verts()[before..].iter().map(Vertex::position))
                             .chain(iter::once(v)),
                         cy,
                         max.x
@@ -733,11 +915,11 @@ pub(crate) fn close_ring<const PLAIN: bool, V: PolyVertex>(
             }
         }
         if !PLAIN {
-            out.extend((vi..next).map(|i| ring[i % m]));
+            piece.extend_input((vi..next).map(|i| ring[i % m]));
         }
     }
-    out.push(out[ring_start]); // close the ring
-    Ok(())
+    piece.end_ring()?;
+    Ok(Closed::Ring)
 }
 
 /// The outcome of clipping one ring to a tile box.
@@ -753,28 +935,34 @@ pub(crate) enum RingClip {
 }
 
 /// Clip one closed `ring` to the inclusive buffered box `[min, max]`, keeping original vertices and
-/// closing the result with synthetic `B⁺` corners. Appends the closed output ring to `out` in the
-/// input's own coordinate frame (first vertex repeated at the end), and tells apart a whole-tile [`RingClip::Covers`]
-/// fill from a partial [`RingClip::Clipped`] crossing (so the caller can drop a tile that a hole
-/// entirely covers) and [`RingClip::Outside`] when the ring misses the tile.
+/// closing the result with synthetic `B⁺` corners. Writes the closed output ring to `piece` in the
+/// input's own coordinate frame (first vertex repeated at the end), ending its ring, and tells apart
+/// a whole-tile [`RingClip::Covers`] fill from a partial [`RingClip::Clipped`] crossing (so the
+/// caller can drop a tile that a hole entirely covers) and [`RingClip::Outside`] when the ring
+/// misses the tile.
 ///
 /// # Errors
 ///
 /// - [`TileError::Overflow`] if the tile sits so close to the `i32` edge that a synthetic corner can't
 ///   be placed strictly outside the box.
-/// - [`TileError::GeometryTooLarge`] if the ring has more than `u32::MAX` distinct vertices.
+/// - [`TileError::GeometryTooLarge`] if the ring has more than `u32::MAX` distinct vertices, or the
+///   piece more than `u32::MAX` vertices.
 pub(crate) fn clip_ring<V: PolyVertex>(
     ring: &[V],
     min: Coord<i32>,
     max: Coord<i32>,
     scratch: &mut ClipScratch<V>,
-    out: &mut Vec<V>,
+    piece: &mut PieceBuf<V>,
 ) -> Result<RingClip, TileError> {
-    clip_ring_by::<true, V>(ring, min, max, scratch, &RingPlan::PLAIN, None, out)
+    let clip = clip_ring_by::<true, V>(ring, min, max, scratch, &RingPlan::PLAIN, None, piece)?;
+    // Only a repair's frame can miss: the plain clip closes every ring it reaches.
+    debug_assert!(clip.is_some(), "the plain clip has no frame to miss");
+    Ok(clip.unwrap_or(RingClip::Outside))
 }
 
 /// [`clip_ring`] for a repair: the ring is closed by `plan`, or, given a `probe`, not built at all:
-/// the vertices it would keep outside the box go there.
+/// the vertices it would keep outside the box go there. `None` if the plan's frame can't close
+/// one of the ring's excursions ([`Closed::FrameMissed`]): the attempt fails.
 pub(crate) fn clip_ring_planned<V: PolyVertex>(
     ring: &[V],
     min: Coord<i32>,
@@ -782,9 +970,9 @@ pub(crate) fn clip_ring_planned<V: PolyVertex>(
     scratch: &mut ClipScratch<V>,
     plan: &RingPlan<'_>,
     probe: Option<&mut Probe>,
-    out: &mut Vec<V>,
-) -> Result<RingClip, TileError> {
-    clip_ring_by::<false, V>(ring, min, max, scratch, plan, probe, out)
+    piece: &mut PieceBuf<V>,
+) -> Result<Option<RingClip>, TileError> {
+    clip_ring_by::<false, V>(ring, min, max, scratch, plan, probe, piece)
 }
 
 /// [`clip_ring`] (`PLAIN`, ignoring `plan` and `probe`) and [`clip_ring_planned`] in one body, so the
@@ -801,8 +989,8 @@ fn clip_ring_by<const PLAIN: bool, V: PolyVertex>(
     scratch: &mut ClipScratch<V>,
     plan: &RingPlan<'_>,
     probe: Option<&mut Probe>,
-    out: &mut Vec<V>,
-) -> Result<RingClip, TileError> {
+    piece: &mut PieceBuf<V>,
+) -> Result<Option<RingClip>, TileError> {
     let ClipScratch {
         copy,
         crossings,
@@ -819,19 +1007,18 @@ fn clip_ring_by<const PLAIN: bool, V: PolyVertex>(
     };
     let m = pts.len();
     if m < 3 {
-        return Ok(RingClip::Outside);
+        return Ok(Some(RingClip::Outside));
     }
     u32::try_from(m).map_err(|_| TileError::GeometryTooLarge)?;
     if all_inside(pts, min, max) {
         // Every vertex is inside (most rings of small polygons): every edge touches, and the ring is
         // kept verbatim, as `close_ring` would. Reserved exactly: a fresh slicer's buffer needs no regrowth.
         if !PLAIN && probe.is_some() {
-            return Ok(RingClip::Clipped); // nothing outside the box
+            return Ok(Some(RingClip::Clipped)); // nothing outside the box
         }
-        out.reserve(m + 1);
-        out.extend_from_slice(pts);
-        out.push(pts[0]);
-        return Ok(RingClip::Clipped);
+        piece.reserve(m + 1);
+        piece.push_whole_ring(pts)?;
+        return Ok(Some(RingClip::Clipped));
     }
 
     // One pass over the edges. Each vertex's outcode is computed once and shared by its two edges: a
@@ -870,15 +1057,14 @@ fn clip_ring_by<const PLAIN: bool, V: PolyVertex>(
             point_in_distinct_ring(min, m, |i| pts[i].position()),
             "ray parity must agree with point-in-ring containment"
         );
-        return if inside {
+        return Ok(Some(if inside {
             if PLAIN || probe.is_none() {
-                tmp.mark(out.len(), 4);
-                push_fill_box(out, ring_orientation(pts), min, max)?;
+                piece.push_fill_box(ring_orientation(pts), min, max)?;
             }
-            Ok(RingClip::Covers)
+            RingClip::Covers
         } else {
-            Ok(RingClip::Outside)
-        };
+            RingClip::Outside
+        }));
     }
 
     // Signed crossings among edges `lo..hi` (both within `0..=m`).
@@ -905,13 +1091,16 @@ fn clip_ring_by<const PLAIN: bool, V: PolyVertex>(
         w
     };
     if PLAIN || *plan == RingPlan::PLAIN {
-        close_ring::<true, V>(pts, arcs, min, max, winding, &RingPlan::PLAIN, tmp, out)?;
+        // (The plain clip has no frame to miss.)
+        close_ring::<true, V>(pts, arcs, min, max, winding, &RingPlan::PLAIN, tmp, piece)?;
     } else if let Some(acc) = probe {
         arcs_points(pts, arcs, *plan, (min, max), acc);
-    } else {
-        close_ring::<false, V>(pts, arcs, min, max, winding, plan, tmp, out)?;
+    } else if close_ring::<false, V>(pts, arcs, min, max, winding, plan, tmp, piece)?
+        == Closed::FrameMissed
+    {
+        return Ok(None);
     }
-    Ok(RingClip::Clipped)
+    Ok(Some(RingClip::Clipped))
 }
 
 /// How a kept `ring` (at least 3 distinct vertices, see [`push_distinct`]) meets the box
@@ -988,6 +1177,7 @@ mod tests {
     use geo_types::Coord;
 
     use super::*;
+    use crate::vertex::Measured;
 
     fn c(x: i32, y: i32) -> Coord<i32> {
         Coord { x, y }
@@ -999,9 +1189,9 @@ mod tests {
 
     /// [`clip_ring`] into a fresh output, with how the ring met the tile.
     fn clip(ring: &[Coord<i32>]) -> (RingClip, Vec<Coord<i32>>) {
-        let mut out = Vec::new();
-        let rc = clip_ring(ring, MIN, MAX, &mut ClipScratch::new(), &mut out).unwrap();
-        (rc, out)
+        let mut piece = PieceBuf::new();
+        let rc = clip_ring(ring, MIN, MAX, &mut ClipScratch::new(), &mut piece).unwrap();
+        (rc, piece.verts().to_vec())
     }
 
     #[test]
@@ -1030,6 +1220,43 @@ mod tests {
         let mut two = vec![c(1, 1), c(1, 1), c(2, 3)];
         convex_hull(&mut two, &mut hull);
         assert_eq!(hull, [c(1, 1), c(2, 3)]);
+    }
+
+    #[test]
+    fn marks_are_exactly_the_synthetic_edges() {
+        // Input vertices carry 1, synthetic ones the default 0.
+        let input = |x, y| Measured::new(x, y, 1_u8);
+        let mut piece = PieceBuf::new();
+        piece.push_fill_box(Ordering::Less, MIN, MAX).unwrap();
+        // A hole: a detour through two corners, then the plain chord back to its first vertex.
+        piece.extend_input([input(3, 3), input(3, 12)]);
+        piece
+            .push_connector([Ok(c(10, 12)), Ok(c(10, 10))])
+            .unwrap();
+        piece.extend_input([input(6, 6), input(12, 3)]);
+        piece.push_connector([]).unwrap();
+        piece.end_ring().unwrap();
+        assert_eq!(piece.ring_ends(), [5, 12]);
+        let chord = 10;
+        let marked = |piece: &PieceBuf<Measured<u8>>| {
+            let v = piece.verts();
+            (0..v.len() - 1)
+                .filter(|&i| i + 1 != 5) // (no edge joins two rings)
+                .filter(|&i| v[i].m == 0 || v[i + 1].m == 0 || i == chord)
+                .map(|i| u32::try_from(i).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(piece.synthetic(), marked(&piece));
+        assert_eq!(piece.synthetic(), [0, 1, 2, 3, 6, 7, 8, 10]);
+        // Grown around the hole, the fill box keeps its length and its marks.
+        piece.grow_fill_box(MIN, MAX).unwrap();
+        assert_eq!(piece.verts()[0].position, c(-1, -1));
+        assert_eq!(piece.verts()[2].position, c(13, 13));
+        assert_eq!(piece.ring_ends(), [5, 12]);
+        assert_eq!(piece.synthetic(), marked(&piece));
+        // A new piece starts with nothing marked.
+        piece.clear();
+        assert!(piece.verts().is_empty() && piece.synthetic().is_empty());
     }
 
     #[test]
