@@ -602,15 +602,13 @@ impl<'s, V: PolyVertex, R: AsRef<[V]>> PolygonSlices<'s, V, R> {
         })
     }
 
-    /// Yield only the slices in tiles `min..=max` (columns `min.x..=max.x`, rows `min.y..=max.y`):
-    /// the same pieces as without it, and fill runs cut to those columns. Rows outside the window are
-    /// never swept and edge tiles outside it never built, so slicing a large polygon into a few tiles
-    /// costs loading it and sweeping those rows, not every tile it reaches. Call it before
-    /// [`next`](Self::next).
+    /// Yield only the slices in tiles `min..=max` (columns `min.x..=max.x`, rows `min.y..=max.y`).
+    /// Needs to be called before [`next`](Self::next).
     #[must_use]
     pub fn within(mut self, min: TileId, max: TileId) -> Self {
         debug_assert!(self.sweep.is_none(), "within() before the first next()");
-        (self.cols, self.rows) = (min.x..=max.x, min.y..=max.y);
+        self.cols = min.x..=max.x;
+        self.rows = min.y..=max.y;
         self
     }
 
