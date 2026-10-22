@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/nyurik/map-tile-toolkit/compare/v0.3.3...v0.3.4) - 2026-10-22
+
+### Other
+
+- *(deps)* bump the all-actions-version-updates group with 2 updates ([#45](https://github.com/nyurik/map-tile-toolkit/pull/45))
+
 ## [0.3.3](https://github.com/nyurik/map-tile-toolkit/compare/v0.3.2...v0.3.3) - 2026-10-18
 
 ### Added
