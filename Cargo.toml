@@ -30,7 +30,7 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
 geo-types = "0.7.19"
-hotpath = { version = "0.28.4", optional = true }
+hotpath = { version = "0.32.1", optional = true }
 thiserror = "2"
 
 [dev-dependencies]
@@ -41,7 +41,7 @@ insta = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 stats_alloc = "0.1"
 test_each_file = "0.3.7"
-wkt = "0.14"
+wkt = "0.15"
 
 # Release build with debug symbols, used by `just flamegraph-*` for readable profiles.
 [profile.profiling]
